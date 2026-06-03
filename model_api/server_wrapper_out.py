@@ -157,7 +157,8 @@ def _send_request(url: str, **kwargs: Any) -> dict:
         start_time = time.time()
         while True:
             try:
-                resp = requests.post(url, headers=headers, json=payload, timeout=1)
+                timeout = float(os.environ.get("ASCENT_REQUEST_TIMEOUT_SECONDS", "1"))
+                resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
                 if resp.status_code == 200:
                     result = resp.json()
                     break
