@@ -100,10 +100,9 @@ def send_request(url: str, **kwargs: Any) -> dict:
             break
         except Exception as e:
             if attempt == 9:
-                print(e)
-                exit()
+                raise RuntimeError(f"VLM request failed for {url}: {e}") from e
             else:
-                print(f"Error: {e}. Retrying in 20-30 seconds...")
+                print(f"Error while requesting {url}: {e}. Retrying in 20-30 seconds...")
                 time.sleep(20 + random.random() * 10)
 
     return response
@@ -163,7 +162,9 @@ def _send_request(url: str, **kwargs: Any) -> dict:
                     result = resp.json()
                     break
                 else:
-                    raise Exception("Request failed")
+                    raise Exception(
+                        f"Request failed status={resp.status_code} body={resp.text[:300]!r}"
+                    )
             except (
                 requests.exceptions.Timeout,
                 requests.exceptions.RequestException,
