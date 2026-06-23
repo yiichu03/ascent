@@ -33,12 +33,18 @@ from habitat_baselines.utils.info_dict import (
     extract_scalars_from_info as extract_scalars_from_info_habitat,
 )
 from ascent.utils import generate_video
+from ascent.decision_trace import DecisionTraceWriter
+from ascent.visual_capture import VisualCaptureWriter
 from omegaconf import OmegaConf
 from habitat_baselines.rl.ppo.evaluator import pause_envs ## For Habitat 3.0 
 from gym import spaces
 import time
 def extract_scalars_from_info(info: Dict[str, Any]) -> Dict[str, float]:
-    info_filtered = {k: v for k, v in info.items() if not isinstance(v, list)}
+    info_filtered = {
+        k: v
+        for k, v in info.items()
+        if not isinstance(v, (dict, list, tuple, np.ndarray))
+    }
     return extract_scalars_from_info_habitat(info_filtered)
 
 
@@ -188,6 +194,8 @@ class AscentTrainer(PPOTrainer):
         scene_stats = {}  # 用于记录每个场景的统计信息
 
         hab_vis = HabitatVis(self.envs.num_envs)
+        decision_trace_writer = DecisionTraceWriter.from_env(self.envs.num_envs)
+        visual_capture_writer = VisualCaptureWriter.from_env()
         goal_name = ["" for _ in range(self.envs.num_envs)]
         while len(stats_episodes) < (number_of_eval_episodes * evals_per_ep) and self.envs.num_envs > 0:
             current_episodes_info = self.envs.current_episodes()
@@ -257,6 +265,22 @@ class AscentTrainer(PPOTrainer):
             n_envs = self.envs.num_envs
             
             for i in range(n_envs):
+                step_policy_info = action_data.policy_info[i] if action_data.policy_info is not None else {}
+                decision_trace_writer.write_step(
+                    env_index=i,
+                    episode=current_episodes_info[i],
+                    policy_info=step_policy_info,
+                    info=infos[i],
+                    action=step_data[i],
+                    done=bool(dones[i]),
+                )
+                visual_capture_writer.write_step(
+                    episode=current_episodes_info[i],
+                    policy_info=step_policy_info,
+                    info=infos[i],
+                    action=step_data[i],
+                    done=bool(dones[i]),
+                )
                 if (
                     ep_eval_count[
                         (
@@ -342,6 +366,12 @@ class AscentTrainer(PPOTrainer):
                             "scene_id": current_episodes_info[i].scene_id,
                             "episode_id": current_episodes_info[i].episode_id
                         })
+                    decision_trace_writer.write_episode_end(
+                        env_index=i,
+                        episode=current_episodes_info[i],
+                        episode_stats=episode_stats,
+                        failure_cause=failure_cause,
+                    )
                     if len(self.config.habitat_baselines.eval.video_option) > 0:
                         if "vlm_response" in action_data.policy_info[i]:
                             rgb_frames[i] = hab_vis.flush_frames_with_rednet_vlm_input(failure_cause, i)
@@ -396,6 +426,8 @@ class AscentTrainer(PPOTrainer):
             )
 
         pbar.close()
+        decision_trace_writer.close()
+        visual_capture_writer.close()
 
         if "ZSOS_DONE_PATH" in os.environ:
             # Create an empty file at ZSOS_DONE_PATH to signal that the

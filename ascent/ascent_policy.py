@@ -69,7 +69,9 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         kwargs["camera_fov"] = sim_sensors_cfg.depth_sensor.hfov
         kwargs["image_width"] = sim_sensors_cfg.depth_sensor.width
         kwargs["image_height"] = sim_sensors_cfg.rgb_sensor.height
-        kwargs["visualize"] = len(config.habitat_baselines.eval.video_option) > 0
+        kwargs["visualize"] = len(config.habitat_baselines.eval.video_option) > 0 or os.environ.get(
+            "ASCENT_VISUAL_CAPTURE", ""
+        ).lower() in {"1", "true", "yes", "on"}
         # For Habitat 3.0
         kwargs["action_space"]= args_unused[-1]
         # 数据集类型
@@ -174,6 +176,9 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         self._try_to_navigate_step: List[int] = [0] * self._num_envs
         self.min_distance_xy: List[float] = [np.inf] * self._num_envs
         self.cur_frontier: List[np.ndarray] = [np.array([]) for _ in range(self._num_envs)] 
+        self._last_mode: List[str] = ["reset"] * self._num_envs
+        self._last_action: List[int] = [-1] * self._num_envs
+        self._last_explore_trace: List[Dict[str, Any]] = [{} for _ in range(self._num_envs)]
         
         
         # LLM Planner
@@ -214,6 +219,9 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
 
         self.min_distance_xy[env] = np.inf
         self.cur_frontier[env] = np.array([])
+        self._last_mode[env] = "reset"
+        self._last_action[env] = -1
+        self._last_explore_trace[env] = {}
 
         ## 辅助缓存和历史记录重置
         self.history_action[env].clear()
@@ -280,6 +288,76 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             "num_steps": self._num_steps[env],
             # "floor_num_steps": self._map_controller._obstacle_map[env]._floor_num_steps,
         }
+        frontier_decisions = getattr(self.llm_planner, "last_decision_trace", None)
+        if isinstance(frontier_decisions, list) and env < len(frontier_decisions):
+            frontier_decision = frontier_decisions[env]
+        else:
+            frontier_decision = {}
+        policy_info["decision_trace"] = {
+            "step": self._num_steps[env],
+            "mode": self._last_mode[env],
+            "action": self._last_action[env],
+            "robot_xy": self._observations_cache[env]["robot_xy"],
+            "robot_heading": self._observations_cache[env]["robot_heading"],
+            "floor_index": self._map_controller._cur_floor_index[env],
+            "floor_num": self._map_controller.floor_num[env],
+            "floor_num_steps": self._map_controller._obstacle_map[env]._floor_num_steps,
+            "target_detected": policy_info["target_detected"],
+            "stop_called": policy_info["stop_called"],
+            "nav_goal": self._last_goal[env],
+            "current_frontier": self.cur_frontier[env],
+            "stair_flag": self._map_controller._climb_stair_flag[env],
+            "climb_stair_over": self._map_controller._climb_stair_over[env],
+            "reach_stair": self._map_controller._reach_stair[env],
+            "reach_stair_centroid": self._map_controller._reach_stair_centroid[env],
+            "explore_trace": self._last_explore_trace[env],
+            "frontier_decision": frontier_decision,
+        }
+
+        visual_capture_enabled = os.environ.get("ASCENT_VISUAL_CAPTURE", "").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if visual_capture_enabled:
+            def det_json(detections: Any) -> Dict[str, Any]:
+                if detections is None:
+                    return {"num_detections": 0, "boxes": [], "logits": [], "phrases": []}
+                try:
+                    data = detections.to_json()
+                    data["num_detections"] = detections.num_detections
+                    return data
+                except Exception as exc:
+                    return {"error": repr(exc), "repr": repr(detections)}
+
+            def mask_summary(mask: Any) -> Dict[str, Any]:
+                arr = np.asarray(mask)
+                count = int(np.count_nonzero(arr))
+                if count == 0:
+                    return {"pixel_count": 0, "bbox_xyxy": []}
+                ys, xs = np.nonzero(arr)
+                return {
+                    "pixel_count": count,
+                    "bbox_xyxy": [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())],
+                }
+
+            policy_info["raw_rgb"] = self._observations_cache[env]["rgb"].copy()
+            policy_info["detector_trace"] = {
+                "target_object": self._map_controller._target_object[env],
+                "blip_cosine": float(self._map_controller._blip_cosine[env]),
+                "target_detections": det_json(self._map_controller.target_detection_list[env]),
+                "coco_detections": det_json(self._map_controller.coco_detection_list[env]),
+                "non_coco_detections": det_json(self._map_controller.non_coco_detection_list[env]),
+                "object_mask": mask_summary(self._map_controller._object_masks[env]),
+                "person_mask": mask_summary(self._map_controller._person_masks[env]),
+                "stair_mask": mask_summary(self._map_controller._stair_masks[env]),
+            }
+            target_detections = self._map_controller.target_detection_list[env]
+            if target_detections is not None and target_detections.num_detections > 0:
+                annotated = target_detections.annotated_frame
+                if annotated is not None:
+                    policy_info["target_detection_annotated_rgb"] = annotated
 
         # 若不需要可视化,直接返回
         if not self._visualize:
@@ -290,7 +368,7 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         annotated_depth = cv2.cvtColor(annotated_depth.astype(np.uint8), cv2.COLOR_GRAY2RGB)
 
         # 定义所有需要处理的掩膜和对应的标注帧
-        annotated_rgb = self._observations_cache[env]["rgb"]
+        annotated_rgb = self._observations_cache[env]["rgb"].copy()
         masks_info = [
             (self._map_controller._object_masks[env], (255, 0, 0)), # object: 红色
             (self._map_controller._person_masks[env], (255, 105, 180)), # person: 粉色
@@ -615,6 +693,8 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
 
             # AFTER all potential overrides, append the FINAL action that will be executed
             self.history_action[env].append(action_numpy)
+            self._last_mode[env] = mode
+            self._last_action[env] = int(action_numpy)
             
             print(f"Env: {env} | Step: {self._num_steps[env]} | Floor_step: {self._map_controller._obstacle_map[env]._floor_num_steps} | Mode: {mode} | Stair_flag: {self._map_controller._climb_stair_flag[env]} | Action: {action_numpy}")
             if not self._map_controller._climb_stair_over[env]:
@@ -651,6 +731,12 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         """
         initial_frontiers = self._observations_cache[env]["frontier_sensor"]
         frontiers = [f for f in initial_frontiers if tuple(f) not in self._map_controller._obstacle_map[env]._disabled_frontiers]
+        self._last_explore_trace[env] = {
+            "initial_frontier_count": len(initial_frontiers),
+            "active_frontier_count": len(frontiers),
+            "disabled_frontier_count": len(self._map_controller._obstacle_map[env]._disabled_frontiers),
+            "no_frontier": bool(np.array_equal(frontiers, np.zeros((1, 2))) or len(frontiers) == 0),
+        }
 
         # 场景一：当前楼层没有有效 Frontier (包括初始为全零或列表为空的情况)
         if np.array_equal(frontiers, np.zeros((1, 2))) or len(frontiers) == 0:
@@ -674,9 +760,11 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 action = self._navigate_stair_if_unexplored_floor(observations, env, 'down')
 
             if action is not None:
+                self._last_explore_trace[env]["no_frontier_action"] = "stair_navigation"
                 return action
             else:
                 print(f"Environment {env}: In all floors, no unexplored stairs or frontiers found, stopping.")
+                self._last_explore_trace[env]["no_frontier_action"] = "stop"
                 return self._stop_action.to(masks.device)
 
         # 场景二：当前楼层有有效 Frontier，使用 LLM 规划器选择最佳 Frontier
@@ -702,6 +790,8 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             
             # 执行点导航到最佳 Frontier
             self.cur_frontier[env] = best_frontier
+            self._last_explore_trace[env]["selected_frontier"] = best_frontier
+            self._last_explore_trace[env]["selected_value"] = best_value
             pointnav_action = self._pointnav(observations, self.cur_frontier[env], stop=False, env=env, stop_radius=self._pointnav_stop_radius)
             
             # 如果点导航动作是停止（0），则强制前进（1），以避免卡死
