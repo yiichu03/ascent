@@ -6,6 +6,7 @@ import os
 from ascent.mapping.object_point_cloud_map import ObjectPointCloudMap
 from ascent.mapping.obstacle_map import ObstacleMap
 from ascent.mapping.value_map import ValueMap
+from ascent import zero_shot_controls as zs
 from constants import (
     PROMPT_SEPARATOR,
 )
@@ -770,8 +771,11 @@ class Map_Controller:
                 # 目标导航双重检查逻辑
                 if try_to_navigate[env] and not self._double_check_goal[env]:
                     match_score = self._blip_cosine[env]
+                    double_check_threshold = 0.15
+                    if zs.enabled("ZS002_STRICT_STOP_CONFIRM"):
+                        double_check_threshold = zs.float_env("ASCENT_ZS_STRICT_BLIP_THRESHOLD", 0.23)
                     print(f"Blip2 match score: {match_score}") # 可以改为日志
-                    if match_score >= 0.15:
+                    if match_score >= double_check_threshold:
                         self._double_check_goal[env] = True
                         print("Double check success!!!") # 可以改为日志
 

@@ -7,6 +7,7 @@ from model_api.qwen25_out import Qwen2_5Client
 from ascent.mapping.object_point_cloud_map import ObjectPointCloudMap
 from ascent.mapping.obstacle_map import ObstacleMap
 from ascent.mapping.value_map import ValueMap
+from ascent import zero_shot_controls as zs
 import json
 from skimage.metrics import structural_similarity as ssim
 from constants import (
@@ -42,6 +43,7 @@ class Ascent_LLM_Planner:
         with open('statistic_priors/knowledge_graph.json', 'r') as f:
             self.knowledge_graph = nx.node_link_graph(json.load(f))
         self.floor_num = [1 for _ in range(self._num_envs)]
+        self.last_decision_trace = [{} for _ in range(self._num_envs)]
     def reset(self, env):
         # 防止来回走动
         self._force_frontier[env] = np.zeros(2)
@@ -53,6 +55,7 @@ class Ascent_LLM_Planner:
         self.multi_floor_ask_step[env] = 0
         self.frontier_rgb_list[env] = []
         self.floor_num[env] = 1
+        self.last_decision_trace[env] = {}
 
     def _get_best_frontier_with_llm(
             self,
@@ -87,20 +90,27 @@ class Ascent_LLM_Planner:
             robot_xy = observations_cache[env]["robot_xy"]
             
             best_frontier, best_value = None, None
+            selection_source = "unset"
+            skip_local_bias = zs.enabled("ZS006_GLOBAL_FRONTIER_DIVERSITY")
 
             # 2. 处理强制前沿
-            best_frontier, best_value = self._try_force_frontier(sorted_pts, sorted_values, env)
-            if best_frontier is not None:
-                print(f"Force Move.")
+            if not skip_local_bias:
+                best_frontier, best_value = self._try_force_frontier(sorted_pts, sorted_values, env)
+                if best_frontier is not None:
+                    selection_source = "force_frontier"
+                    print(f"Force Move.")
+            else:
+                obstacle_map[env]._neighbor_search = False
 
             # 3. 处理近邻前沿 (如果未选中强制前沿且满足条件)
             # 只有在没有强制前沿，并且第一次探索完成后才尝试近邻
-            if best_frontier is None and obstacle_map[env]._finish_first_explore:
+            if best_frontier is None and obstacle_map[env]._finish_first_explore and not skip_local_bias:
                 best_frontier_nearby, best_value_nearby, activated_neighbor_search = self._try_nearby_frontier(sorted_pts, sorted_values, robot_xy, env)
 
                 if activated_neighbor_search:
                     obstacle_map[env]._neighbor_search = True
                     best_frontier, best_value = best_frontier_nearby, best_value_nearby
+                    selection_source = "nearby_frontier"
                     print(f"Frontier {best_frontier} is very close (distance: {np.linalg.norm(best_frontier - robot_xy):.2f}m), selecting it.")
                 else:
                     # 如果尝试近邻搜索但没有找到合适的近邻前沿，则将 _finish_first_explore 设为 False
@@ -112,10 +122,26 @@ class Ascent_LLM_Planner:
             if best_frontier is None:
                 best_frontier, best_value = self._decide_frontier_with_llm(obstacle_map, object_map, sorted_pts, sorted_values, env, topk, use_multi_floor, 
                                                                            floor_num, cur_floor_index, num_steps,obstacle_map_list,object_map_list)
+                selection_source = "llm_or_value"
 
             # 5. 处理前沿点粘滞/循环检测和禁用
             # 这一部分逻辑相对独立且复杂，可以封装
             self._handle_frontier_stick_and_disable(best_frontier, robot_xy, env, last_frontier_distance, frontier_stick_step, obstacle_map)
+
+            self.last_decision_trace[env] = {
+                "variant": zs.variant(),
+                "case_id": zs.case_id(),
+                "selection_source": selection_source,
+                "skip_local_bias": bool(skip_local_bias),
+                "selected_frontier": best_frontier,
+                "selected_value": best_value,
+                "frontier_topk": sorted_pts[:topk],
+                "frontier_values": sorted_values[:topk],
+                "last_frontier": self._last_frontier[env],
+                "force_frontier": self._force_frontier[env],
+                "disabled_frontier_count": len(obstacle_map[env]._disabled_frontiers),
+                "sticky_step": frontier_stick_step[env],
+            }
 
             # 6. 更新状态并返回
             self._last_value[env] = best_value
@@ -213,6 +239,9 @@ class Ascent_LLM_Planner:
 
         best_frontier_idx = 0 # 默认值
 
+        if zs.enabled_for_case("ATTR006_NO_MULTIFLOOR_LLM", "hm3d_r0_006"):
+            use_multi_floor = False
+
         # 多楼层决策
         if floor_num[env] > 1 and num_steps[env] - self.multi_floor_ask_step[env] >= MULTI_FLOOR_ASK_STEP_THRESHOLD and obstacle_map[env]._floor_num_steps >= FLOOR_EXP_STEP_THRESHOLD and use_multi_floor:
             self.multi_floor_ask_step[env] = num_steps[env]
@@ -249,7 +278,10 @@ class Ascent_LLM_Planner:
                     frontier_stick_step[env] = 0
                     last_frontier_distance[env] = current_distance
                 else:
-                    if frontier_stick_step[env] >= STICKY_FRONTIER_STEP_THRESHOLD:
+                    sticky_threshold = STICKY_FRONTIER_STEP_THRESHOLD
+                    if zs.enabled("ZS004_FAST_FRONTIER_RETIRE") or zs.enabled_for_case("ATTR006_FRONTIER_STRICT", "hm3d_r0_006"):
+                        sticky_threshold = zs.int_env("ASCENT_ZS_FRONTIER_STICKY_STEPS", 8)
+                    if frontier_stick_step[env] >= sticky_threshold:
                         obstacle_map[env]._disabled_frontiers.add(tuple(current_best_frontier))
                         print(f"Frontier {current_best_frontier} is disabled due to no movement.")
                         frontier_stick_step[env] = 0
@@ -266,7 +298,10 @@ class Ascent_LLM_Planner:
         obstacle_map[env]._best_frontier_selection_count.setdefault(frontier_tuple, 0)
         if not np.array_equal(self._last_frontier[env], current_best_frontier): # 只有非连续选中才增加计数
             obstacle_map[env]._best_frontier_selection_count[frontier_tuple] += 1
-            if obstacle_map[env]._best_frontier_selection_count[frontier_tuple] >= REPEATED_SELECTION_THRESHOLD:
+            repeated_threshold = REPEATED_SELECTION_THRESHOLD
+            if zs.enabled("ZS004_FAST_FRONTIER_RETIRE") or zs.enabled_for_case("ATTR006_FRONTIER_STRICT", "hm3d_r0_006"):
+                repeated_threshold = zs.int_env("ASCENT_ZS_FRONTIER_REPEAT_STEPS", 6)
+            if obstacle_map[env]._best_frontier_selection_count[frontier_tuple] >= repeated_threshold:
                 obstacle_map[env]._disabled_frontiers.add(frontier_tuple)
                 print(f"Frontier {current_best_frontier} is disabled due to repeated non-consecutive selection.")
 
