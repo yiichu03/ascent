@@ -8,6 +8,7 @@ from ascent.mapping.object_point_cloud_map import ObjectPointCloudMap
 from ascent.mapping.obstacle_map import ObstacleMap
 from ascent.mapping.value_map import ValueMap
 from ascent import zero_shot_controls as zs
+from ascent import zero_shot_adapters as zs_adapters
 import json
 from skimage.metrics import structural_similarity as ssim
 from constants import (
@@ -124,6 +125,24 @@ class Ascent_LLM_Planner:
                                                                            floor_num, cur_floor_index, num_steps,obstacle_map_list,object_map_list)
                 selection_source = "llm_or_value"
 
+            paradigm_trace = {}
+            if best_frontier is not None and best_value not in (-100, -200):
+                best_frontier, best_value, selection_source, paradigm_trace = zs_adapters.maybe_override_frontier(
+                    self,
+                    observations_cache,
+                    obstacle_map,
+                    value_map,
+                    object_map,
+                    sorted_pts,
+                    sorted_values,
+                    env,
+                    topk,
+                    best_frontier,
+                    best_value,
+                    selection_source,
+                    frontier_stick_step=frontier_stick_step,
+                )
+
             # 5. 处理前沿点粘滞/循环检测和禁用
             # 这一部分逻辑相对独立且复杂，可以封装
             self._handle_frontier_stick_and_disable(best_frontier, robot_xy, env, last_frontier_distance, frontier_stick_step, obstacle_map)
@@ -141,6 +160,7 @@ class Ascent_LLM_Planner:
                 "force_frontier": self._force_frontier[env],
                 "disabled_frontier_count": len(obstacle_map[env]._disabled_frontiers),
                 "sticky_step": frontier_stick_step[env],
+                "paradigm_sweep": paradigm_trace,
             }
 
             # 6. 更新状态并返回

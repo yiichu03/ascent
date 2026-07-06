@@ -32,6 +32,7 @@ from constants import (
 from ascent.llm_planner import Ascent_LLM_Planner
 from ascent.map_controller import Map_Controller
 from ascent import zero_shot_controls as zs
+from ascent import zero_shot_adapters as zs_adapters
 from ascent.utils import (
     xyz_yaw_pitch_roll_to_tf_matrix,
     check_stairs_in_upper_50_percent,
@@ -227,6 +228,7 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         self._last_explore_trace[env] = {}
         self._zs_last_target_goal[env] = None
         self._zs_last_target_step[env] = -1
+        zs_adapters.reset_env(env)
 
         ## 辅助缓存和历史记录重置
         self.history_action[env].clear()
@@ -322,6 +324,14 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 "blip_cosine": float(self._map_controller._blip_cosine[env]),
                 "target_lock_age": int(self._num_steps[env] - self._zs_last_target_step[env]) if self._zs_last_target_step[env] >= 0 else None,
             }),
+            "paradigm_sweep": zs_adapters.compose_step_trace(
+                env,
+                frontier_decision,
+                self._last_mode[env],
+                self._last_action[env],
+                self._called_stop[env],
+                getattr(self._map_controller, "cur_dis_to_goal", [None] * self._num_envs)[env],
+            ),
         }
 
         visual_capture_enabled = os.environ.get("ASCENT_VISUAL_CAPTURE", "").lower() in {
@@ -981,6 +991,14 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 self._map_controller._climb_stair_flag[env] = climb_flag_value
                 self._map_controller._stair_frontier[env] = getattr(self._map_controller._obstacle_map[env], stair_frontiers_attr)
                 print(f"Environment {env}: Navigating {direction}stairs to unexplored floor.")
+                transition_trace = zs_adapters.transition_event(
+                    env,
+                    direction,
+                    self._observations_cache[env]["robot_xy"],
+                    self._map_controller._stair_frontier[env],
+                    self._map_controller._stair_frontier[env][0],
+                )
+                zs_adapters.remember_policy_event(env, transition_trace)
                 # 假设 _stair_frontier[env] 包含了多个前沿，取第一个作为目标
                 return self._pointnav(observations, self._map_controller._stair_frontier[env][0], stop=False, env=env)
         
@@ -1107,6 +1125,18 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     )
                 if zs.enabled("ZS001_TARGET_EVIDENCE_HOLD") and self._zs_recent_target_evidence(env, zs.int_env("ASCENT_ZS_TARGET_STOP_GRACE_STEPS", 30)):
                     confirm_stop = True
+                verify_trace = zs_adapters.maybe_defer_stop_for_verification(
+                    env,
+                    self._num_steps[env],
+                    goal,
+                    self._map_controller.cur_dis_to_goal[env],
+                    self._map_controller._blip_cosine[env],
+                    confirm_stop,
+                )
+                if verify_trace is not None:
+                    zs_adapters.remember_policy_event(env, verify_trace)
+                    if verify_trace.get("verification_event") == "defer_stop_for_active_verify":
+                        return get_action_tensor(MOVE_FORWARD, device=ori_masks.device)
                 if confirm_stop: # self._try_to_navigate_step[env] < 5 or 
                     self._called_stop[env] = True
                     # self._map_controller._obstacle_map[env].visualize_and_save_frontiers() ## for debug
