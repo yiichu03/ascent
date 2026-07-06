@@ -318,6 +318,7 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             "explore_trace": self._last_explore_trace[env],
             "frontier_decision": frontier_decision,
             "zero_shot": zs.active_metadata({
+                "episode": zs.current_episode_metadata(env),
                 "blip_cosine": float(self._map_controller._blip_cosine[env]),
                 "target_lock_age": int(self._num_steps[env] - self._zs_last_target_step[env]) if self._zs_last_target_step[env] >= 0 else None,
             }),
@@ -464,98 +465,98 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             self._policy_info.append({})
 
 
-def _get_target_object_location(self, position: np.ndarray, env: int = 0) -> Union[None, np.ndarray]:
-    target_object = self._map_controller._target_object[env]
-    actual_goal = None
-    if self._map_controller._object_map[env].has_object(target_object):
-        actual_goal = self._map_controller._object_map[env].get_best_object(target_object, position)
+    def _get_target_object_location(self, position: np.ndarray, env: int = 0) -> Union[None, np.ndarray]:
+        target_object = self._map_controller._target_object[env]
+        actual_goal = None
+        if self._map_controller._object_map[env].has_object(target_object):
+            actual_goal = self._map_controller._object_map[env].get_best_object(target_object, position)
 
-    if actual_goal is not None:
-        self._zs_last_target_goal[env] = np.asarray(actual_goal).copy()
-        self._zs_last_target_step[env] = self._num_steps[env]
+        if actual_goal is not None:
+            self._zs_last_target_goal[env] = np.asarray(actual_goal).copy()
+            self._zs_last_target_step[env] = self._num_steps[env]
 
-    if zs.enabled_for_case("ATTR006_OBJECT_OFF", "hm3d_r0_006"):
-        return None
-
-    if actual_goal is not None and zs.enabled("ZS003_ROOM_PRIOR_TARGET_GATE"):
-        if not self._zs_room_prior_allows_target(env):
+        if zs.enabled_for_case("ATTR006_OBJECT_OFF", "hm3d_r0_006"):
             return None
 
-    if actual_goal is not None:
-        return actual_goal
+        if actual_goal is not None and zs.enabled("ZS003_ROOM_PRIOR_TARGET_GATE"):
+            if not self._zs_room_prior_allows_target(env):
+                return None
 
-    if zs.enabled("ZS001_TARGET_EVIDENCE_HOLD") and self._zs_recent_target_evidence(env):
-        return self._zs_last_target_goal[env]
+        if actual_goal is not None:
+            return actual_goal
 
-    return None
+        if zs.enabled("ZS001_TARGET_EVIDENCE_HOLD") and self._zs_recent_target_evidence(env):
+            return self._zs_last_target_goal[env]
 
-def _zs_recent_target_evidence(self, env: int, steps: Optional[int] = None) -> bool:
-    if self._zs_last_target_step[env] < 0 or self._zs_last_target_goal[env] is None:
-        return False
-    max_age = steps if steps is not None else zs.int_env("ASCENT_ZS_TARGET_HOLD_STEPS", 30)
-    age = self._num_steps[env] - self._zs_last_target_step[env]
-    return 0 <= age <= max_age
+        return None
 
-def _zs_room_prior_allows_target(self, env: int) -> bool:
-    target = self._map_controller._target_object[env].split("|")[0].lower()
-    plausible_rooms = {
-        "bed": {"bedroom", "bedchamber", "hotel_room", "childs_room"},
-        "sofa": {"living_room", "rec_room", "office", "bedroom"},
-        "couch": {"living_room", "rec_room", "office", "bedroom"},
-        "chair": {"dining_room", "living_room", "office", "bedroom", "kitchen"},
-        "toilet": {"bathroom"},
-        "bathtub": {"bathroom"},
-        "tv_monitor": {"living_room", "bedroom", "rec_room", "office"},
-        "plant": {"living_room", "office", "hall", "dining_room", "bedroom"},
-        "table": {"dining_room", "living_room", "office", "kitchen", "rec_room"},
-    }.get(target)
-    if not plausible_rooms:
-        return True
+    def _zs_recent_target_evidence(self, env: int, steps: Optional[int] = None) -> bool:
+        if self._zs_last_target_step[env] < 0 or self._zs_last_target_goal[env] is None:
+            return False
+        max_age = steps if steps is not None else zs.int_env("ASCENT_ZS_TARGET_HOLD_STEPS", 30)
+        age = self._num_steps[env] - self._zs_last_target_step[env]
+        return 0 <= age <= max_age
 
-    rooms_raw = getattr(self._map_controller._object_map[env], "this_floor_rooms", set()) or set()
-    rooms = {str(room).lower().replace(" ", "_") for room in rooms_raw if str(room).strip()}
-    if not rooms:
-        return True
-    if rooms & plausible_rooms:
-        return True
-    return self._map_controller._blip_cosine[env] >= zs.float_env("ASCENT_ZS_ROOM_GATE_BLIP_THRESHOLD", 0.25)
+    def _zs_room_prior_allows_target(self, env: int) -> bool:
+        target = self._map_controller._target_object[env].split("|")[0].lower()
+        plausible_rooms = {
+            "bed": {"bedroom", "bedchamber", "hotel_room", "childs_room"},
+            "sofa": {"living_room", "rec_room", "office", "bedroom"},
+            "couch": {"living_room", "rec_room", "office", "bedroom"},
+            "chair": {"dining_room", "living_room", "office", "bedroom", "kitchen"},
+            "toilet": {"bathroom"},
+            "bathtub": {"bathroom"},
+            "tv_monitor": {"living_room", "bedroom", "rec_room", "office"},
+            "plant": {"living_room", "office", "hall", "dining_room", "bedroom"},
+            "table": {"dining_room", "living_room", "office", "kitchen", "rec_room"},
+        }.get(target)
+        if not plausible_rooms:
+            return True
 
-def _apply_zero_shot_stair_suppression(self) -> None:
-    if not zs.enabled_for_case("ATTR006_STAIR_OFF", "hm3d_r0_006"):
-        return
-    for env in range(self._num_envs):
-        obstacle_map = self._map_controller._obstacle_map[env]
-        for direction in ("up", "down"):
-            setattr(obstacle_map, f"_has_{direction}_stair", False)
-            setattr(obstacle_map, f"_explored_{direction}_stair", True)
-            stair_map = getattr(obstacle_map, f"_{direction}_stair_map", None)
-            if stair_map is not None:
-                stair_map.fill(0)
-            setattr(obstacle_map, f"_{direction}_stair_frontiers", np.empty((0, 2)))
-        self._map_controller._climb_stair_over[env] = True
-        self._map_controller._reach_stair[env] = False
-        self._map_controller._reach_stair_centroid[env] = False
-        self._map_controller._climb_stair_flag[env] = 0
-        self._map_controller._get_close_to_stair_step[env] = 0
-        self._map_controller._frontier_stick_step[env] = 0
+        rooms_raw = getattr(self._map_controller._object_map[env], "this_floor_rooms", set()) or set()
+        rooms = {str(room).lower().replace(" ", "_") for room in rooms_raw if str(room).strip()}
+        if not rooms:
+            return True
+        if rooms & plausible_rooms:
+            return True
+        return self._map_controller._blip_cosine[env] >= zs.float_env("ASCENT_ZS_ROOM_GATE_BLIP_THRESHOLD", 0.25)
 
-def _zs_stair_fast_recovery_enabled(self) -> bool:
-    return zs.enabled("ZS005_STAIR_FAST_RECOVERY")
+    def _apply_zero_shot_stair_suppression(self) -> None:
+        if not zs.enabled_for_case("ATTR006_STAIR_OFF", "hm3d_r0_006"):
+            return
+        for env in range(self._num_envs):
+            obstacle_map = self._map_controller._obstacle_map[env]
+            for direction in ("up", "down"):
+                setattr(obstacle_map, f"_has_{direction}_stair", False)
+                setattr(obstacle_map, f"_explored_{direction}_stair", True)
+                stair_map = getattr(obstacle_map, f"_{direction}_stair_map", None)
+                if stair_map is not None:
+                    stair_map.fill(0)
+                setattr(obstacle_map, f"_{direction}_stair_frontiers", np.empty((0, 2)))
+            self._map_controller._climb_stair_over[env] = True
+            self._map_controller._reach_stair[env] = False
+            self._map_controller._reach_stair_centroid[env] = False
+            self._map_controller._climb_stair_flag[env] = 0
+            self._map_controller._get_close_to_stair_step[env] = 0
+            self._map_controller._frontier_stick_step[env] = 0
 
-def _zs_stair_close_limits(self) -> Tuple[float, int, int]:
-    if self._zs_stair_fast_recovery_enabled():
-        return (
-            zs.float_env("ASCENT_ZS_STAIR_STICK_DISTANCE", 0.25),
-            zs.int_env("ASCENT_ZS_STAIR_STICK_STEPS", 12),
-            zs.int_env("ASCENT_ZS_STAIR_CLOSE_STEPS", 24),
-        )
-    return 0.3, 30, 60
+    def _zs_stair_fast_recovery_enabled(self) -> bool:
+        return zs.enabled("ZS005_STAIR_FAST_RECOVERY")
 
-def _zs_climb_pause_limit(self) -> int:
-    return zs.int_env("ASCENT_ZS_CLIMB_PAUSE_LIMIT", 18) if self._zs_stair_fast_recovery_enabled() else 30
+    def _zs_stair_close_limits(self) -> Tuple[float, int, int]:
+        if self._zs_stair_fast_recovery_enabled():
+            return (
+                zs.float_env("ASCENT_ZS_STAIR_STICK_DISTANCE", 0.25),
+                zs.int_env("ASCENT_ZS_STAIR_STICK_STEPS", 12),
+                zs.int_env("ASCENT_ZS_STAIR_CLOSE_STEPS", 24),
+            )
+        return 0.3, 30, 60
 
-def _zs_climb_disable_end_limit(self) -> int:
-    return zs.int_env("ASCENT_ZS_CLIMB_DISABLE_END_STEPS", 8) if self._zs_stair_fast_recovery_enabled() else 15
+    def _zs_climb_pause_limit(self) -> int:
+        return zs.int_env("ASCENT_ZS_CLIMB_PAUSE_LIMIT", 18) if self._zs_stair_fast_recovery_enabled() else 30
+
+    def _zs_climb_disable_end_limit(self) -> int:
+        return zs.int_env("ASCENT_ZS_CLIMB_DISABLE_END_STEPS", 8) if self._zs_stair_fast_recovery_enabled() else 15
 
     def act(
         self,

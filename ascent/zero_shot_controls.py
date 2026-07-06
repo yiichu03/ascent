@@ -1,6 +1,8 @@
 import os
 from typing import Any, Dict, Iterable, Optional
 
+_CURRENT_EPISODES: Dict[int, Dict[str, Any]] = {}
+
 
 def _clean(value: Optional[str]) -> str:
     return (value or "").strip()
@@ -34,6 +36,19 @@ def case_is(*names: str) -> bool:
 
 def enabled_for_case(name: str, *case_names: str) -> bool:
     return enabled(name) and case_is(*case_names)
+
+
+def set_current_episodes(episodes: Any) -> None:
+    _CURRENT_EPISODES.clear()
+    for env_index, episode in enumerate(episodes or []):
+        _CURRENT_EPISODES[env_index] = {
+            "scene_id": getattr(episode, "scene_id", ""),
+            "episode_id": getattr(episode, "episode_id", ""),
+        }
+
+
+def current_episode_metadata(env_index: int) -> Dict[str, Any]:
+    return dict(_CURRENT_EPISODES.get(env_index, {}))
 
 
 def float_env(name: str, default: float) -> float:

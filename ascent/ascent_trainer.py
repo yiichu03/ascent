@@ -35,6 +35,7 @@ from habitat_baselines.utils.info_dict import (
 from ascent.utils import generate_video
 from ascent.decision_trace import DecisionTraceWriter
 from ascent.visual_capture import VisualCaptureWriter
+from ascent import zero_shot_controls as zs
 from omegaconf import OmegaConf
 from habitat_baselines.rl.ppo.evaluator import pause_envs ## For Habitat 3.0 
 from gym import spaces
@@ -199,7 +200,8 @@ class AscentTrainer(PPOTrainer):
         goal_name = ["" for _ in range(self.envs.num_envs)]
         while len(stats_episodes) < (number_of_eval_episodes * evals_per_ep) and self.envs.num_envs > 0:
             current_episodes_info = self.envs.current_episodes()
-            
+            zs.set_current_episodes(current_episodes_info)
+
             with inference_mode():
                 action_data = self._agent.actor_critic.act(
                     batch,
@@ -207,7 +209,6 @@ class AscentTrainer(PPOTrainer):
                     prev_actions,
                     not_done_masks,
                     deterministic=False,
-                    current_episodes_info =current_episodes_info,
                 )
                 if "VLFM_RECORD_ACTIONS_DIR" in os.environ:
                     action_id = action_data.actions.cpu()[0].item()
