@@ -754,17 +754,63 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     self._map_controller._obstacle_map[env]._done_initializing = True
                     mode = "initialize"
                     pointnav_action = self._initialize(env, masks)
-                elif goal is None:
-                    if self._map_controller._obstacle_map[env]._look_for_downstair_flag:
-                        mode = "look_for_downstair"
-                        pointnav_action = self._look_for_downstair(observations, env, masks)
-                    else:
-                        mode = "explore"
-                        pointnav_action = self._explore(observations, env, masks)
                 else:
-                    mode = "navigate"
-                    self._try_to_navigate[env] = True
-                    pointnav_action = self._navigate(observations, goal[:2], stop=True, env=env, ori_masks=masks)
+                    target_detected_now = self._map_controller._object_map[env].has_object(self._map_controller._target_object[env])
+                    up_frontiers = getattr(self._map_controller._obstacle_map[env], "_up_stair_frontiers", np.array([]))
+                    floor_probe_trace = zs_adapters.floor_probe_policy(
+                        env,
+                        self._num_steps[env],
+                        self._map_controller._cur_floor_index[env],
+                        self._map_controller.floor_num[env],
+                        self._map_controller._obstacle_map[env]._floor_num_steps,
+                        getattr(self._map_controller._obstacle_map[env], "_has_up_stair", False),
+                        len(up_frontiers),
+                        target_detected_now,
+                        self._map_controller._climb_stair_over[env],
+                    )
+                    if floor_probe_trace is not None:
+                        zs_adapters.remember_policy_event(env, floor_probe_trace)
+                        event = floor_probe_trace.get("floor_probe_event")
+                        if event in {"navigate_upstairs", "navigate_upstairs_fast_recovery", "mark_current_floor_explored_and_up"}:
+                            if event == "mark_current_floor_explored_and_up":
+                                self._map_controller._obstacle_map[env]._this_floor_explored = True
+                            if event == "navigate_upstairs_fast_recovery":
+                                self._map_controller._obstacle_map[env]._climb_stair_paused_step = 0
+                            maybe_action = self._navigate_stair_if_unexplored_floor(observations, env, 'up')
+                            if maybe_action is not None:
+                                mode = "floor_probe_upstairs"
+                                pointnav_action = maybe_action
+                            else:
+                                mode = "explore"
+                                pointnav_action = self._explore(observations, env, masks)
+                        elif event == "mark_current_floor_explored":
+                            self._map_controller._obstacle_map[env]._this_floor_explored = True
+                            mode = "explore"
+                            pointnav_action = self._explore(observations, env, masks)
+                        elif event == "ignore_target":
+                            mode = "floor_probe_ignore_target_explore"
+                            pointnav_action = self._explore(observations, env, masks)
+                        elif event == "look_up":
+                            mode = "floor_probe_look_up"
+                            self._pitch_angle[env] += self._pitch_angle_offset
+                            pointnav_action = get_action_tensor(LOOK_UP, device=masks.device)
+                        elif event == "turn_left":
+                            mode = "floor_probe_scan"
+                            pointnav_action = get_action_tensor(TURN_LEFT, device=masks.device)
+                        else:
+                            mode = "explore"
+                            pointnav_action = self._explore(observations, env, masks)
+                    elif goal is None:
+                        if self._map_controller._obstacle_map[env]._look_for_downstair_flag:
+                            mode = "look_for_downstair"
+                            pointnav_action = self._look_for_downstair(observations, env, masks)
+                        else:
+                            mode = "explore"
+                            pointnav_action = self._explore(observations, env, masks)
+                    else:
+                        mode = "navigate"
+                        self._try_to_navigate[env] = True
+                        pointnav_action = self._navigate(observations, goal[:2], stop=True, env=env, ori_masks=masks)
 
             if pointnav_action is None:
                 action_numpy = 0
