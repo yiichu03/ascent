@@ -551,7 +551,7 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             self._map_controller._frontier_stick_step[env] = 0
 
     def _zs_stair_fast_recovery_enabled(self) -> bool:
-        return zs.enabled("ZS005_STAIR_FAST_RECOVERY")
+        return zs.enabled("ZS005_STAIR_FAST_RECOVERY") or zs_adapters.family() in {"D06", "D09"}
 
     def _zs_stair_close_limits(self) -> Tuple[float, int, int]:
         if self._zs_stair_fast_recovery_enabled():
@@ -771,11 +771,13 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     if floor_probe_trace is not None:
                         zs_adapters.remember_policy_event(env, floor_probe_trace)
                         event = floor_probe_trace.get("floor_probe_event")
-                        if event in {"navigate_upstairs", "navigate_upstairs_fast_recovery", "mark_current_floor_explored_and_up"}:
+                        if event in {"navigate_upstairs", "navigate_upstairs_fast_recovery", "mark_current_floor_explored_and_up", "block_downstairs_and_up"}:
                             if event == "mark_current_floor_explored_and_up":
                                 self._map_controller._obstacle_map[env]._this_floor_explored = True
-                            if event == "navigate_upstairs_fast_recovery":
+                            if event in {"navigate_upstairs_fast_recovery", "block_downstairs_and_up"}:
                                 self._map_controller._obstacle_map[env]._climb_stair_paused_step = 0
+                            if event == "block_downstairs_and_up":
+                                self._map_controller._obstacle_map[env]._explored_down_stair = True
                             maybe_action = self._navigate_stair_if_unexplored_floor(observations, env, 'up')
                             if maybe_action is not None:
                                 mode = "floor_probe_upstairs"
@@ -785,6 +787,10 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                                 pointnav_action = self._explore(observations, env, masks)
                         elif event == "mark_current_floor_explored":
                             self._map_controller._obstacle_map[env]._this_floor_explored = True
+                            mode = "explore"
+                            pointnav_action = self._explore(observations, env, masks)
+                        elif event == "block_downstairs":
+                            self._map_controller._obstacle_map[env]._explored_down_stair = True
                             mode = "explore"
                             pointnav_action = self._explore(observations, env, masks)
                         elif event == "ignore_target":
@@ -1252,6 +1258,31 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         
         # 目标楼梯点统一取第一个，如果逻辑允许有多个，需要更复杂的选择策略
         target_stair_point = target_stair_frontier[0]
+
+        current_distance_to_stair = np.linalg.norm(target_stair_point - robot_xy)
+        stair_progress_trace = zs_adapters.stair_progress_policy(
+            env,
+            self._num_steps[env],
+            self._map_controller._cur_floor_index[env],
+            self._map_controller._climb_stair_flag[env],
+            self._map_controller._get_close_to_stair_step[env],
+            self._map_controller._frontier_stick_step[env],
+            current_distance_to_stair,
+            self._map_controller._reach_stair[env],
+            self._map_controller._reach_stair_centroid[env],
+        )
+        if stair_progress_trace is not None:
+            zs_adapters.remember_policy_event(env, stair_progress_trace)
+            event = stair_progress_trace.get("stair_progress_event")
+            if event in {"force_reach_upstairs", "force_reach_centroid"}:
+                self._map_controller._reach_stair[env] = True
+                self._map_controller._reach_stair_centroid[env] = True
+                self._map_controller._get_close_to_stair_step[env] = 0
+                self._map_controller._frontier_stick_step[env] = 0
+                if self._pitch_angle[env] <= 0:
+                    self._pitch_angle[env] += self._pitch_angle_offset
+                    return get_action_tensor(LOOK_UP, device=ori_masks.device)
+                return get_action_tensor(MOVE_FORWARD, device=ori_masks.device)
 
         # --- 楼梯前沿卡顿检测逻辑重构 ---
         if np.array_equal(self.llm_planner._last_frontier[env], target_stair_point):

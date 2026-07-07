@@ -68,6 +68,19 @@ BATCH3_VARIANTS = [
     '20260707_C10_FLOOR3_FIRST_THEN_TARGET_STOP',
 ]
 
+BATCH4_VARIANTS = [
+    '20260707_D01_FAST_FIRST_UPSTAIR',
+    '20260707_D02_FORCE_SECOND_UPSTAIR',
+    '20260707_D03_MARK_FLOOR_EXPLORED_AFTER_60',
+    '20260707_D04_IGNORE_LOW_FLOOR_TARGET_AND_UP',
+    '20260707_D05_UPPER_FLOOR_SECOND_STAIR_PRIORITY',
+    '20260707_D06_AGGRESSIVE_STAIR_PROGRESS',
+    '20260707_D07_UPPER_FLOOR_QUICK_COMPLETE_THEN_UP',
+    '20260707_D08_BLOCK_DOWNSTAIRS_WHILE_BELOW_TARGET',
+    '20260707_D09_RETRY_SECOND_STAIR_IF_STUCK',
+    '20260707_D10_FLOOR2_FAST_SEARCH_AND_STOP',
+]
+
 _META.update({
     'B01': ('20260707_B01_CURRENT_TARGET_STOP_090', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'AscentTransition', 'None', 'TargetSeenStop090', 'None', 'current target evidence stop at 0.90m'),
     'B02': ('20260707_B02_CURRENT_TARGET_STOP_080', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'AscentTransition', 'None', 'TargetSeenStop080', 'None', 'current target evidence stop at 0.80m'),
@@ -79,6 +92,19 @@ _META.update({
     'B08': ('20260707_B08_TARGET_SCAN_THEN_STOP_090', 'AscentReasoner', 'RecentTargetMemory', 'AscentFrontierScore', 'AscentTransition', 'None', 'ScanThenStop090', 'None', 'one-step scan before close target stop'),
     'B09': ('20260707_B09_RELAXED_BLIP_TARGET_STOP_095', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'AscentTransition', 'None', 'RelaxedBlipStop095', 'None', 'relaxed BLIP target stop at 0.95m'),
     'B10': ('20260707_B10_MIN_DISTANCE_PLATEAU_STOP_100', 'AscentReasoner', 'RecentTargetMemory', 'AscentFrontierScore', 'AscentTransition', 'None', 'MinDistancePlateauStop100', 'None', 'stop after recent target distance stops improving'),
+})
+
+_META.update({
+    'D01': ('20260707_D01_FAST_FIRST_UPSTAIR', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'FastFirstUpstairs', 'None', 'None', 'None', 'fast first upstairs transition'),
+    'D02': ('20260707_D02_FORCE_SECOND_UPSTAIR', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'ForceSecondUpstairs', 'None', 'None', 'None', 'prioritize second upstairs transition'),
+    'D03': ('20260707_D03_MARK_FLOOR_EXPLORED_AFTER_60', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'QuickFloorComplete', 'None', 'None', 'None', 'mark floors explored after 60 steps to expose stairs'),
+    'D04': ('20260707_D04_IGNORE_LOW_FLOOR_TARGET_AND_UP', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'IgnoreLowFloorTargetAndUp', 'None', 'IgnoreLowFloorTarget', 'None', 'ignore low-floor target evidence and continue upstairs'),
+    'D05': ('20260707_D05_UPPER_FLOOR_SECOND_STAIR_PRIORITY', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'UpperFloorSecondStairPriority', 'None', 'None', 'None', 'on upper floor prioritize next upstairs frontier'),
+    'D06': ('20260707_D06_AGGRESSIVE_STAIR_PROGRESS', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'AggressiveStairProgress', 'AggressiveStairRecovery', 'None', 'None', 'force progress when approaching upstairs stalls'),
+    'D07': ('20260707_D07_UPPER_FLOOR_QUICK_COMPLETE_THEN_UP', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'UpperFloorQuickComplete', 'None', 'None', 'None', 'quickly complete upper floor and go upstairs again'),
+    'D08': ('20260707_D08_BLOCK_DOWNSTAIRS_WHILE_BELOW_TARGET', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'BlockDownstairsBelowTarget', 'None', 'None', 'None', 'block downstairs while target floor not reached'),
+    'D09': ('20260707_D09_RETRY_SECOND_STAIR_IF_STUCK', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'RetrySecondStairIfStuck', 'RetryStairRecovery', 'None', 'None', 'retry upstairs if floor index does not progress'),
+    'D10': ('20260707_D10_FLOOR2_FAST_SEARCH_AND_STOP', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'Floor2FastSearch', 'None', 'UpperFloorTargetStop', 'None', 'upper-floor search and stop after fast upstairs'),
 })
 
 _META.update({
@@ -102,11 +128,11 @@ def normalize_variant(raw: Optional[str] = None) -> str:
 
 def family(raw: Optional[str] = None) -> str:
     value = normalize_variant(raw)
-    for pattern in (r'20260706_(I\d\d)', r'20260707_([BC]\d\d)'):
+    for pattern in (r'20260706_(I\d\d)', r'20260707_([BCD]\d\d)'):
         m = re.search(pattern, value)
         if m:
             return m.group(1)
-    m = re.search(r'\b(I\d\d|B\d\d|C\d\d)\b', value)
+    m = re.search(r'\b(I\d\d|B\d\d|C\d\d|D\d\d)\b', value)
     return m.group(1) if m else ''
 
 
@@ -475,7 +501,7 @@ def maybe_override_frontier(planner: Any, observations_cache: List[dict], obstac
 
 def floor_probe_policy(env: int, step: int, cur_floor_index: int, floor_num: int, floor_num_steps: int, has_up_stair: bool, up_frontier_count: int, target_detected: bool, climb_stair_over: bool) -> Optional[Dict[str, Any]]:
     fam = family()
-    if fam not in {f'C{i:02d}' for i in range(1, 11)}:
+    if fam not in ({f'C{i:02d}' for i in range(1, 11)} | {f'D{i:02d}' for i in range(1, 11)}):
         return None
     st = _state('floor_probe', env)
     target_floor_index = 2
@@ -530,6 +556,43 @@ def floor_probe_policy(env: int, step: int, cur_floor_index: int, floor_num: int
             event, reason = 'navigate_upstairs', 'floor3_first'
         elif cur_floor_index < target_floor_index and target_detected:
             event, reason = 'ignore_target', 'target_before_floor3_ignored'
+    elif fam == 'D01' and cur_floor_index < 1 and can_go_up:
+        event, reason = 'navigate_upstairs', 'fast_first_upstairs'
+    elif fam == 'D02' and cur_floor_index < 2 and can_go_up:
+        event, reason = 'navigate_upstairs', 'force_second_upstairs_if_visible'
+    elif fam == 'D03' and cur_floor_index < 2:
+        if can_go_up:
+            event, reason = 'navigate_upstairs', 'quick_complete_then_up'
+        elif floor_num_steps >= 60:
+            event, reason = 'mark_current_floor_explored', 'floor_steps_ge_60'
+    elif fam == 'D04':
+        if cur_floor_index < 2 and target_detected:
+            event, reason = 'ignore_target', 'low_floor_target_ignored'
+        elif cur_floor_index < 2 and can_go_up:
+            event, reason = 'navigate_upstairs', 'ignore_target_and_upstairs'
+    elif fam == 'D05' and cur_floor_index >= 1 and cur_floor_index < 2 and can_go_up:
+        event, reason = 'navigate_upstairs', 'upper_floor_second_stair_priority'
+    elif fam == 'D06' and cur_floor_index < 2 and can_go_up:
+        event, reason = 'navigate_upstairs_fast_recovery', 'aggressive_stair_progress_upstairs'
+    elif fam == 'D07' and cur_floor_index < 2:
+        if can_go_up:
+            event, reason = 'navigate_upstairs', 'upper_quick_complete_then_up'
+        elif cur_floor_index >= 1 and floor_num_steps >= 35:
+            event, reason = 'mark_current_floor_explored', 'upper_floor_steps_ge_35'
+    elif fam == 'D08' and cur_floor_index < 2:
+        event, reason = 'block_downstairs', 'block_downstairs_before_target_floor'
+        if can_go_up:
+            event, reason = 'block_downstairs_and_up', 'block_downstairs_then_up'
+    elif fam == 'D09' and cur_floor_index < 2:
+        if can_go_up:
+            event, reason = 'navigate_upstairs_fast_recovery', 'retry_upstairs_if_available'
+        elif floor_num_steps >= 45:
+            event, reason = 'turn_left', 'scan_for_second_stair_after_stuck'
+    elif fam == 'D10':
+        if cur_floor_index < 1 and can_go_up:
+            event, reason = 'navigate_upstairs', 'floor2_first'
+        elif cur_floor_index == 1 and floor_num_steps >= 120 and can_go_up:
+            event, reason = 'navigate_upstairs', 'late_second_upstairs'
     if event is None:
         return None
     st['event_count'] = int(st.get('event_count', 0)) + 1
@@ -549,6 +612,49 @@ def floor_probe_policy(env: int, step: int, cur_floor_index: int, floor_num: int
         'climb_stair_over': bool(climb_stair_over),
         'override': 1,
         'selected_goal_type': 'upstairs_probe',
+    }
+
+
+
+def stair_progress_policy(env: int, step: int, cur_floor_index: int, climb_stair_flag: int, get_close_step: int, frontier_stick_step: int, distance_to_stair: Any, reach_stair: bool, reach_stair_centroid: bool) -> Optional[Dict[str, Any]]:
+    fam = family()
+    if fam not in {'D02', 'D05', 'D06', 'D09', 'D10'}:
+        return None
+    if climb_stair_flag != 1:
+        return None
+    d = _safe_float(distance_to_stair, None)
+    threshold = 18
+    if fam in {'D06', 'D09'}:
+        threshold = 8
+    elif fam in {'D02', 'D05'}:
+        threshold = 12
+    event = None
+    reason = 'no_override'
+    if not reach_stair and (get_close_step >= threshold or frontier_stick_step >= threshold):
+        event, reason = 'force_reach_upstairs', f'get_close_or_stick_ge_{threshold}'
+    elif reach_stair and not reach_stair_centroid and fam in {'D06', 'D09'} and get_close_step >= threshold:
+        event, reason = 'force_reach_centroid', 'aggressive_centroid_skip'
+    elif fam == 'D10' and cur_floor_index >= 1 and d is not None and d <= 1.4:
+        event, reason = 'force_reach_upstairs', 'upper_floor_close_to_stair'
+    if event is None:
+        return None
+    st = _state('stair_progress', env)
+    st['event_count'] = int(st.get('event_count', 0)) + 1
+    return {
+        **variant_metadata(),
+        'adapter_stage': 'stair_progress',
+        'stair_progress_event': event,
+        'stair_progress_reason': reason,
+        'stair_progress_event_count': st['event_count'],
+        'cur_floor_index': int(cur_floor_index),
+        'climb_stair_flag': int(climb_stair_flag),
+        'get_close_step': int(get_close_step),
+        'frontier_stick_step': int(frontier_stick_step),
+        'distance_to_stair': d,
+        'reach_stair': bool(reach_stair),
+        'reach_stair_centroid': bool(reach_stair_centroid),
+        'override': 1,
+        'selected_goal_type': 'upstairs_stair_progress',
     }
 
 
