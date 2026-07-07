@@ -551,7 +551,7 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             self._map_controller._frontier_stick_step[env] = 0
 
     def _zs_stair_fast_recovery_enabled(self) -> bool:
-        return zs.enabled("ZS005_STAIR_FAST_RECOVERY") or zs_adapters.family() in {"D06", "D09"}
+        return zs.enabled("ZS005_STAIR_FAST_RECOVERY") or zs_adapters.family() in {"D06", "D09", "E07"}
 
     def _zs_stair_close_limits(self) -> Tuple[float, int, int]:
         if self._zs_stair_fast_recovery_enabled():
