@@ -551,7 +551,7 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             self._map_controller._frontier_stick_step[env] = 0
 
     def _zs_stair_fast_recovery_enabled(self) -> bool:
-        return zs.enabled("ZS005_STAIR_FAST_RECOVERY") or zs_adapters.family() in {"D06", "D09", "E07"}
+        return zs.enabled("ZS005_STAIR_FAST_RECOVERY") or zs_adapters.family() in {"D06", "D09", "E07"} or zs_adapters.family().startswith("F")
 
     def _zs_stair_close_limits(self) -> Tuple[float, int, int]:
         if self._zs_stair_fast_recovery_enabled():
@@ -751,9 +751,17 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     self._pitch_angle[env] += self._pitch_angle_offset
                     pointnav_action = get_action_tensor(LOOK_UP, device=masks.device)
                 elif not self._map_controller._done_initializing[env]:
-                    self._map_controller._obstacle_map[env]._done_initializing = True
-                    mode = "initialize"
-                    pointnav_action = self._initialize(env, masks)
+                    init_limit = zs_adapters.high_floor_initialization_limit(self._map_controller._cur_floor_index[env])
+                    if init_limit is not None and self._map_controller._initialize_step[env] >= init_limit:
+                        self._map_controller._done_initializing[env] = True
+                        self._map_controller._obstacle_map[env]._done_initializing = True
+                        self._map_controller._obstacle_map[env]._tight_search_thresh = False
+                        mode = "batch6_fast_initialize_done"
+                        pointnav_action = self._explore(observations, env, masks)
+                    else:
+                        self._map_controller._obstacle_map[env]._done_initializing = True
+                        mode = "initialize"
+                        pointnav_action = self._initialize(env, masks)
                 else:
                     target_detected_now = self._map_controller._object_map[env].has_object(self._map_controller._target_object[env])
                     up_frontiers = getattr(self._map_controller._obstacle_map[env], "_up_stair_frontiers", np.array([]))
@@ -793,6 +801,15 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                             self._map_controller._obstacle_map[env]._explored_down_stair = True
                             mode = "explore"
                             pointnav_action = self._explore(observations, env, masks)
+                        elif event == "block_upstairs":
+                            self._map_controller._obstacle_map[env]._explored_up_stair = True
+                            mode = "batch6_hold_floor2_explore"
+                            pointnav_action = self._explore(observations, env, masks)
+                        elif event == "floor2_bed_waypoint":
+                            self._map_controller._obstacle_map[env]._explored_up_stair = True
+                            mode = "batch6_floor2_bed_waypoint"
+                            waypoint = np.asarray(floor_probe_trace.get("waypoint_xy"), dtype=float)
+                            pointnav_action = self._navigate(observations, waypoint[:2], stop=False, env=env, ori_masks=masks)
                         elif event == "ignore_target":
                             mode = "floor_probe_ignore_target_explore"
                             pointnav_action = self._explore(observations, env, masks)
@@ -1174,6 +1191,7 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             self._map_controller.cur_dis_to_goal[env],
             self._map_controller._blip_cosine[env],
             self._try_to_navigate_step[env],
+            self._map_controller._cur_floor_index[env],
         )
         if target_policy_trace is not None:
             zs_adapters.remember_policy_event(env, target_policy_trace)

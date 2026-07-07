@@ -92,7 +92,7 @@ class Ascent_LLM_Planner:
             
             best_frontier, best_value = None, None
             selection_source = "unset"
-            skip_local_bias = zs.enabled("ZS006_GLOBAL_FRONTIER_DIVERSITY")
+            skip_local_bias = zs.enabled("ZS006_GLOBAL_FRONTIER_DIVERSITY") or zs_adapters.should_skip_local_bias(cur_floor_index[env] if cur_floor_index else None)
 
             # 2. 处理强制前沿
             if not skip_local_bias:

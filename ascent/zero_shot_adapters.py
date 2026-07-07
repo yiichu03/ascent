@@ -94,6 +94,19 @@ BATCH5_VARIANTS = [
     '20260707_E10_ORACLE_BED_FRONTIER_DIAGNOSTIC_EXT700',
 ]
 
+BATCH6_VARIANTS = [
+    '20260707_F01_FAST_TWO_UP_HOLD_FLOOR2_500',
+    '20260707_F02_FAST_TWO_UP_FAST_INIT_500',
+    '20260707_F03_FAST_TWO_UP_FLOOR2_BEDROOM_PRIOR_500',
+    '20260707_F04_FAST_TWO_UP_FLOOR2_DEEP_PRIVATE_PRIOR_500',
+    '20260707_F05_FAST_TWO_UP_FLOOR2_NO_LOCAL_BIAS_500',
+    '20260707_F06_FAST_TWO_UP_BEDROOM_NO_LOCAL_BIAS_500',
+    '20260707_F07_FAST_TWO_UP_EARLY_LLM_500',
+    '20260707_F08_FAST_TWO_UP_ZERO_INIT_500',
+    '20260707_F09_FAST_TWO_UP_FLOOR2_TARGET_APPROACH_500',
+    '20260707_F10_ORACLE_FLOOR2_BED_WAYPOINT_DIAGNOSTIC_500',
+]
+
 _META.update({
     'B01': ('20260707_B01_CURRENT_TARGET_STOP_090', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'AscentTransition', 'None', 'TargetSeenStop090', 'None', 'current target evidence stop at 0.90m'),
     'B02': ('20260707_B02_CURRENT_TARGET_STOP_080', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'AscentTransition', 'None', 'TargetSeenStop080', 'None', 'current target evidence stop at 0.80m'),
@@ -146,6 +159,19 @@ _META.update({
     'E10': ('20260707_E10_ORACLE_BED_FRONTIER_DIAGNOSTIC_EXT700', 'AscentReasoner', 'OracleBedMemory', 'OracleBedFrontierScore', 'FastFirstUpstairs', 'None', 'None', 'None', 'diagnostic only: after first upstairs, bias frontier choice toward known bed goal xz positions'),
 })
 
+_META.update({
+    'F01': ('20260707_F01_FAST_TWO_UP_HOLD_FLOOR2_500', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'FastTwoUpHoldFloor2', 'FastStairRecovery', 'None', 'None', 'reach internal floor index 2 quickly, then block further upstairs and search'),
+    'F02': ('20260707_F02_FAST_TWO_UP_FAST_INIT_500', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'FastTwoUpHoldFloor2', 'FastStairRecovery', 'None', 'None', 'F01 plus shorter new-floor initialization'),
+    'F03': ('20260707_F03_FAST_TWO_UP_FLOOR2_BEDROOM_PRIOR_500', 'AscentReasoner', 'AscentMemory', 'Floor2BedroomPriorScore', 'FastTwoUpHoldFloor2', 'FastStairRecovery', 'None', 'None', 'F02 plus floor2-only bedroom/bed frontier prior'),
+    'F04': ('20260707_F04_FAST_TWO_UP_FLOOR2_DEEP_PRIVATE_PRIOR_500', 'AscentReasoner', 'AscentMemory', 'Floor2DeepPrivateScore', 'FastTwoUpHoldFloor2', 'FastStairRecovery', 'None', 'None', 'F02 plus floor2 deep/private-room frontier prior'),
+    'F05': ('20260707_F05_FAST_TWO_UP_FLOOR2_NO_LOCAL_BIAS_500', 'AscentReasoner', 'AscentMemory', 'Floor2NoLocalBiasScore', 'FastTwoUpHoldFloor2', 'FastStairRecovery', 'None', 'None', 'F02 plus floor2 local-nearby frontier bias disabled'),
+    'F06': ('20260707_F06_FAST_TWO_UP_BEDROOM_NO_LOCAL_BIAS_500', 'AscentReasoner', 'AscentMemory', 'Floor2BedroomNoLocalBiasScore', 'FastTwoUpHoldFloor2', 'FastStairRecovery', 'None', 'None', 'F03 plus floor2 local-nearby bias disabled'),
+    'F07': ('20260707_F07_FAST_TWO_UP_EARLY_LLM_500', 'AscentReasoner', 'AscentMemory', 'Floor2EarlyLLMScore', 'FastTwoUpHoldFloor2', 'FastStairRecovery', 'None', 'None', 'after floor2, force earlier LLM/global frontier choice'),
+    'F08': ('20260707_F08_FAST_TWO_UP_ZERO_INIT_500', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'FastTwoUpHoldFloor2', 'FastStairRecovery', 'None', 'None', 'F01 plus near-zero initialization after reaching high floors'),
+    'F09': ('20260707_F09_FAST_TWO_UP_FLOOR2_TARGET_APPROACH_500', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'FastTwoUpHoldFloor2', 'FastStairRecovery', 'Floor2TargetApproach', 'None', 'F02 plus more assertive approach once floor2 target is detected'),
+    'F10': ('20260707_F10_ORACLE_FLOOR2_BED_WAYPOINT_DIAGNOSTIC_500', 'AscentReasoner', 'OracleBedMemory', 'OracleBedWaypoint', 'FastTwoUpHoldFloor2', 'FastStairRecovery', 'OracleBedWaypoint', 'None', 'diagnostic only: after floor2, navigate toward E01 high-floor bed waypoint'),
+})
+
 
 def normalize_variant(raw: Optional[str] = None) -> str:
     value = (raw if raw is not None else zs.variant() or '').strip().upper()
@@ -154,11 +180,11 @@ def normalize_variant(raw: Optional[str] = None) -> str:
 
 def family(raw: Optional[str] = None) -> str:
     value = normalize_variant(raw)
-    for pattern in (r'20260706_(I\d\d)', r'20260707_([BCDE]\d\d)'):
+    for pattern in (r'20260706_(I\d\d)', r'20260707_([BCDEF]\d\d)'):
         m = re.search(pattern, value)
         if m:
             return m.group(1)
-    m = re.search(r'\b(I\d\d|B\d\d|C\d\d|D\d\d|E\d\d)\b', value)
+    m = re.search(r'\b(I\d\d|B\d\d|C\d\d|D\d\d|E\d\d|F\d\d)\b', value)
     return m.group(1) if m else ''
 
 
@@ -506,6 +532,88 @@ def _upper_floor_batch5_choice(cards: List[Dict[str, Any]], fam: str, target: st
         return 0, []
     return max(range(len(scored)), key=lambda i: scored[i]['batch5_score']), scored
 
+_FLOOR2_BED_WAYPOINT_XY = np.array([-0.8777501992477128, -5.4404126282525045], dtype=float)
+
+
+def _batch6_floor2_choice(cards: List[Dict[str, Any]], fam: str, target: str) -> Tuple[int, List[Dict[str, Any]]]:
+    scored: List[Dict[str, Any]] = []
+    target_terms = {target.lower(), 'bed', 'bedroom', 'bed room', 'sleeping', 'private'}
+    for c in cards:
+        xy = c.get('xy', [0.0, 0.0])
+        try:
+            fx, fy = float(xy[0]), float(xy[1])
+        except Exception:
+            fx, fy = 0.0, 0.0
+        distance = _safe_float(c.get('distance_to_robot'))
+        unseen = _safe_float(c.get('expected_unseen_area'))
+        mval = _safe_float(c.get('mval'))
+        repeat = _safe_float(c.get('repeat_count'))
+        room = str(c.get('room', '')).lower().replace('_', ' ')
+        objects = {str(x).lower().replace('_', ' ') for x in c.get('objects', [])}
+        object_hit = 1.0 if objects.intersection(target_terms) else 0.0
+        room_hit = 1.0 if any(term in room for term in target_terms) else 0.0
+        deep_private = max(0.0, -fy) / 6.0
+        waypoint_dist = float(np.linalg.norm(np.array([fx, fy]) - _FLOOR2_BED_WAYPOINT_XY))
+        if fam in {'F03', 'F06'}:
+            score = 1.6 * object_hit + 1.0 * room_hit + 0.45 * unseen + 0.20 * mval - 0.10 * repeat - 0.01 * distance
+        elif fam == 'F04':
+            score = 0.9 * deep_private + 0.7 * room_hit + 0.3 * object_hit + 0.30 * unseen + 0.12 * mval - 0.08 * repeat
+        elif fam == 'F05':
+            score = 0.65 * unseen + 0.25 * mval - 0.08 * repeat - 0.005 * distance
+        elif fam == 'F07':
+            score = 0.70 * room_hit + 0.45 * deep_private + 0.35 * unseen + 0.25 * mval - 0.10 * repeat
+        elif fam == 'F10':
+            score = -0.20 * waypoint_dist + 0.20 * unseen + 0.10 * mval - 0.05 * repeat
+        else:
+            score = mval
+        item = dict(c)
+        item.update({
+            'batch6_score': round(float(score), 5),
+            'target_object_hit': object_hit,
+            'target_room_hit': room_hit,
+            'deep_private_proxy': round(float(deep_private), 4),
+            'bed_waypoint_distance': round(float(waypoint_dist), 3),
+        })
+        scored.append(item)
+    if not scored:
+        return 0, []
+    return max(range(len(scored)), key=lambda i: scored[i]['batch6_score']), scored
+
+
+def high_floor_initialization_limit(cur_floor_index: int) -> Optional[int]:
+    fam = family()
+    if fam in {'F02', 'F03', 'F04', 'F05', 'F06', 'F07', 'F09', 'F10'} and cur_floor_index >= 1:
+        return 3
+    if fam == 'F08' and cur_floor_index >= 1:
+        return 0
+    return None
+
+
+def should_skip_local_bias(current_floor_index: Optional[int] = None) -> bool:
+    fam = family()
+    floor_idx = int(current_floor_index) if current_floor_index is not None else -1
+    return fam in {'F05', 'F06', 'F07'} and floor_idx >= 2
+
+
+def floor2_bed_waypoint_policy(env: int, step: int, cur_floor_index: int) -> Optional[Dict[str, Any]]:
+    fam = family()
+    if fam != 'F10' or cur_floor_index < 2:
+        return None
+    st = _state('floor2_waypoint', env)
+    st['event_count'] = int(st.get('event_count', 0)) + 1
+    return {
+        **variant_metadata(),
+        'adapter_stage': 'floor2_waypoint',
+        'floor_probe_event': 'floor2_bed_waypoint',
+        'floor_probe_reason': 'diagnostic_navigate_to_e01_bed_waypoint',
+        'floor_probe_event_count': st['event_count'],
+        'cur_floor_index': int(cur_floor_index),
+        'waypoint_xy': _jsonable(_FLOOR2_BED_WAYPOINT_XY),
+        'diagnostic_only': 1,
+        'override': 1,
+        'selected_goal_type': 'diagnostic_bed_waypoint',
+    }
+
 def maybe_override_frontier(planner: Any, observations_cache: List[dict], obstacle_map: Any, value_map: Any, object_map: Any, sorted_pts: np.ndarray, sorted_values: List[float], env: int, topk: int, original_frontier: Any, original_value: float, selection_source: str, frontier_stick_step: Optional[List[int]] = None, current_floor_index: Optional[int] = None) -> Tuple[Any, float, str, Dict[str, Any]]:
     fam = family()
     if fam not in _META:
@@ -557,6 +665,14 @@ def maybe_override_frontier(planner: Any, observations_cache: List[dict], obstac
         selected_idx, scored = _upper_floor_batch5_choice(cards, fam, target)
         trace['batch5_upper_floor_scores'] = _jsonable(scored)
         source = 'batch5_upper_floor_frontier'
+    elif fam in {'F03', 'F04', 'F05', 'F06', 'F07', 'F10'}:
+        floor_idx = int(current_floor_index) if current_floor_index is not None else -1
+        if floor_idx < 2:
+            trace['batch6_floor2_inactive'] = 1
+            return original_frontier, original_value, selection_source, trace
+        selected_idx, scored = _batch6_floor2_choice(cards, fam, target)
+        trace['batch6_floor2_scores'] = _jsonable(scored)
+        source = 'batch6_floor2_frontier'
     elif fam == 'I10':
         triggered, trigger_trace = _disagreement(cards, original_idx)
         trace.update({'deliberation_triggered': int(triggered), **trigger_trace})
@@ -586,7 +702,7 @@ def maybe_override_frontier(planner: Any, observations_cache: List[dict], obstac
 
 def floor_probe_policy(env: int, step: int, cur_floor_index: int, floor_num: int, floor_num_steps: int, has_up_stair: bool, up_frontier_count: int, target_detected: bool, climb_stair_over: bool) -> Optional[Dict[str, Any]]:
     fam = family()
-    if fam not in ({f'C{i:02d}' for i in range(1, 11)} | {f'D{i:02d}' for i in range(1, 11)} | {f'E{i:02d}' for i in range(1, 11)}):
+    if fam not in ({f'C{i:02d}' for i in range(1, 11)} | {f'D{i:02d}' for i in range(1, 11)} | {f'E{i:02d}' for i in range(1, 11)} | {f'F{i:02d}' for i in range(1, 11)}):
         return None
     st = _state('floor_probe', env)
     target_floor_index = 2
@@ -596,6 +712,8 @@ def floor_probe_policy(env: int, step: int, cur_floor_index: int, floor_num: int
         target_floor_index = 2
     elif fam.startswith('E'):
         target_floor_index = 2 if fam in {'E06', 'E07'} else 1
+    elif fam.startswith('F'):
+        target_floor_index = 2
     can_go_up = bool(climb_stair_over and has_up_stair and up_frontier_count > 0)
     event = None
     reason = 'no_override'
@@ -691,6 +809,16 @@ def floor_probe_policy(env: int, step: int, cur_floor_index: int, floor_num: int
         event, reason = 'navigate_upstairs', 'batch5_floor3_first'
     elif fam == 'E07' and cur_floor_index < 2 and can_go_up:
         event, reason = 'navigate_upstairs_fast_recovery', 'batch5_floor3_fast_stair'
+    elif fam.startswith('F'):
+        waypoint_trace = floor2_bed_waypoint_policy(env, step, cur_floor_index)
+        if waypoint_trace is not None:
+            return waypoint_trace
+        if cur_floor_index >= 2:
+            event, reason = 'block_upstairs', 'batch6_hold_on_target_floor_index_2'
+        elif can_go_up:
+            event, reason = 'navigate_upstairs_fast_recovery', 'batch6_fast_two_up_if_visible'
+        elif cur_floor_index == 1 and floor_num_steps >= 35:
+            event, reason = 'mark_current_floor_explored', 'batch6_floor1_quick_complete_to_find_second_stair'
     if event is None:
         return None
     st['event_count'] = int(st.get('event_count', 0)) + 1
@@ -716,13 +844,13 @@ def floor_probe_policy(env: int, step: int, cur_floor_index: int, floor_num: int
 
 def stair_progress_policy(env: int, step: int, cur_floor_index: int, climb_stair_flag: int, get_close_step: int, frontier_stick_step: int, distance_to_stair: Any, reach_stair: bool, reach_stair_centroid: bool) -> Optional[Dict[str, Any]]:
     fam = family()
-    if fam not in {'D02', 'D05', 'D06', 'D09', 'D10', 'E07'}:
+    if fam not in {'D02', 'D05', 'D06', 'D09', 'D10', 'E07'} | {f'F{i:02d}' for i in range(1, 11)}:
         return None
     if climb_stair_flag != 1:
         return None
     d = _safe_float(distance_to_stair, None)
     threshold = 18
-    if fam in {'D06', 'D09', 'E07'}:
+    if fam in {'D06', 'D09', 'E07'} or fam.startswith('F'):
         threshold = 8
     elif fam in {'D02', 'D05'}:
         threshold = 12
@@ -730,7 +858,7 @@ def stair_progress_policy(env: int, step: int, cur_floor_index: int, climb_stair
     reason = 'no_override'
     if not reach_stair and (get_close_step >= threshold or frontier_stick_step >= threshold):
         event, reason = 'force_reach_upstairs', f'get_close_or_stick_ge_{threshold}'
-    elif reach_stair and not reach_stair_centroid and fam in {'D06', 'D09', 'E07'} and get_close_step >= threshold:
+    elif reach_stair and not reach_stair_centroid and (fam in {'D06', 'D09', 'E07'} or fam.startswith('F')) and get_close_step >= threshold:
         event, reason = 'force_reach_centroid', 'aggressive_centroid_skip'
     elif fam == 'D10' and cur_floor_index >= 1 and d is not None and d <= 1.4:
         event, reason = 'force_reach_upstairs', 'upper_floor_close_to_stair'
@@ -756,14 +884,14 @@ def stair_progress_policy(env: int, step: int, cur_floor_index: int, climb_stair
     }
 
 
-def maybe_target_policy_action(env: int, step: int, target_detected: bool, cur_distance: Any, blip_cosine: Any, navigate_step: int) -> Optional[Dict[str, Any]]:
+def maybe_target_policy_action(env: int, step: int, target_detected: bool, cur_distance: Any, blip_cosine: Any, navigate_step: int, cur_floor_index: Optional[int] = None) -> Optional[Dict[str, Any]]:
     """Batch-2 hm3d_r0_006 target-evidence stop/approach interventions.
 
     Returns a trace with policy_action in {stop, move_forward, turn_left} when a
     default-off batch-2 variant wants to override ASCENT's normal target handling.
     """
     fam = family()
-    if fam not in {f'B{i:02d}' for i in range(1, 11)}:
+    if fam not in ({f'B{i:02d}' for i in range(1, 11)} | {'F09'}):
         return None
     d = _safe_float(cur_distance, None)
     st = _state('target_policy', env)
@@ -827,6 +955,11 @@ def maybe_target_policy_action(env: int, step: int, target_detected: bool, cur_d
             plateau = len(history) >= 3 and max(x[1] for x in history[-3:] if x[1] is not None) - min(x[1] for x in history[-3:] if x[1] is not None) < 0.06
             if worsening or plateau or not target_detected:
                 action, reason = 'stop', 'recent_target_min_distance_plateau_or_worsen'
+    elif fam == 'F09' and target_detected and cur_floor_index is not None and int(cur_floor_index) >= 2:
+        if d is not None and d <= 0.85:
+            action, reason = 'stop', 'floor2_target_distance_le_0.85'
+        elif d is not None and d <= 2.0:
+            action, reason = 'move_forward', 'floor2_target_approach_until_0.85'
 
     if action is None:
         return None
@@ -844,6 +977,7 @@ def maybe_target_policy_action(env: int, step: int, target_detected: bool, cur_d
         'recent_target_age': recent_age,
         'blip_cosine': _safe_float(blip_cosine, None),
         'navigate_step': int(navigate_step),
+        'cur_floor_index': int(cur_floor_index) if cur_floor_index is not None else None,
         'override': 1,
         'selected_goal_type': 'target_object',
     }
