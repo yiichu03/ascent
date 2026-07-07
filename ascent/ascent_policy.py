@@ -811,9 +811,12 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                             waypoint = np.asarray(floor_probe_trace.get("waypoint_xy"), dtype=float)
                             pointnav_action = self._navigate(observations, waypoint[:2], stop=False, env=env, ori_masks=masks)
                         elif event == "route_waypoint":
-                            mode = "batch8_route_waypoint"
+                            mode = "route_waypoint"
                             waypoint = np.asarray(floor_probe_trace.get("waypoint_xy"), dtype=float)
                             pointnav_action = self._navigate(observations, waypoint[:2], stop=False, env=env, ori_masks=masks)
+                            if floor_probe_trace.get("avoid_stop_at_waypoint") and int(pointnav_action.item()) == STOP:
+                                mode = "route_waypoint_scan_no_stop"
+                                pointnav_action = get_action_tensor(TURN_LEFT, device=masks.device)
                         elif event == "ignore_target":
                             mode = "floor_probe_ignore_target_explore"
                             pointnav_action = self._explore(observations, env, masks)
