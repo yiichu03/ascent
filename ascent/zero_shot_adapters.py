@@ -42,6 +42,32 @@ REPRESENTATIVE_VARIANTS = [
     '20260706_I10C_FRONTIER_OBJECT_DISAGREE_DELIBERATION',
 ]
 
+BATCH2_VARIANTS = [
+    '20260707_B01_CURRENT_TARGET_STOP_090',
+    '20260707_B02_CURRENT_TARGET_STOP_080',
+    '20260707_B03_CURRENT_TARGET_STOP_100',
+    '20260707_B04_RECENT_TARGET_STOP_090',
+    '20260707_B05_RECENT_TARGET_STOP_110',
+    '20260707_B06_APPROACH_THEN_STOP_070',
+    '20260707_B07_APPROACH_THEN_STOP_085',
+    '20260707_B08_TARGET_SCAN_THEN_STOP_090',
+    '20260707_B09_RELAXED_BLIP_TARGET_STOP_095',
+    '20260707_B10_MIN_DISTANCE_PLATEAU_STOP_100',
+]
+
+_META.update({
+    'B01': ('20260707_B01_CURRENT_TARGET_STOP_090', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'AscentTransition', 'None', 'TargetSeenStop090', 'None', 'current target evidence stop at 0.90m'),
+    'B02': ('20260707_B02_CURRENT_TARGET_STOP_080', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'AscentTransition', 'None', 'TargetSeenStop080', 'None', 'current target evidence stop at 0.80m'),
+    'B03': ('20260707_B03_CURRENT_TARGET_STOP_100', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'AscentTransition', 'None', 'TargetSeenStop100', 'None', 'current target evidence stop at 1.00m'),
+    'B04': ('20260707_B04_RECENT_TARGET_STOP_090', 'AscentReasoner', 'RecentTargetMemory', 'AscentFrontierScore', 'AscentTransition', 'None', 'RecentTargetStop090', 'None', 'recent target evidence stop at 0.90m'),
+    'B05': ('20260707_B05_RECENT_TARGET_STOP_110', 'AscentReasoner', 'RecentTargetMemory', 'AscentFrontierScore', 'AscentTransition', 'None', 'RecentTargetStop110', 'None', 'recent target evidence stop at 1.10m'),
+    'B06': ('20260707_B06_APPROACH_THEN_STOP_070', 'AscentReasoner', 'RecentTargetMemory', 'AscentFrontierScore', 'AscentTransition', 'None', 'ApproachThenStop070', 'None', 'force approach then stop at 0.70m'),
+    'B07': ('20260707_B07_APPROACH_THEN_STOP_085', 'AscentReasoner', 'RecentTargetMemory', 'AscentFrontierScore', 'AscentTransition', 'None', 'ApproachThenStop085', 'None', 'force approach then stop at 0.85m'),
+    'B08': ('20260707_B08_TARGET_SCAN_THEN_STOP_090', 'AscentReasoner', 'RecentTargetMemory', 'AscentFrontierScore', 'AscentTransition', 'None', 'ScanThenStop090', 'None', 'one-step scan before close target stop'),
+    'B09': ('20260707_B09_RELAXED_BLIP_TARGET_STOP_095', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'AscentTransition', 'None', 'RelaxedBlipStop095', 'None', 'relaxed BLIP target stop at 0.95m'),
+    'B10': ('20260707_B10_MIN_DISTANCE_PLATEAU_STOP_100', 'AscentReasoner', 'RecentTargetMemory', 'AscentFrontierScore', 'AscentTransition', 'None', 'MinDistancePlateauStop100', 'None', 'stop after recent target distance stops improving'),
+})
+
 
 def normalize_variant(raw: Optional[str] = None) -> str:
     value = (raw if raw is not None else zs.variant() or '').strip().upper()
@@ -50,10 +76,11 @@ def normalize_variant(raw: Optional[str] = None) -> str:
 
 def family(raw: Optional[str] = None) -> str:
     value = normalize_variant(raw)
-    m = re.search(r'20260706_(I\d\d)', value)
-    if m:
-        return m.group(1)
-    m = re.search(r'\b(I\d\d)\b', value)
+    for pattern in (r'20260706_(I\d\d)', r'20260707_(B\d\d)'):
+        m = re.search(pattern, value)
+        if m:
+            return m.group(1)
+    m = re.search(r'\b(I\d\d|B\d\d)\b', value)
     return m.group(1) if m else ''
 
 
@@ -416,6 +443,100 @@ def maybe_override_frontier(planner: Any, observations_cache: List[dict], obstac
         trace.update({'fallback': 1, 'fallback_reason': 'selected_index_mapping_failed'})
     trace.update({'selected_goal_type': 'frontier', 'selected_frontier_id': selected_idx + 1, 'selected_frontier': _jsonable(selected_frontier), 'selected_value': _safe_float(selected_value), 'override': int(not _same_xy(selected_frontier, original_frontier))})
     return selected_frontier, selected_value, source, trace
+
+
+
+def maybe_target_policy_action(env: int, step: int, target_detected: bool, cur_distance: Any, blip_cosine: Any, navigate_step: int) -> Optional[Dict[str, Any]]:
+    """Batch-2 hm3d_r0_006 target-evidence stop/approach interventions.
+
+    Returns a trace with policy_action in {stop, move_forward, turn_left} when a
+    default-off batch-2 variant wants to override ASCENT's normal target handling.
+    """
+    fam = family()
+    if fam not in {f'B{i:02d}' for i in range(1, 11)}:
+        return None
+    d = _safe_float(cur_distance, None)
+    st = _state('target_policy', env)
+    prev_min = _safe_float(st.get('min_recent_distance'), None)
+    last_seen_step = st.get('last_target_step')
+    if target_detected and d is not None:
+        st['last_target_step'] = int(step)
+        st['last_target_distance'] = d
+        if prev_min is None or d < prev_min:
+            st['min_recent_distance'] = d
+            st['min_recent_step'] = int(step)
+    recent_age = None
+    if st.get('last_target_step') is not None:
+        recent_age = int(step) - int(st['last_target_step'])
+    min_recent = _safe_float(st.get('min_recent_distance'), None)
+    action = None
+    reason = 'no_override'
+
+    def current_stop(threshold: float) -> bool:
+        return bool(target_detected and d is not None and d <= threshold)
+
+    def recent_stop(threshold: float, grace: int) -> bool:
+        return bool(recent_age is not None and recent_age <= grace and min_recent is not None and min_recent <= threshold)
+
+    if fam == 'B01' and current_stop(0.90):
+        action, reason = 'stop', 'current_target_distance_le_0.90'
+    elif fam == 'B02' and current_stop(0.80):
+        action, reason = 'stop', 'current_target_distance_le_0.80'
+    elif fam == 'B03' and current_stop(1.00):
+        action, reason = 'stop', 'current_target_distance_le_1.00'
+    elif fam == 'B04' and recent_stop(0.90, 6):
+        action, reason = 'stop', 'recent_target_min_distance_le_0.90'
+    elif fam == 'B05' and recent_stop(1.10, 8):
+        action, reason = 'stop', 'recent_target_min_distance_le_1.10'
+    elif fam == 'B06':
+        if recent_stop(0.70, 6):
+            action, reason = 'stop', 'recent_target_min_distance_le_0.70'
+        elif target_detected and d is not None and d <= 1.20:
+            action, reason = 'move_forward', 'approach_target_until_0.70'
+    elif fam == 'B07':
+        if recent_stop(0.85, 6):
+            action, reason = 'stop', 'recent_target_min_distance_le_0.85'
+        elif target_detected and d is not None and d <= 1.30:
+            action, reason = 'move_forward', 'approach_target_until_0.85'
+    elif fam == 'B08':
+        scanned = bool(st.get('scan_done'))
+        if target_detected and d is not None and d <= 0.90 and not scanned:
+            st['scan_done'] = True
+            action, reason = 'turn_left', 'scan_once_before_stop'
+        elif scanned and recent_stop(0.90, 4):
+            action, reason = 'stop', 'post_scan_recent_target_stop_0.90'
+    elif fam == 'B09' and target_detected and d is not None and d <= 0.95 and _safe_float(blip_cosine, 0.0) >= 0.12:
+        action, reason = 'stop', 'target_distance_le_0.95_blip_ge_0.12'
+    elif fam == 'B10':
+        history = st.setdefault('distance_history', [])
+        if d is not None:
+            history.append((int(step), d, bool(target_detected)))
+            del history[:-6]
+        if recent_stop(1.00, 8):
+            worsening = d is None or (min_recent is not None and d >= min_recent + 0.10)
+            plateau = len(history) >= 3 and max(x[1] for x in history[-3:] if x[1] is not None) - min(x[1] for x in history[-3:] if x[1] is not None) < 0.06
+            if worsening or plateau or not target_detected:
+                action, reason = 'stop', 'recent_target_min_distance_plateau_or_worsen'
+
+    if action is None:
+        return None
+    st['event_count'] = int(st.get('event_count', 0)) + 1
+    return {
+        **variant_metadata(),
+        'adapter_stage': 'target_policy',
+        'policy_action': action,
+        'target_policy_reason': reason,
+        'target_policy_event_count': st['event_count'],
+        'target_detected': bool(target_detected),
+        'cur_distance': _safe_float(cur_distance, None),
+        'min_recent_distance': min_recent,
+        'min_recent_step': st.get('min_recent_step'),
+        'recent_target_age': recent_age,
+        'blip_cosine': _safe_float(blip_cosine, None),
+        'navigate_step': int(navigate_step),
+        'override': 1,
+        'selected_goal_type': 'target_object',
+    }
 
 
 def maybe_defer_stop_for_verification(env: int, step: int, goal: Any, cur_distance: float, blip_cosine: float, confirm_stop: bool) -> Optional[Dict[str, Any]]:

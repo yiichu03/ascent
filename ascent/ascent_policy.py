@@ -1114,6 +1114,25 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         }
         self._policy_info[env]["rho_theta"] = np.array([rho, theta])
         print(f"Distance to goal: {self._map_controller.cur_dis_to_goal[env]}")
+        target_detected = self._map_controller._object_map[env].has_object(self._map_controller._target_object[env])
+        target_policy_trace = zs_adapters.maybe_target_policy_action(
+            env,
+            self._num_steps[env],
+            target_detected,
+            self._map_controller.cur_dis_to_goal[env],
+            self._map_controller._blip_cosine[env],
+            self._try_to_navigate_step[env],
+        )
+        if target_policy_trace is not None:
+            zs_adapters.remember_policy_event(env, target_policy_trace)
+            policy_action = target_policy_trace.get("policy_action")
+            if policy_action == "stop":
+                self._called_stop[env] = True
+                return self._stop_action.to(ori_masks.device)
+            if policy_action == "move_forward":
+                return get_action_tensor(MOVE_FORWARD, device=ori_masks.device)
+            if policy_action == "turn_left":
+                return get_action_tensor(TURN_LEFT, device=ori_masks.device)
         if self._map_controller.cur_dis_to_goal[env] < 1.0: # close to the goal, but might be some noise, so get close as possible 
             if self._map_controller.cur_dis_to_goal[env] <= 0.6 or np.abs(self._map_controller.cur_dis_to_goal[env] - self.min_distance_xy[env]) < 0.1: # close enough or cannot move forward more #  or self._num_steps[env] == (500 - 1)
                 confirm_stop = self._map_controller._double_check_goal[env] == True
