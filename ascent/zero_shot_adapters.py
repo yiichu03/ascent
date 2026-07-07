@@ -107,6 +107,32 @@ BATCH6_VARIANTS = [
     '20260707_F10_ORACLE_FLOOR2_BED_WAYPOINT_DIAGNOSTIC_500',
 ]
 
+BATCH7_VARIANTS = [
+    '20260707_G01_ROUTE_NOVELTY_FRONTIER_500',
+    '20260707_G02_LOOP_EXIT_CORRIDOR_FRONTIER_500',
+    '20260707_G03_TRANSITION_AWARE_ROUTE_SCORER_500',
+    '20260707_G04_ROUTE_COMPRESSION_BUDGET_500',
+    '20260707_G05_SECOND_TRANSITION_BUDGET_PLANNER_500',
+    '20260707_G06_FRONTIER_OUTCOME_MEMORY_500',
+    '20260707_G07_TOPOLOGICAL_OPTION_CHAIN_500',
+    '20260707_G08_BUDGETED_OPTION_PLANNER_500',
+    '20260707_G09_ANTI_HOMING_ROUTE_EXPANSION_500',
+    '20260707_G10_E01_COMPRESSED_ROUTE_DIAGNOSTIC_500',
+]
+
+BATCH8_VARIANTS = [
+    '20260708_H01_E01_LOW_FLOOR_TARGET_GUARD_500',
+    '20260708_H02_E01_FLOOR1_BUDGETED_SECOND_STAIR_500',
+    '20260708_H03_E01_TRANSITION_HINT_FLOOR1_500',
+    '20260708_H04_E01_ROUTE_PRESERVE_COMPRESS_FLOOR0_500',
+    '20260708_H05_E01_FLOOR2_BEDROOM_PRIOR_GUARD_500',
+    '20260708_H06_FAST_FLOOR2_BED_WAYPOINT_DIAG_500',
+    '20260708_H07_COMPRESSED_E01_ROUTE_WAYPOINT_DIAG_500',
+    '20260708_H08_G03_WITH_LOW_FLOOR_GUARD_500',
+    '20260708_H09_G07_WITH_LOW_FLOOR_GUARD_500',
+    '20260708_H10_DIRECT_ROUTE_WAYPOINT_PLUS_TARGET_500',
+]
+
 _META.update({
     'B01': ('20260707_B01_CURRENT_TARGET_STOP_090', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'AscentTransition', 'None', 'TargetSeenStop090', 'None', 'current target evidence stop at 0.90m'),
     'B02': ('20260707_B02_CURRENT_TARGET_STOP_080', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'AscentTransition', 'None', 'TargetSeenStop080', 'None', 'current target evidence stop at 0.80m'),
@@ -172,6 +198,32 @@ _META.update({
     'F10': ('20260707_F10_ORACLE_FLOOR2_BED_WAYPOINT_DIAGNOSTIC_500', 'AscentReasoner', 'OracleBedMemory', 'OracleBedWaypoint', 'FastTwoUpHoldFloor2', 'FastStairRecovery', 'OracleBedWaypoint', 'None', 'diagnostic only: after floor2, navigate toward E01 high-floor bed waypoint'),
 })
 
+_META.update({
+    'G01': ('20260707_G01_ROUTE_NOVELTY_FRONTIER_500', 'RouteMemoryReasoner', 'RouteCellMemory', 'RouteNoveltyFrontierScore', 'AscentTransition', 'None', 'None', 'None', 'route-level novelty frontier selection from the first floor-0 decisions'),
+    'G02': ('20260707_G02_LOOP_EXIT_CORRIDOR_FRONTIER_500', 'RouteMemoryReasoner', 'RouteCellMemory', 'LoopExitCorridorScore', 'AscentTransition', 'LoopExitRecovery', 'None', 'None', 'detect early loop/backtracking and select frontier that exits dense visited cells'),
+    'G03': ('20260707_G03_TRANSITION_AWARE_ROUTE_SCORER_500', 'AscentReasoner', 'RouteTransitionMemory', 'TransitionAwareRouteScore', 'FastTransitionCommit', 'FastStairRecovery', 'None', 'None', 'prefer frontier routes likely to expose stairs/halls/doorways before forcing transition'),
+    'G04': ('20260707_G04_ROUTE_COMPRESSION_BUDGET_500', 'AscentReasoner', 'RouteCellMemory', 'CompressedRouteFrontierScore', 'BudgetedFloorCompletion', 'None', 'None', 'None', 'compress low-value floor-0 exploration using route novelty and budget gates'),
+    'G05': ('20260707_G05_SECOND_TRANSITION_BUDGET_PLANNER_500', 'AscentReasoner', 'RouteTransitionMemory', 'SecondTransitionBudgetScore', 'BudgetedSecondTransition', 'FastStairRecovery', 'None', 'None', 'reserve step budget for floor-index-2 and avoid spending floor1 on low-yield loops'),
+    'G06': ('20260707_G06_FRONTIER_OUTCOME_MEMORY_500', 'AscentReasoner', 'FrontierOutcomeMemory', 'OutcomeAwareFrontierScore', 'BudgetedSecondTransition', 'OutcomeRecovery', 'None', 'None', 'penalize frontiers whose previous selection produced little route progress'),
+    'G07': ('20260707_G07_TOPOLOGICAL_OPTION_CHAIN_500', 'TopologicalOptionReasoner', 'RouteTopologyMemory', 'TopoOptionChainScore', 'FastTransitionCommit', 'None', 'None', 'None', 'coarse option chain: exit-loop, transition, upper-private-room search'),
+    'G08': ('20260707_G08_BUDGETED_OPTION_PLANNER_500', 'BudgetedOptionReasoner', 'RouteTransitionMemory', 'BudgetedOptionScore', 'BudgetedTransitionCommit', 'FastStairRecovery', 'None', 'None', 'budget-aware high-level option selection based on remaining steps and floor progress'),
+    'G09': ('20260707_G09_ANTI_HOMING_ROUTE_EXPANSION_500', 'RouteMemoryReasoner', 'RouteCellMemory', 'AntiHomingExpansionScore', 'FastTransitionCommit', 'None', 'None', 'None', 'penalize frontier choices that route back toward start or dense visited cells'),
+    'G10': ('20260707_G10_E01_COMPRESSED_ROUTE_DIAGNOSTIC_500', 'DiagnosticRouteReasoner', 'E01CompressedRouteMemory', 'E01WaypointFrontierScore', 'DiagnosticCompressedRoute', 'FastStairRecovery', 'None', 'None', 'diagnostic only: score frontiers by distance to compressed E01 success-route waypoints'),
+})
+
+_META.update({
+    'H01': ('20260708_H01_E01_LOW_FLOOR_TARGET_GUARD_500', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'FastFirstUpstairs', 'None', 'LowFloorTargetGuard', 'None', 'E01 control plus ignore target evidence below floor_index=2'),
+    'H02': ('20260708_H02_E01_FLOOR1_BUDGETED_SECOND_STAIR_500', 'AscentReasoner', 'RouteTransitionMemory', 'SecondTransitionBudgetScore', 'BudgetedSecondTransition', 'FastStairRecovery', 'LowFloorTargetGuard', 'None', 'E01 route plus floor1 budget reserve for second stair'),
+    'H03': ('20260708_H03_E01_TRANSITION_HINT_FLOOR1_500', 'AscentReasoner', 'RouteTransitionMemory', 'Floor1TransitionHintScore', 'FastTransitionCommit', 'FastStairRecovery', 'LowFloorTargetGuard', 'None', 'preserve E01 first route, then use transition-hint scoring on floor1'),
+    'H04': ('20260708_H04_E01_ROUTE_PRESERVE_COMPRESS_FLOOR0_500', 'AscentReasoner', 'RouteCellMemory', 'E01PreserveCompressScore', 'BudgetedFloorCompletion', 'None', 'LowFloorTargetGuard', 'None', 'only compress E01 low-floor detours without broad novelty expansion'),
+    'H05': ('20260708_H05_E01_FLOOR2_BEDROOM_PRIOR_GUARD_500', 'AscentReasoner', 'RouteSemanticMemory', 'Floor2BedroomPriorScore', 'BudgetedSecondTransition', 'FastStairRecovery', 'LowFloorTargetGuard', 'None', 'after second transition, prefer bedroom/private-room frontiers with low-floor guard'),
+    'H06': ('20260708_H06_FAST_FLOOR2_BED_WAYPOINT_DIAG_500', 'DiagnosticRouteReasoner', 'E01BedWaypointMemory', 'E01BedWaypointScore', 'FastTwoUpHoldFloor2', 'FastStairRecovery', 'LowFloorTargetGuard', 'None', 'diagnostic: once high floor reached, navigate toward E01 bed-side waypoint'),
+    'H07': ('20260708_H07_COMPRESSED_E01_ROUTE_WAYPOINT_DIAG_500', 'DiagnosticRouteReasoner', 'E01CompressedRouteMemory', 'E01RouteWaypointScore', 'DiagnosticCompressedRoute', 'FastStairRecovery', 'LowFloorTargetGuard', 'None', 'diagnostic: direct compressed E01 route waypoints with low-floor false-positive guard'),
+    'H08': ('20260708_H08_G03_WITH_LOW_FLOOR_GUARD_500', 'AscentReasoner', 'RouteTransitionMemory', 'TransitionAwareRouteScore', 'FastTransitionCommit', 'FastStairRecovery', 'LowFloorTargetGuard', 'None', 'batch7 G03 transition-aware route with low-floor target guard'),
+    'H09': ('20260708_H09_G07_WITH_LOW_FLOOR_GUARD_500', 'TopologicalOptionReasoner', 'RouteTopologyMemory', 'TopoOptionChainScore', 'FastTransitionCommit', 'None', 'LowFloorTargetGuard', 'None', 'batch7 G07 option chain with low-floor target guard'),
+    'H10': ('20260708_H10_DIRECT_ROUTE_WAYPOINT_PLUS_TARGET_500', 'DiagnosticRouteReasoner', 'E01CompressedRouteMemory', 'DirectRouteWaypoint', 'DiagnosticCompressedRoute', 'FastStairRecovery', 'LowFloorTargetGuard', 'None', 'diagnostic: direct route waypoints, then allow target approach on floor_index=2'),
+})
+
 
 def normalize_variant(raw: Optional[str] = None) -> str:
     value = (raw if raw is not None else zs.variant() or '').strip().upper()
@@ -180,11 +232,11 @@ def normalize_variant(raw: Optional[str] = None) -> str:
 
 def family(raw: Optional[str] = None) -> str:
     value = normalize_variant(raw)
-    for pattern in (r'20260706_(I\d\d)', r'20260707_([BCDEF]\d\d)'):
+    for pattern in (r'20260706_(I\d\d)', r'2026070[78]_([BCDEFGH]\d\d)'):
         m = re.search(pattern, value)
         if m:
             return m.group(1)
-    m = re.search(r'\b(I\d\d|B\d\d|C\d\d|D\d\d|E\d\d|F\d\d)\b', value)
+    m = re.search(r'\b(I\d\d|B\d\d|C\d\d|D\d\d|E\d\d|F\d\d|G\d\d|H\d\d)\b', value)
     return m.group(1) if m else ''
 
 
@@ -580,12 +632,254 @@ def _batch6_floor2_choice(cards: List[Dict[str, Any]], fam: str, target: str) ->
     return max(range(len(scored)), key=lambda i: scored[i]['batch6_score']), scored
 
 
+_ROUTE_TRANSITION_TERMS = {
+    'stair', 'stairs', 'staircase', 'stairway', 'step', 'steps', 'landing',
+    'hall', 'hallway', 'corridor', 'door', 'doorway', 'entry', 'entrance', 'rail', 'balustrade'
+}
+_ROUTE_PRIVATE_TERMS = {
+    'bed', 'bedroom', 'closet', 'private', 'bathroom', 'office', 'dresser',
+    'cabinet', 'door', 'curtain', 'room'
+}
+_E01_ROUTE_WAYPOINTS = {
+    0: np.array([-4.755, -2.218], dtype=float),
+    1: np.array([-4.719, -2.192], dtype=float),
+    2: np.array([-0.878, -5.440], dtype=float),
+}
+
+
+def _batch7_cell(xy: Any, floor_idx: int, res: float = 1.0) -> str:
+    try:
+        arr = np.asarray(xy, dtype=float).reshape(-1)[:2]
+        return f"{int(floor_idx)}:{round(float(arr[0]) / res)}:{round(float(arr[1]) / res)}"
+    except Exception:
+        return f"{int(floor_idx)}:bad"
+
+
+def _route_memory_update(env: int, robot_xy: Any, floor_idx: int, num_step: Optional[int]) -> Dict[str, Any]:
+    st = _state('batch7_route_memory', env)
+    try:
+        xy = np.asarray(robot_xy, dtype=float).reshape(-1)[:2]
+    except Exception:
+        xy = np.zeros(2, dtype=float)
+    if 'start_xy' not in st:
+        st['start_xy'] = xy.copy()
+    hist = st.setdefault('robot_history', [])
+    hist.append({'step': int(num_step) if num_step is not None else None, 'floor': int(floor_idx), 'xy': xy.tolist()})
+    del hist[:-160]
+    cell = _batch7_cell(xy, floor_idx, 0.75)
+    visited = st.setdefault('visited_robot_cells', {})
+    visited[cell] = int(visited.get(cell, 0)) + 1
+    return st
+
+
+def _keyword_hit(card: Dict[str, Any], terms: set) -> float:
+    text = ' '.join([str(card.get('room', ''))] + [str(x) for x in card.get('objects', [])]).lower().replace('_', ' ')
+    return 1.0 if any(term in text for term in terms) else 0.0
+
+
+def _batch7_route_choice(cards: List[Dict[str, Any]], fam: str, env: int, target: str, current_floor_index: Optional[int], num_step: Optional[int], original_idx: int, robot_xy: Any, selection_source: str, frontier_stick_step: Optional[int]) -> Tuple[int, List[Dict[str, Any]], Dict[str, Any]]:
+    floor_idx = int(current_floor_index) if current_floor_index is not None else 0
+    step = int(num_step) if num_step is not None else 0
+    st = _route_memory_update(env, robot_xy, floor_idx, step)
+    start_xy = np.asarray(st.get('start_xy', np.zeros(2)), dtype=float)[:2]
+    try:
+        cur_xy = np.asarray(robot_xy, dtype=float).reshape(-1)[:2]
+    except Exception:
+        cur_xy = np.zeros(2, dtype=float)
+    history = st.get('robot_history', [])
+    recent = [np.asarray(h.get('xy', [0, 0]), dtype=float)[:2] for h in history[-24:]]
+    if recent:
+        centroid = np.mean(np.stack(recent, axis=0), axis=0)
+    else:
+        centroid = cur_xy
+    selected_cells = st.setdefault('selected_frontier_cells', {})
+    scored: List[Dict[str, Any]] = []
+    budget_urgency = min(max((step - 120) / 260.0, 0.0), 1.0)
+    if floor_idx == 1:
+        budget_urgency = min(max((step - 330) / 120.0, 0.0), 1.0)
+    elif floor_idx >= 2:
+        budget_urgency = min(max((step - 430) / 80.0, 0.0), 1.0)
+    for i, c in enumerate(cards):
+        xy = np.asarray(c.get('xy', [0.0, 0.0]), dtype=float)[:2]
+        cell = _batch7_cell(xy, floor_idx, 1.0)
+        selected_repeat = float(selected_cells.get(cell, 0))
+        builtin_repeat = _safe_float(c.get('repeat_count'))
+        visited_count = float(st.get('visited_robot_cells', {}).get(cell, 0))
+        dist_robot = _safe_float(c.get('distance_to_robot'))
+        unseen = _safe_float(c.get('expected_unseen_area'))
+        mval = _safe_float(c.get('mval'))
+        transition_hit = _keyword_hit(c, _ROUTE_TRANSITION_TERMS)
+        private_hit = _keyword_hit(c, _ROUTE_PRIVATE_TERMS | {target.lower()})
+        centroid_dist = float(np.linalg.norm(xy - centroid))
+        start_dist = float(np.linalg.norm(xy - start_xy))
+        cur_start_dist = float(np.linalg.norm(cur_xy - start_xy))
+        route_progress = start_dist - cur_start_dist
+        anti_homing = max(0.0, start_dist - 1.0) + 0.25 * centroid_dist
+        waypoint_dist = None
+        if fam == 'G10':
+            wp = _E01_ROUTE_WAYPOINTS.get(min(max(floor_idx, 0), 2), _E01_ROUTE_WAYPOINTS[2])
+            waypoint_dist = float(np.linalg.norm(xy - wp))
+        novelty = 1.0 / (1.0 + selected_repeat + builtin_repeat + 0.25 * visited_count)
+        if fam == 'G01':
+            score = mval + 0.85 * unseen + 0.70 * novelty + 0.08 * centroid_dist - 0.02 * dist_robot
+        elif fam == 'G02':
+            score = 0.50 * centroid_dist + 0.65 * unseen + 0.45 * transition_hit + 0.20 * route_progress - 0.18 * builtin_repeat - 0.03 * dist_robot
+        elif fam == 'G03':
+            score = 1.15 * transition_hit + 0.55 * unseen + 0.25 * mval + 0.18 * novelty - 0.012 * dist_robot
+        elif fam == 'G04':
+            score = 0.75 * unseen + 0.35 * route_progress + 0.45 * novelty + 0.20 * transition_hit - 0.22 * builtin_repeat - 0.02 * dist_robot
+        elif fam == 'G05':
+            score = 1.00 * budget_urgency * transition_hit + 0.55 * unseen + 0.35 * private_hit + 0.20 * route_progress - 0.02 * dist_robot - 0.16 * builtin_repeat
+        elif fam == 'G06':
+            outcome_penalty = float(st.setdefault('poor_outcome_cells', {}).get(cell, 0))
+            score = 0.70 * unseen + 0.40 * novelty + 0.35 * transition_hit + 0.20 * private_hit - 0.45 * outcome_penalty - 0.18 * builtin_repeat - 0.015 * dist_robot
+        elif fam == 'G07':
+            phase_transition = 1.0 if floor_idx < 2 else 0.0
+            phase_private = 1.0 if floor_idx >= 1 else 0.25
+            score = 0.85 * phase_transition * transition_hit + 0.75 * phase_private * private_hit + 0.40 * unseen + 0.25 * novelty + 0.08 * route_progress - 0.015 * dist_robot
+        elif fam == 'G08':
+            score = (0.75 + 0.75 * budget_urgency) * transition_hit * (1.0 if floor_idx < 2 else 0.0) + (0.85 * private_hit if floor_idx >= 2 else 0.25 * private_hit) + 0.45 * unseen + 0.18 * route_progress - 0.018 * dist_robot - 0.12 * builtin_repeat
+        elif fam == 'G09':
+            score = 0.55 * anti_homing + 0.45 * unseen + 0.25 * transition_hit + 0.15 * private_hit - 0.25 * builtin_repeat - 0.04 * dist_robot
+        elif fam == 'G10':
+            score = -0.55 * _safe_float(waypoint_dist, 99.0) + 0.30 * unseen + 0.20 * transition_hit + 0.15 * private_hit - 0.05 * dist_robot
+        else:
+            score = mval
+        item = dict(c)
+        item.update({
+            'batch7_score': round(float(score), 5),
+            'route_cell': cell,
+            'route_selected_repeat': selected_repeat,
+            'route_robot_cell_visit_count': visited_count,
+            'route_novelty': round(float(novelty), 4),
+            'route_transition_hint': transition_hit,
+            'route_private_hint': private_hit,
+            'route_progress_from_start': round(float(route_progress), 3),
+            'route_centroid_distance': round(float(centroid_dist), 3),
+            'route_start_distance': round(float(start_dist), 3),
+            'route_budget_urgency': round(float(budget_urgency), 3),
+            'e01_waypoint_distance': round(float(waypoint_dist), 3) if waypoint_dist is not None else None,
+        })
+        scored.append(item)
+    if not scored:
+        return original_idx, [], {'fallback': 1, 'fallback_reason': 'batch7_no_scored_cards'}
+    best = max(range(len(scored)), key=lambda i: scored[i]['batch7_score'])
+    selected_cells[scored[best]['route_cell']] = int(selected_cells.get(scored[best]['route_cell'], 0)) + 1
+    # Outcome memory: when selection remains close to a dense route cell, mark it as poor for G06.
+    if fam == 'G06':
+        if scored[best]['route_robot_cell_visit_count'] >= 2 or scored[best]['route_selected_repeat'] >= 2:
+            poor = st.setdefault('poor_outcome_cells', {})
+            poor[scored[best]['route_cell']] = int(poor.get(scored[best]['route_cell'], 0)) + 1
+    trace = {
+        'batch7_route_memory': {
+            'robot_history_len': len(history),
+            'visited_robot_cell_count': len(st.get('visited_robot_cells', {})),
+            'selected_frontier_cell_count': len(selected_cells),
+            'floor_idx': floor_idx,
+            'num_step': step,
+            'selection_source_before_batch7': selection_source,
+            'frontier_stick_step': int(frontier_stick_step or 0),
+            'diagnostic_only': int(fam == 'G10'),
+        }
+    }
+    return best, scored, trace
+
+
+_H_ROUTE_FIRST_STAIR_XY = np.array([-4.755, -2.218], dtype=float)
+_H_ROUTE_SECOND_STAIR_XY = np.array([-4.719, -2.192], dtype=float)
+_H_ROUTE_BED_WAYPOINT_XY = np.array([-0.878, -5.440], dtype=float)
+
+
+def _batch8_route_choice(cards: List[Dict[str, Any]], fam: str, env: int, target: str, current_floor_index: Optional[int], num_step: Optional[int], original_idx: int, robot_xy: Any, selection_source: str, frontier_stick_step: Optional[int]) -> Tuple[int, List[Dict[str, Any]], Dict[str, Any]]:
+    floor_idx = int(current_floor_index) if current_floor_index is not None else 0
+    step = int(num_step) if num_step is not None else 0
+    st = _route_memory_update(env, robot_xy, floor_idx, step)
+    try:
+        cur_xy = np.asarray(robot_xy, dtype=float).reshape(-1)[:2]
+    except Exception:
+        cur_xy = np.zeros(2, dtype=float)
+    if floor_idx <= 0:
+        waypoint = _H_ROUTE_FIRST_STAIR_XY
+    elif floor_idx == 1:
+        waypoint = _H_ROUTE_SECOND_STAIR_XY
+    else:
+        waypoint = _H_ROUTE_BED_WAYPOINT_XY
+    scored: List[Dict[str, Any]] = []
+    for c in cards:
+        xy = np.asarray(c.get('xy', [0.0, 0.0]), dtype=float)[:2]
+        dist_robot = _safe_float(c.get('distance_to_robot'))
+        unseen = _safe_float(c.get('expected_unseen_area'))
+        mval = _safe_float(c.get('mval'))
+        repeat = _safe_float(c.get('repeat_count'))
+        transition_hit = _keyword_hit(c, _ROUTE_TRANSITION_TERMS)
+        private_hit = _keyword_hit(c, _ROUTE_PRIVATE_TERMS | {target.lower()})
+        waypoint_dist = float(np.linalg.norm(xy - waypoint))
+        # Positive when a candidate points toward the route waypoint compared with current pose.
+        waypoint_progress = float(np.linalg.norm(cur_xy - waypoint) - waypoint_dist)
+        if fam in {'H01'}:
+            score = mval
+        elif fam == 'H02':
+            if floor_idx == 1:
+                score = 1.10 * transition_hit + 0.65 * waypoint_progress + 0.35 * unseen - 0.02 * dist_robot - 0.12 * repeat
+            else:
+                score = 0.15 * waypoint_progress + 0.45 * unseen + 0.20 * mval - 0.02 * dist_robot
+        elif fam == 'H03':
+            score = (1.25 * transition_hit if floor_idx == 1 else 0.20 * transition_hit) + 0.55 * unseen + 0.45 * waypoint_progress + 0.15 * mval - 0.02 * dist_robot - 0.12 * repeat
+        elif fam == 'H04':
+            if floor_idx == 0:
+                score = 0.75 * waypoint_progress + 0.35 * unseen + 0.10 * mval - 0.015 * dist_robot - 0.10 * repeat
+            else:
+                score = mval
+        elif fam == 'H05':
+            if floor_idx >= 2:
+                score = 1.25 * private_hit + 0.45 * unseen + 0.25 * mval - 0.018 * dist_robot - 0.12 * repeat
+            elif floor_idx == 1:
+                score = 1.05 * transition_hit + 0.55 * waypoint_progress + 0.30 * unseen - 0.018 * dist_robot
+            else:
+                score = 0.45 * waypoint_progress + 0.35 * unseen + 0.10 * mval - 0.015 * dist_robot
+        elif fam == 'H06':
+            if floor_idx >= 2:
+                score = -0.70 * waypoint_dist + 0.35 * private_hit + 0.15 * unseen
+            else:
+                score = 0.85 * transition_hit + 0.45 * waypoint_progress + 0.25 * unseen - 0.018 * dist_robot
+        elif fam in {'H07', 'H10'}:
+            score = -0.85 * waypoint_dist + 0.25 * transition_hit + 0.20 * private_hit + 0.10 * unseen - 0.01 * dist_robot
+        elif fam == 'H08':
+            score = 1.15 * transition_hit + 0.55 * unseen + 0.25 * mval + 0.30 * waypoint_progress - 0.012 * dist_robot - 0.10 * repeat
+        elif fam == 'H09':
+            phase_transition = 1.0 if floor_idx < 2 else 0.0
+            phase_private = 1.0 if floor_idx >= 1 else 0.25
+            score = 0.85 * phase_transition * transition_hit + 0.75 * phase_private * private_hit + 0.40 * unseen + 0.25 * waypoint_progress - 0.015 * dist_robot
+        else:
+            score = mval
+        item = dict(c)
+        item.update({
+            'batch8_score': round(float(score), 5),
+            'route_waypoint_xy': _jsonable(waypoint),
+            'route_waypoint_distance': round(float(waypoint_dist), 3),
+            'route_waypoint_progress': round(float(waypoint_progress), 3),
+            'route_transition_hint': transition_hit,
+            'route_private_hint': private_hit,
+            'diagnostic_only': int(fam in {'H06', 'H07', 'H10'}),
+        })
+        scored.append(item)
+    if not scored:
+        return original_idx, [], {'fallback': 1, 'fallback_reason': 'batch8_no_scored_cards'}
+    best = max(range(len(scored)), key=lambda i: scored[i]['batch8_score'])
+    trace = {'batch8_route_memory': {'floor_idx': floor_idx, 'num_step': step, 'waypoint_xy': _jsonable(waypoint), 'diagnostic_only': int(fam in {'H06', 'H07', 'H10'}), 'selection_source_before_batch8': selection_source, 'frontier_stick_step': int(frontier_stick_step or 0)}}
+    return best, scored, trace
+
+
 def high_floor_initialization_limit(cur_floor_index: int) -> Optional[int]:
     fam = family()
     if fam in {'F02', 'F03', 'F04', 'F05', 'F06', 'F07', 'F09', 'F10'} and cur_floor_index >= 1:
         return 3
     if fam == 'F08' and cur_floor_index >= 1:
         return 0
+    if fam.startswith('G') and cur_floor_index >= 1 and fam not in {'G01', 'G02'}:
+        return 3
+    if fam.startswith('H') and cur_floor_index >= 1 and fam not in {'H01'}:
+        return 3
     return None
 
 
@@ -614,7 +908,7 @@ def floor2_bed_waypoint_policy(env: int, step: int, cur_floor_index: int) -> Opt
         'selected_goal_type': 'diagnostic_bed_waypoint',
     }
 
-def maybe_override_frontier(planner: Any, observations_cache: List[dict], obstacle_map: Any, value_map: Any, object_map: Any, sorted_pts: np.ndarray, sorted_values: List[float], env: int, topk: int, original_frontier: Any, original_value: float, selection_source: str, frontier_stick_step: Optional[List[int]] = None, current_floor_index: Optional[int] = None) -> Tuple[Any, float, str, Dict[str, Any]]:
+def maybe_override_frontier(planner: Any, observations_cache: List[dict], obstacle_map: Any, value_map: Any, object_map: Any, sorted_pts: np.ndarray, sorted_values: List[float], env: int, topk: int, original_frontier: Any, original_value: float, selection_source: str, frontier_stick_step: Optional[List[int]] = None, current_floor_index: Optional[int] = None, num_steps: Optional[int] = None) -> Tuple[Any, float, str, Dict[str, Any]]:
     fam = family()
     if fam not in _META:
         return original_frontier, original_value, selection_source, {}
@@ -629,7 +923,7 @@ def maybe_override_frontier(planner: Any, observations_cache: List[dict], obstac
             original_idx = idx
             break
     memory = _object_memory(object_map, env, target)
-    trace: Dict[str, Any] = {**variant_metadata(), 'adapter_stage': 'frontier_selection', 'current_floor_index': int(current_floor_index) if current_floor_index is not None else None, 'original_selection_source': selection_source, 'original_frontier': _jsonable(original_frontier), 'original_value': _safe_float(original_value), 'original_frontier_id': original_idx + 1, 'frontier_cards': _jsonable(cards), 'object_memory': _jsonable(memory), 'llm_called': 0, 'parse_failure': 0, 'fallback': 0, 'override': 0}
+    trace: Dict[str, Any] = {**variant_metadata(), 'adapter_stage': 'frontier_selection', 'current_floor_index': int(current_floor_index) if current_floor_index is not None else None, 'num_steps': int(num_steps) if num_steps is not None else None, 'original_selection_source': selection_source, 'original_frontier': _jsonable(original_frontier), 'original_value': _safe_float(original_value), 'original_frontier_id': original_idx + 1, 'frontier_cards': _jsonable(cards), 'object_memory': _jsonable(memory), 'llm_called': 0, 'parse_failure': 0, 'fallback': 0, 'override': 0}
     if not cards:
         trace.update({'fallback': 1, 'fallback_reason': 'no_frontier_cards'})
         return original_frontier, original_value, selection_source, trace
@@ -673,6 +967,20 @@ def maybe_override_frontier(planner: Any, observations_cache: List[dict], obstac
         selected_idx, scored = _batch6_floor2_choice(cards, fam, target)
         trace['batch6_floor2_scores'] = _jsonable(scored)
         source = 'batch6_floor2_frontier'
+    elif fam.startswith('G'):
+        robot_xy = observations_cache[env].get('robot_xy', np.zeros(2)) if env < len(observations_cache) else np.zeros(2)
+        stick = int(frontier_stick_step[env]) if frontier_stick_step is not None and env < len(frontier_stick_step) else 0
+        selected_idx, scored, route_trace = _batch7_route_choice(cards, fam, env, target, current_floor_index, num_steps, original_idx, robot_xy, selection_source, stick)
+        trace['batch7_route_scores'] = _jsonable(scored)
+        trace.update(_jsonable(route_trace))
+        source = 'batch7_route_frontier'
+    elif fam.startswith('H'):
+        robot_xy = observations_cache[env].get('robot_xy', np.zeros(2)) if env < len(observations_cache) else np.zeros(2)
+        stick = int(frontier_stick_step[env]) if frontier_stick_step is not None and env < len(frontier_stick_step) else 0
+        selected_idx, scored, route_trace = _batch8_route_choice(cards, fam, env, target, current_floor_index, num_steps, original_idx, robot_xy, selection_source, stick)
+        trace['batch8_route_scores'] = _jsonable(scored)
+        trace.update(_jsonable(route_trace))
+        source = 'batch8_route_frontier'
     elif fam == 'I10':
         triggered, trigger_trace = _disagreement(cards, original_idx)
         trace.update({'deliberation_triggered': int(triggered), **trigger_trace})
@@ -702,7 +1010,7 @@ def maybe_override_frontier(planner: Any, observations_cache: List[dict], obstac
 
 def floor_probe_policy(env: int, step: int, cur_floor_index: int, floor_num: int, floor_num_steps: int, has_up_stair: bool, up_frontier_count: int, target_detected: bool, climb_stair_over: bool) -> Optional[Dict[str, Any]]:
     fam = family()
-    if fam not in ({f'C{i:02d}' for i in range(1, 11)} | {f'D{i:02d}' for i in range(1, 11)} | {f'E{i:02d}' for i in range(1, 11)} | {f'F{i:02d}' for i in range(1, 11)}):
+    if fam not in ({f'C{i:02d}' for i in range(1, 11)} | {f'D{i:02d}' for i in range(1, 11)} | {f'E{i:02d}' for i in range(1, 11)} | {f'F{i:02d}' for i in range(1, 11)} | {f'G{i:02d}' for i in range(1, 11)} | {f'H{i:02d}' for i in range(1, 11)}):
         return None
     st = _state('floor_probe', env)
     target_floor_index = 2
@@ -713,6 +1021,10 @@ def floor_probe_policy(env: int, step: int, cur_floor_index: int, floor_num: int
     elif fam.startswith('E'):
         target_floor_index = 2 if fam in {'E06', 'E07'} else 1
     elif fam.startswith('F'):
+        target_floor_index = 2
+    elif fam.startswith('G'):
+        target_floor_index = 2
+    elif fam.startswith('H'):
         target_floor_index = 2
     can_go_up = bool(climb_stair_over and has_up_stair and up_frontier_count > 0)
     event = None
@@ -819,6 +1131,35 @@ def floor_probe_policy(env: int, step: int, cur_floor_index: int, floor_num: int
             event, reason = 'navigate_upstairs_fast_recovery', 'batch6_fast_two_up_if_visible'
         elif cur_floor_index == 1 and floor_num_steps >= 35:
             event, reason = 'mark_current_floor_explored', 'batch6_floor1_quick_complete_to_find_second_stair'
+    elif fam.startswith('G'):
+        if cur_floor_index >= 2:
+            event, reason = 'block_upstairs', 'batch7_hold_after_floor_index_2'
+        elif can_go_up:
+            fast_fams = {'G03', 'G05', 'G06', 'G07', 'G08', 'G09', 'G10'}
+            event = 'navigate_upstairs_fast_recovery' if fam in fast_fams else 'navigate_upstairs'
+            reason = 'batch7_commit_to_visible_upstairs_transition'
+        elif fam in {'G04', 'G08', 'G09'} and cur_floor_index == 0 and floor_num_steps >= 220:
+            event, reason = 'mark_current_floor_explored', 'batch7_budgeted_floor0_route_compression_ge220'
+        elif fam in {'G05', 'G06', 'G07', 'G08', 'G09', 'G10'} and cur_floor_index == 1 and floor_num_steps >= 55:
+            event, reason = 'mark_current_floor_explored', 'batch7_budgeted_floor1_second_transition_search_ge55'
+    elif fam.startswith('H'):
+        if target_detected and cur_floor_index < 2:
+            event, reason = 'ignore_target', 'batch8_low_floor_target_guard'
+        elif fam in {'H07', 'H10'} and cur_floor_index < 2 and not can_go_up:
+            waypoint = _H_ROUTE_FIRST_STAIR_XY if cur_floor_index <= 0 else _H_ROUTE_SECOND_STAIR_XY
+            event, reason = 'route_waypoint', 'batch8_diagnostic_compressed_route_to_stair_waypoint'
+        elif fam in {'H06', 'H07', 'H10'} and cur_floor_index >= 2:
+            event, reason = 'route_waypoint', 'batch8_diagnostic_bed_side_waypoint'
+        elif cur_floor_index >= 2:
+            event, reason = 'block_upstairs', 'batch8_hold_after_floor_index_2'
+        elif can_go_up:
+            fast_fams = {'H02', 'H03', 'H05', 'H06', 'H07', 'H08', 'H09', 'H10'}
+            event = 'navigate_upstairs_fast_recovery' if fam in fast_fams else 'navigate_upstairs'
+            reason = 'batch8_commit_to_visible_upstairs_transition'
+        elif fam in {'H02', 'H03', 'H05', 'H06', 'H08', 'H09'} and cur_floor_index == 1 and floor_num_steps >= 45:
+            event, reason = 'mark_current_floor_explored', 'batch8_floor1_budgeted_second_transition_search_ge45'
+        elif fam in {'H04'} and cur_floor_index == 0 and floor_num_steps >= 245:
+            event, reason = 'mark_current_floor_explored', 'batch8_floor0_preserve_compress_budget_ge245'
     if event is None:
         return None
     st['event_count'] = int(st.get('event_count', 0)) + 1
@@ -837,20 +1178,21 @@ def floor_probe_policy(env: int, step: int, cur_floor_index: int, floor_num: int
         'target_detected': bool(target_detected),
         'climb_stair_over': bool(climb_stair_over),
         'override': 1,
-        'selected_goal_type': 'upstairs_probe',
+        'selected_goal_type': 'route_waypoint' if event == 'route_waypoint' else 'upstairs_probe',
+        'waypoint_xy': _jsonable(_H_ROUTE_BED_WAYPOINT_XY if (fam.startswith('H') and cur_floor_index >= 2) else (_H_ROUTE_SECOND_STAIR_XY if (fam.startswith('H') and cur_floor_index == 1) else _H_ROUTE_FIRST_STAIR_XY)) if event == 'route_waypoint' else None,
     }
 
 
 
 def stair_progress_policy(env: int, step: int, cur_floor_index: int, climb_stair_flag: int, get_close_step: int, frontier_stick_step: int, distance_to_stair: Any, reach_stair: bool, reach_stair_centroid: bool) -> Optional[Dict[str, Any]]:
     fam = family()
-    if fam not in {'D02', 'D05', 'D06', 'D09', 'D10', 'E07'} | {f'F{i:02d}' for i in range(1, 11)}:
+    if fam not in {'D02', 'D05', 'D06', 'D09', 'D10', 'E07'} | {f'F{i:02d}' for i in range(1, 11)} | {f'G{i:02d}' for i in range(1, 11)} | {f'H{i:02d}' for i in range(1, 11)}:
         return None
     if climb_stair_flag != 1:
         return None
     d = _safe_float(distance_to_stair, None)
     threshold = 18
-    if fam in {'D06', 'D09', 'E07'} or fam.startswith('F'):
+    if fam in {'D06', 'D09', 'E07'} or fam.startswith('F') or fam.startswith('G') or fam.startswith('H'):
         threshold = 8
     elif fam in {'D02', 'D05'}:
         threshold = 12

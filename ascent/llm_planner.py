@@ -142,6 +142,7 @@ class Ascent_LLM_Planner:
                     selection_source,
                     frontier_stick_step=frontier_stick_step,
                     current_floor_index=cur_floor_index[env] if cur_floor_index else None,
+                    num_steps=num_steps[env] if num_steps else None,
                 )
 
             # 5. 处理前沿点粘滞/循环检测和禁用

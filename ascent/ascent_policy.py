@@ -810,6 +810,10 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                             mode = "batch6_floor2_bed_waypoint"
                             waypoint = np.asarray(floor_probe_trace.get("waypoint_xy"), dtype=float)
                             pointnav_action = self._navigate(observations, waypoint[:2], stop=False, env=env, ori_masks=masks)
+                        elif event == "route_waypoint":
+                            mode = "batch8_route_waypoint"
+                            waypoint = np.asarray(floor_probe_trace.get("waypoint_xy"), dtype=float)
+                            pointnav_action = self._navigate(observations, waypoint[:2], stop=False, env=env, ori_masks=masks)
                         elif event == "ignore_target":
                             mode = "floor_probe_ignore_target_explore"
                             pointnav_action = self._explore(observations, env, masks)
