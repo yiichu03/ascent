@@ -493,7 +493,15 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 return None
 
         if actual_goal is not None:
-            return actual_goal
+            filtered_goal, target_gate_trace = zs_adapters.batch11_filter_target_goal(
+                env,
+                self._num_steps[env],
+                self._map_controller._cur_floor_index[env],
+                actual_goal,
+            )
+            if target_gate_trace is not None:
+                zs_adapters.remember_policy_event(env, target_gate_trace)
+            return filtered_goal
 
         if zs.enabled("ZS001_TARGET_EVIDENCE_HOLD") and self._zs_recent_target_evidence(env):
             return self._zs_last_target_goal[env]
@@ -551,7 +559,7 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             self._map_controller._frontier_stick_step[env] = 0
 
     def _zs_stair_fast_recovery_enabled(self) -> bool:
-        return zs.enabled("ZS005_STAIR_FAST_RECOVERY") or zs_adapters.family() in {"D06", "D09", "E07"} or zs_adapters.family().startswith("F") or zs_adapters.family().startswith("K")
+        return zs.enabled("ZS005_STAIR_FAST_RECOVERY") or zs_adapters.family() in {"D06", "D09", "E07"} or zs_adapters.family().startswith("F") or zs_adapters.family().startswith("K") or zs_adapters.batch11_fast_stair_enabled()
 
     def _zs_stair_close_limits(self) -> Tuple[float, int, int]:
         if self._zs_stair_fast_recovery_enabled():
@@ -869,6 +877,22 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     pointnav_action = torch.tensor([[action_numpy]], dtype=torch.int64, device=masks.device)
                     print("Continuous forward to force turn right.")
 
+            batch11_action_trace = zs_adapters.batch11_action_override(
+                env,
+                self._num_steps[env],
+                self._map_controller._cur_floor_index[env],
+                self._map_controller._obstacle_map[env]._floor_num_steps,
+                mode,
+                action_numpy,
+                robot_xy,
+                self.cur_frontier[env],
+            )
+            if batch11_action_trace is not None:
+                zs_adapters.remember_policy_event(env, batch11_action_trace)
+                action_numpy = int(batch11_action_trace.get("policy_action", action_numpy))
+                pointnav_action = torch.tensor([[action_numpy]], dtype=torch.int64, device=masks.device)
+                mode = f"{mode}_batch11_action_compress"
+
             if self._num_steps[env] == self.max_episode_steps - 1:
                 action_numpy = 0
                 pointnav_action = torch.tensor([[action_numpy]], dtype=torch.int64, device=masks.device)
@@ -902,12 +926,20 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
 
     def _initialize(self, env: int, masks: Tensor) -> Tensor:
         """Turn left 30 degrees 12 times to get a 360 view at the beginning"""
-        # self._map_controller._done_initializing[env] = not self._num_steps[env] < 11  # type: ignore
-        if self._map_controller._initialize_step[env] > 11: # 11, 12 step is for the first step in this floor
+        init_trace = zs_adapters.batch11_initialization_limit(
+            env,
+            self._num_steps[env],
+            self._map_controller._cur_floor_index[env],
+            self._map_controller._obstacle_map[env]._floor_num_steps,
+        )
+        init_limit = int(init_trace.get("initialize_turn_limit", 12)) if init_trace is not None else 12
+        if init_trace is not None:
+            zs_adapters.remember_policy_event(env, init_trace)
+        if self._map_controller._initialize_step[env] > init_limit - 1:
             self._map_controller._done_initializing[env] = True
-            self._map_controller._obstacle_map[env]._tight_search_thresh = False 
+            self._map_controller._obstacle_map[env]._tight_search_thresh = False
         else:
-            self._map_controller._initialize_step[env] += 1 
+            self._map_controller._initialize_step[env] += 1
         return get_action_tensor(TURN_LEFT, device=masks.device)
 
     def _explore(self, observations: Union[Dict[str, Tensor], "TensorDict"], env: int, masks: Tensor) -> Tensor:

@@ -147,7 +147,9 @@ class Ascent_LLM_Planner:
 
             # 5. 处理前沿点粘滞/循环检测和禁用
             # 这一部分逻辑相对独立且复杂，可以封装
-            self._handle_frontier_stick_and_disable(best_frontier, robot_xy, env, last_frontier_distance, frontier_stick_step, obstacle_map)
+            floor_idx_for_stick = current_floor_index[env] if current_floor_index is not None and env < len(current_floor_index) else None
+            step_for_stick = num_steps[env] if num_steps is not None and env < len(num_steps) else None
+            self._handle_frontier_stick_and_disable(best_frontier, robot_xy, env, last_frontier_distance, frontier_stick_step, obstacle_map, floor_idx_for_stick, step_for_stick)
 
             self.last_decision_trace[env] = {
                 "variant": zs.variant(),
@@ -287,7 +289,7 @@ class Ascent_LLM_Planner:
 
         return sorted_pts[best_frontier_idx], sorted_values[best_frontier_idx]
 
-    def _handle_frontier_stick_and_disable(self, current_best_frontier, robot_xy, env, last_frontier_distance, frontier_stick_step, obstacle_map,):
+    def _handle_frontier_stick_and_disable(self, current_best_frontier, robot_xy, env, last_frontier_distance, frontier_stick_step, obstacle_map, current_floor_index=None, num_steps=None):
         # 将前沿点粘滞和禁用逻辑封装
         if np.array_equal(self._last_frontier[env], current_best_frontier):
             if frontier_stick_step[env] == 0:
@@ -303,6 +305,9 @@ class Ascent_LLM_Planner:
                     sticky_threshold = STICKY_FRONTIER_STEP_THRESHOLD
                     if zs.enabled("ZS004_FAST_FRONTIER_RETIRE") or zs.enabled_for_case("ATTR006_FRONTIER_STRICT", "hm3d_r0_006"):
                         sticky_threshold = zs.int_env("ASCENT_ZS_FRONTIER_STICKY_STEPS", 8)
+                    sticky_threshold, threshold_trace = zs_adapters.batch11_frontier_threshold(sticky_threshold, env, 'sticky', current_floor_index, num_steps, current_best_frontier)
+                    if threshold_trace is not None:
+                        zs_adapters.remember_policy_event(env, threshold_trace)
                     if frontier_stick_step[env] >= sticky_threshold:
                         obstacle_map[env]._disabled_frontiers.add(tuple(current_best_frontier))
                         print(f"Frontier {current_best_frontier} is disabled due to no movement.")
@@ -323,6 +328,9 @@ class Ascent_LLM_Planner:
             repeated_threshold = REPEATED_SELECTION_THRESHOLD
             if zs.enabled("ZS004_FAST_FRONTIER_RETIRE") or zs.enabled_for_case("ATTR006_FRONTIER_STRICT", "hm3d_r0_006"):
                 repeated_threshold = zs.int_env("ASCENT_ZS_FRONTIER_REPEAT_STEPS", 6)
+            repeated_threshold, threshold_trace = zs_adapters.batch11_frontier_threshold(repeated_threshold, env, 'repeat', current_floor_index, num_steps, current_best_frontier)
+            if threshold_trace is not None:
+                zs_adapters.remember_policy_event(env, threshold_trace)
             if obstacle_map[env]._best_frontier_selection_count[frontier_tuple] >= repeated_threshold:
                 obstacle_map[env]._disabled_frontiers.add(frontier_tuple)
                 print(f"Frontier {current_best_frontier} is disabled due to repeated non-consecutive selection.")

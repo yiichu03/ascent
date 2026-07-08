@@ -159,6 +159,19 @@ BATCH10_VARIANTS = [
     '20260708_K10_E01_ROUTE_COMPRESS_PLUS_HIGH_VERIFY_500',
 ]
 
+BATCH11_VARIANTS = [
+    '20260708_L01_E01_INIT8_500',
+    '20260708_L02_E01_INIT6_500',
+    '20260708_L03_E01_LOW_TARGET_CAP6_500',
+    '20260708_L04_E01_LOW_TARGET_CAP4_500',
+    '20260708_L05_E01_TURN_COMPRESS5_500',
+    '20260708_L06_E01_TURN_COMPRESS4_500',
+    '20260708_L07_E01_MILD_STAIR_RECOVERY_500',
+    '20260708_L08_E01_INIT8_TARGET6_TURN5_500',
+    '20260708_L09_E01_INIT6_TARGET4_TURN4_STAIR_500',
+    '20260708_L10_E01_COMBO_FLOOR1_BUDGET_500',
+]
+
 _META.update({
     'B01': ('20260707_B01_CURRENT_TARGET_STOP_090', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'AscentTransition', 'None', 'TargetSeenStop090', 'None', 'current target evidence stop at 0.90m'),
     'B02': ('20260707_B02_CURRENT_TARGET_STOP_080', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'AscentTransition', 'None', 'TargetSeenStop080', 'None', 'current target evidence stop at 0.80m'),
@@ -277,6 +290,19 @@ _META.update({
     'K10': ('20260708_K10_E01_ROUTE_COMPRESS_PLUS_HIGH_VERIFY_500', 'BudgetedOptionReasoner', 'E01RouteMemory', 'E01CompressHighVerifyScore', 'BudgetedE01Transitions', 'FastStairRecovery', 'LowFloorTargetGuard', 'None', 'combined E01 route compression plus high-floor verification-oriented search'),
 })
 
+_META.update({
+    'L01': ('20260708_L01_E01_INIT8_500', 'AscentReasoner', 'E01RouteMemory', 'AscentFrontierScore', 'E01FastFirstUpstairs', 'None', 'None', 'None', 'E01 route with shorter initial scan: 8-turn initialization'),
+    'L02': ('20260708_L02_E01_INIT6_500', 'AscentReasoner', 'E01RouteMemory', 'AscentFrontierScore', 'E01FastFirstUpstairs', 'None', 'None', 'None', 'E01 route with shorter initial scan: 6-turn initialization'),
+    'L03': ('20260708_L03_E01_LOW_TARGET_CAP6_500', 'AscentReasoner', 'E01RouteMemory', 'AscentFrontierScore', 'E01FastFirstUpstairs', 'None', 'LowFloorTargetCap6', 'None', 'E01 route with low-floor false-target navigation capped at 6 steps'),
+    'L04': ('20260708_L04_E01_LOW_TARGET_CAP4_500', 'AscentReasoner', 'E01RouteMemory', 'AscentFrontierScore', 'E01FastFirstUpstairs', 'None', 'LowFloorTargetCap4', 'None', 'E01 route with low-floor false-target navigation capped at 4 steps'),
+    'L05': ('20260708_L05_E01_TURN_COMPRESS5_500', 'AscentReasoner', 'E01RouteMemory', 'AscentFrontierScore', 'E01FastFirstUpstairs', 'TurnCompress5', 'None', 'None', 'E01 route with same-cell turn compression after 5 repeated turns'),
+    'L06': ('20260708_L06_E01_TURN_COMPRESS4_500', 'AscentReasoner', 'E01RouteMemory', 'AscentFrontierScore', 'E01FastFirstUpstairs', 'TurnCompress4', 'None', 'None', 'E01 route with same-cell turn compression after 4 repeated turns'),
+    'L07': ('20260708_L07_E01_MILD_STAIR_RECOVERY_500', 'AscentReasoner', 'E01RouteMemory', 'AscentFrontierScore', 'E01FastFirstUpstairs', 'MildStairRecovery', 'None', 'None', 'E01 route with mild stair approach/climb recovery'),
+    'L08': ('20260708_L08_E01_INIT8_TARGET6_TURN5_500', 'AscentReasoner', 'E01RouteMemory', 'AscentFrontierScore', 'E01FastFirstUpstairs', 'TurnCompress5', 'LowFloorTargetCap6', 'None', 'E01-preserving combined mild early-waste compression'),
+    'L09': ('20260708_L09_E01_INIT6_TARGET4_TURN4_STAIR_500', 'AscentReasoner', 'E01RouteMemory', 'AscentFrontierScore', 'E01FastFirstUpstairs', 'TurnCompress4PlusStair', 'LowFloorTargetCap4', 'None', 'E01 route with stronger early compression plus mild stair recovery'),
+    'L10': ('20260708_L10_E01_COMBO_FLOOR1_BUDGET_500', 'BudgetedOptionReasoner', 'E01RouteMemory', 'AscentFrontierScore', 'E01FastFirstUpstairs', 'TurnCompress4PlusStair', 'LowFloorTargetCap4', 'None', 'E01 route with early compression and conservative floor1 budget reserve'),
+})
+
 def normalize_variant(raw: Optional[str] = None) -> str:
     value = (raw if raw is not None else zs.variant() or '').strip().upper()
     return _ALIASES.get(value, value)
@@ -284,11 +310,11 @@ def normalize_variant(raw: Optional[str] = None) -> str:
 
 def family(raw: Optional[str] = None) -> str:
     value = normalize_variant(raw)
-    for pattern in (r'20260706_(I\d\d)', r'2026070[78]_([BCDEFGHJK]\d\d)'):
+    for pattern in (r'20260706_(I\d\d)', r'2026070[78]_([BCDEFGHJKL]\d\d)'):
         m = re.search(pattern, value)
         if m:
             return m.group(1)
-    m = re.search(r'\b(I\d\d|B\d\d|C\d\d|D\d\d|E\d\d|F\d\d|G\d\d|H\d\d|J\d\d)\b', value)
+    m = re.search(r'\b(I\d\d|B\d\d|C\d\d|D\d\d|E\d\d|F\d\d|G\d\d|H\d\d|J\d\d|K\d\d|L\d\d)\b', value)
     return m.group(1) if m else ''
 
 
@@ -367,6 +393,184 @@ def _same_xy(a: Any, b: Any, eps: float = 1e-3) -> bool:
         return bool(np.linalg.norm(aa - bb) <= eps)
     except Exception:
         return False
+
+
+def _batch11_config(fam: Optional[str] = None) -> Dict[str, Any]:
+    fam = fam or family()
+    if not fam.startswith('L'):
+        return {}
+    cfg: Dict[str, Any] = {
+        'init_turns': None,
+        'low_target_cap': None,
+        'turn_compress': None,
+        'sticky_steps': None,
+        'repeat_steps': None,
+        'fast_stair': False,
+        'stair_force_threshold': 12,
+        'floor1_budget_steps': None,
+    }
+    if fam == 'L01':
+        cfg['init_turns'] = 8
+    elif fam == 'L02':
+        cfg['init_turns'] = 6
+    elif fam == 'L03':
+        cfg['low_target_cap'] = 6
+    elif fam == 'L04':
+        cfg['low_target_cap'] = 4
+    elif fam == 'L05':
+        cfg['turn_compress'] = 5
+    elif fam == 'L06':
+        cfg['turn_compress'] = 4
+    elif fam == 'L07':
+        cfg.update({'fast_stair': True, 'stair_force_threshold': 12})
+    elif fam == 'L08':
+        cfg.update({'init_turns': 8, 'low_target_cap': 6, 'turn_compress': 5, 'sticky_steps': 20, 'repeat_steps': 16})
+    elif fam == 'L09':
+        cfg.update({'init_turns': 6, 'low_target_cap': 4, 'turn_compress': 4, 'sticky_steps': 16, 'repeat_steps': 12, 'fast_stair': True, 'stair_force_threshold': 10})
+    elif fam == 'L10':
+        cfg.update({'init_turns': 6, 'low_target_cap': 4, 'turn_compress': 4, 'sticky_steps': 16, 'repeat_steps': 12, 'fast_stair': True, 'stair_force_threshold': 10, 'floor1_budget_steps': 135})
+    return cfg
+
+
+def batch11_fast_stair_enabled(raw: Optional[str] = None) -> bool:
+    return bool(_batch11_config(family(raw)).get('fast_stair'))
+
+
+def batch11_initialization_limit(env: int, step: int, cur_floor_index: int, floor_num_steps: int) -> Optional[Dict[str, Any]]:
+    cfg = _batch11_config()
+    limit = cfg.get('init_turns')
+    if limit is None:
+        return None
+    return {
+        **variant_metadata(),
+        'adapter_stage': 'initialization',
+        'initialization_event': 'shorten_initial_scan',
+        'initialize_turn_limit': int(limit),
+        'cur_floor_index': int(cur_floor_index),
+        'floor_num_steps': int(floor_num_steps),
+        'override': 1,
+    }
+
+
+def batch11_filter_target_goal(env: int, step: int, cur_floor_index: int, actual_goal: Any) -> Tuple[Any, Optional[Dict[str, Any]]]:
+    cfg = _batch11_config()
+    cap = cfg.get('low_target_cap')
+    if cap is None or actual_goal is None:
+        return actual_goal, None
+    if int(cur_floor_index) >= 2:
+        return actual_goal, None
+    st = _state('batch11_target_gate', env)
+    used = int(st.get('low_floor_target_nav_steps', 0))
+    if used < int(cap):
+        st['low_floor_target_nav_steps'] = used + 1
+        event = 'allow_low_floor_target_probe'
+        filtered_goal = actual_goal
+        override = 0
+    else:
+        st['low_floor_target_ignored'] = True
+        event = 'ignore_low_floor_target_after_cap'
+        filtered_goal = None
+        override = 1
+    return filtered_goal, {
+        **variant_metadata(),
+        'adapter_stage': 'target_gate',
+        'target_gate_event': event,
+        'low_floor_target_nav_steps': int(st.get('low_floor_target_nav_steps', used)),
+        'low_floor_target_cap': int(cap),
+        'cur_floor_index': int(cur_floor_index),
+        'target_goal': _jsonable(actual_goal),
+        'override': override,
+        'selected_goal_type': 'target_object' if filtered_goal is not None else 'explore_after_low_floor_target_cap',
+    }
+
+
+def batch11_low_floor_target_ignored(env: int) -> bool:
+    return bool(_state('batch11_target_gate', env).get('low_floor_target_ignored'))
+
+
+def batch11_action_override(env: int, step: int, cur_floor_index: int, floor_num_steps: int, mode: str, action: Any, robot_xy: Any, current_frontier: Any) -> Optional[Dict[str, Any]]:
+    cfg = _batch11_config()
+    limit = cfg.get('turn_compress')
+    if limit is None:
+        return None
+    try:
+        act = int(action)
+    except Exception:
+        return None
+    if act not in (2, 3):
+        st = _state('batch11_action', env)
+        st['turn_run'] = 0
+        st['last_key'] = None
+        return None
+    # Keep the intervention local: it only breaks repeated same-cell turns, and it
+    # does not change frontier/route selection directly.
+    try:
+        xy = np.asarray(robot_xy, dtype=float).reshape(-1)[:2]
+    except Exception:
+        xy = np.zeros(2, dtype=float)
+    try:
+        fr = np.asarray(current_frontier, dtype=float).reshape(-1)[:2]
+    except Exception:
+        fr = np.zeros(2, dtype=float)
+    key = (
+        int(cur_floor_index),
+        round(float(xy[0]) / 0.35),
+        round(float(xy[1]) / 0.35),
+        round(float(fr[0]) / 0.50),
+        round(float(fr[1]) / 0.50),
+        str(mode),
+    )
+    st = _state('batch11_action', env)
+    if st.get('last_key') == key:
+        st['turn_run'] = int(st.get('turn_run', 0)) + 1
+    else:
+        st['turn_run'] = 1
+        st['last_key'] = key
+    if int(st['turn_run']) < int(limit):
+        return None
+    st['turn_compress_events'] = int(st.get('turn_compress_events', 0)) + 1
+    st['turn_run'] = 0
+    return {
+        **variant_metadata(),
+        'adapter_stage': 'action_compression',
+        'action_compression_event': 'force_forward_after_same_cell_turns',
+        'turn_compress_limit': int(limit),
+        'turn_compress_event_count': int(st['turn_compress_events']),
+        'original_action': act,
+        'policy_action': 1,
+        'cur_floor_index': int(cur_floor_index),
+        'floor_num_steps': int(floor_num_steps),
+        'mode': str(mode),
+        'robot_cell_key': _jsonable(key),
+        'current_frontier': _jsonable(current_frontier),
+        'override': 1,
+        'selected_goal_type': 'route_progress_action',
+    }
+
+
+def batch11_frontier_threshold(default_threshold: int, env: int, kind: str, cur_floor_index: Optional[int], num_steps: Optional[int], current_frontier: Any) -> Tuple[int, Optional[Dict[str, Any]]]:
+    cfg = _batch11_config()
+    key = 'sticky_steps' if kind == 'sticky' else 'repeat_steps'
+    value = cfg.get(key)
+    if value is None:
+        return int(default_threshold), None
+    # Do not aggressively retire high-floor target-search frontiers; this is aimed at
+    # the first low-floor repeated exploration that E01 wastes before the useful route.
+    if cur_floor_index is not None and int(cur_floor_index) >= 2:
+        return int(default_threshold), None
+    threshold = max(2, int(value))
+    return threshold, {
+        **variant_metadata(),
+        'adapter_stage': 'frontier_retire',
+        'frontier_retire_event': f'batch11_{kind}_threshold',
+        'frontier_retire_kind': str(kind),
+        'frontier_retire_threshold': threshold,
+        'default_threshold': int(default_threshold),
+        'cur_floor_index': int(cur_floor_index) if cur_floor_index is not None else None,
+        'num_steps': int(num_steps) if num_steps is not None else None,
+        'current_frontier': _jsonable(current_frontier),
+        'override': int(threshold != int(default_threshold)),
+    }
 
 
 def _room_objects(object_map: Any, env: int, step: Any) -> Tuple[str, List[str]]:
@@ -1257,7 +1461,7 @@ def maybe_override_frontier(planner: Any, observations_cache: List[dict], obstac
 
 def floor_probe_policy(env: int, step: int, cur_floor_index: int, floor_num: int, floor_num_steps: int, has_up_stair: bool, up_frontier_count: int, target_detected: bool, climb_stair_over: bool) -> Optional[Dict[str, Any]]:
     fam = family()
-    if fam not in ({f'C{i:02d}' for i in range(1, 11)} | {f'D{i:02d}' for i in range(1, 11)} | {f'E{i:02d}' for i in range(1, 11)} | {f'F{i:02d}' for i in range(1, 11)} | {f'G{i:02d}' for i in range(1, 11)} | {f'H{i:02d}' for i in range(1, 11)} | {f'J{i:02d}' for i in range(1, 11)} | {f'K{i:02d}' for i in range(1, 11)}):
+    if fam not in ({f'C{i:02d}' for i in range(1, 11)} | {f'D{i:02d}' for i in range(1, 11)} | {f'E{i:02d}' for i in range(1, 11)} | {f'F{i:02d}' for i in range(1, 11)} | {f'G{i:02d}' for i in range(1, 11)} | {f'H{i:02d}' for i in range(1, 11)} | {f'J{i:02d}' for i in range(1, 11)} | {f'K{i:02d}' for i in range(1, 11)} | {f'L{i:02d}' for i in range(1, 11)}):
         return None
     st = _state('floor_probe', env)
     target_floor_index = 2
@@ -1277,6 +1481,8 @@ def floor_probe_policy(env: int, step: int, cur_floor_index: int, floor_num: int
         target_floor_index = 2
     elif fam.startswith('K'):
         target_floor_index = 2
+    elif fam.startswith('L'):
+        target_floor_index = 1
     can_go_up = bool(climb_stair_over and has_up_stair and up_frontier_count > 0)
     event = None
     reason = 'no_override'
@@ -1446,6 +1652,15 @@ def floor_probe_policy(env: int, step: int, cur_floor_index: int, floor_num: int
                 event, reason = 'mark_current_floor_explored', 'batch10_floor1_budgeted_second_transition_search'
         elif cur_floor_index >= 2 and fam in {'K07', 'K08', 'K09', 'K10'}:
             event, reason = 'block_upstairs', 'batch10_hold_high_floor_for_target_search'
+    elif fam.startswith('L'):
+        cfg = _batch11_config(fam)
+        if target_detected and cur_floor_index < 2 and batch11_low_floor_target_ignored(env):
+            event, reason = 'ignore_target', 'batch11_low_floor_target_nav_cap_exhausted'
+        elif cur_floor_index < 1 and can_go_up:
+            event = 'navigate_upstairs_fast_recovery' if bool(cfg.get('fast_stair')) else 'navigate_upstairs'
+            reason = 'batch11_e01_fast_first_upstairs_preserved'
+        elif fam == 'L10' and cur_floor_index == 1 and floor_num_steps >= int(cfg.get('floor1_budget_steps') or 9999):
+            event, reason = 'mark_current_floor_explored', 'batch11_conservative_floor1_budget_reserve'
     elif fam.startswith('J'):
         if target_detected and cur_floor_index < 2:
             event, reason = 'ignore_target', 'batch9_low_floor_target_guard'
@@ -1496,7 +1711,7 @@ def floor_probe_policy(env: int, step: int, cur_floor_index: int, floor_num: int
 
 def stair_progress_policy(env: int, step: int, cur_floor_index: int, climb_stair_flag: int, get_close_step: int, frontier_stick_step: int, distance_to_stair: Any, reach_stair: bool, reach_stair_centroid: bool) -> Optional[Dict[str, Any]]:
     fam = family()
-    if fam not in {'D02', 'D05', 'D06', 'D09', 'D10', 'E07'} | {f'F{i:02d}' for i in range(1, 11)} | {f'G{i:02d}' for i in range(1, 11)} | {f'H{i:02d}' for i in range(1, 11)} | {f'J{i:02d}' for i in range(1, 11)} | {f'K{i:02d}' for i in range(1, 11)}:
+    if fam not in {'D02', 'D05', 'D06', 'D09', 'D10', 'E07'} | {f'F{i:02d}' for i in range(1, 11)} | {f'G{i:02d}' for i in range(1, 11)} | {f'H{i:02d}' for i in range(1, 11)} | {f'J{i:02d}' for i in range(1, 11)} | {f'K{i:02d}' for i in range(1, 11)} | {f'L{i:02d}' for i in range(1, 11)}:
         return None
     if climb_stair_flag != 1:
         return None
@@ -1504,6 +1719,8 @@ def stair_progress_policy(env: int, step: int, cur_floor_index: int, climb_stair
     threshold = 18
     if fam in {'D06', 'D09', 'E07'} or fam.startswith('F') or fam.startswith('G') or fam.startswith('H') or fam.startswith('J') or fam.startswith('K'):
         threshold = 8
+    elif fam.startswith('L'):
+        threshold = int(_batch11_config(fam).get('stair_force_threshold') or 12)
     elif fam in {'D02', 'D05'}:
         threshold = 12
     if fam in {'K05', 'K06', 'K10'}:
