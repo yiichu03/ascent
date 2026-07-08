@@ -147,7 +147,7 @@ class Ascent_LLM_Planner:
 
             # 5. 处理前沿点粘滞/循环检测和禁用
             # 这一部分逻辑相对独立且复杂，可以封装
-            floor_idx_for_stick = current_floor_index[env] if current_floor_index is not None and env < len(current_floor_index) else None
+            floor_idx_for_stick = cur_floor_index[env] if cur_floor_index is not None and env < len(cur_floor_index) else None
             step_for_stick = num_steps[env] if num_steps is not None and env < len(num_steps) else None
             self._handle_frontier_stick_and_disable(best_frontier, robot_xy, env, last_frontier_distance, frontier_stick_step, obstacle_map, floor_idx_for_stick, step_for_stick)
 

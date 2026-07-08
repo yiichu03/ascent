@@ -507,11 +507,15 @@ def batch11_action_override(env: int, step: int, cur_floor_index: int, floor_num
     try:
         xy = np.asarray(robot_xy, dtype=float).reshape(-1)[:2]
     except Exception:
-        xy = np.zeros(2, dtype=float)
+        return None
+    if xy.size < 2:
+        return None
     try:
         fr = np.asarray(current_frontier, dtype=float).reshape(-1)[:2]
     except Exception:
-        fr = np.zeros(2, dtype=float)
+        return None
+    if fr.size < 2:
+        return None
     key = (
         int(cur_floor_index),
         round(float(xy[0]) / 0.35),
