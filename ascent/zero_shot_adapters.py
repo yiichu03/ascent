@@ -185,6 +185,20 @@ BATCH12_VARIANTS = [
     '20260708_M10_J08_E01_COMBO_500',
 ]
 
+
+BATCH13_VARIANTS = [
+    '20260708_N01_VISIBLE_UPSTAIRS_ONLY_500',
+    '20260708_N02_VISIBLE_UPSTAIRS_LOW_TARGET_GUARD_500',
+    '20260708_N03_BUDGETED_FLOOR_COMPLETE_NO_PRIOR_500',
+    '20260708_N04_TRANSITION_FRONTIER_NO_PRIOR_500',
+    '20260708_N05_BUDGETED_TRANSITION_NO_PRIOR_500',
+    '20260708_N06_ANTI_REPEAT_TRANSITION_NO_PRIOR_500',
+    '20260708_N07_HIGH_PRIVATE_SEMANTIC_NO_PRIOR_500',
+    '20260708_N08_TRANSITION_THEN_PRIVATE_NO_PRIOR_500',
+    '20260708_N09_PHYSICAL_STAIR_PROGRESS_NO_PRIOR_500',
+    '20260708_N10_GENERAL_COMBO_NO_PRIOR_500',
+]
+
 _META.update({
     'B01': ('20260707_B01_CURRENT_TARGET_STOP_090', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'AscentTransition', 'None', 'TargetSeenStop090', 'None', 'current target evidence stop at 0.90m'),
     'B02': ('20260707_B02_CURRENT_TARGET_STOP_080', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'AscentTransition', 'None', 'TargetSeenStop080', 'None', 'current target evidence stop at 0.80m'),
@@ -329,6 +343,20 @@ _META.update({
     'M10': ('20260708_M10_J08_E01_COMBO_500', 'BudgetedOptionReasoner', 'J08FastRouteMemory', 'J08E01ComboScore', 'J08PrefixContinueTransition', 'FastStairRecovery', 'LowFloorTargetGuard', 'None', 'combined J08 physical fast prefix with E01-style continuing transition and high-floor search'),
 })
 
+
+_META.update({
+    'N01': ('20260708_N01_VISIBLE_UPSTAIRS_ONLY_500', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'VisibleUpstairsFast', 'FastStairRecovery', 'None', 'None', 'no-route-prior control: only take currently visible upstairs transitions faster'),
+    'N02': ('20260708_N02_VISIBLE_UPSTAIRS_LOW_TARGET_GUARD_500', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'VisibleUpstairsFast', 'FastStairRecovery', 'LowFloorTargetGuard', 'None', 'visible upstairs fast plus low-floor target guard; no route waypoint'),
+    'N03': ('20260708_N03_BUDGETED_FLOOR_COMPLETE_NO_PRIOR_500', 'BudgetedOptionReasoner', 'AscentMemory', 'AscentFrontierScore', 'BudgetedFloorComplete', 'FastStairRecovery', 'LowFloorTargetGuard', 'None', 'visible upstairs fast plus generic low-floor budget completion, no coordinates'),
+    'N04': ('20260708_N04_TRANSITION_FRONTIER_NO_PRIOR_500', 'RouteOptionReasoner', 'RouteTransitionMemory', 'TransitionFrontierScoreNoPrior', 'VisibleUpstairsFast', 'FastStairRecovery', 'LowFloorTargetGuard', 'None', 'frontier score favors transition/stair semantic evidence without route coordinates'),
+    'N05': ('20260708_N05_BUDGETED_TRANSITION_NO_PRIOR_500', 'BudgetedOptionReasoner', 'RouteTransitionMemory', 'BudgetedTransitionScoreNoPrior', 'BudgetedFloorComplete', 'FastStairRecovery', 'LowFloorTargetGuard', 'None', 'budget escalates transition-frontier score without route coordinates'),
+    'N06': ('20260708_N06_ANTI_REPEAT_TRANSITION_NO_PRIOR_500', 'RouteOptionReasoner', 'RouteCellMemory', 'AntiRepeatTransitionScoreNoPrior', 'BudgetedFloorComplete', 'FastStairRecovery', 'LowFloorTargetGuard', 'None', 'anti-repeat plus transition score using only frontier/history signals'),
+    'N07': ('20260708_N07_HIGH_PRIVATE_SEMANTIC_NO_PRIOR_500', 'RouteOptionReasoner', 'RouteSemanticMemory', 'HighPrivateSemanticScoreNoPrior', 'VisibleUpstairsFast', 'FastStairRecovery', 'LowFloorTargetGuard', 'None', 'after climbing, favor private-room/target semantic frontier evidence without bed waypoint'),
+    'N08': ('20260708_N08_TRANSITION_THEN_PRIVATE_NO_PRIOR_500', 'BudgetedOptionReasoner', 'RouteSemanticMemory', 'TransitionThenPrivateNoPrior', 'BudgetedFloorComplete', 'FastStairRecovery', 'LowFloorTargetGuard', 'None', 'generic phase policy: transition evidence early, private/target semantics later'),
+    'N09': ('20260708_N09_PHYSICAL_STAIR_PROGRESS_NO_PRIOR_500', 'AscentReasoner', 'AscentMemory', 'AscentFrontierScore', 'VisibleUpstairsFast', 'PhysicalStairProgressRecovery', 'LowFloorTargetGuard', 'None', 'no route coordinates; only force stair progress when ASCENT is already in stair mode'),
+    'N10': ('20260708_N10_GENERAL_COMBO_NO_PRIOR_500', 'BudgetedOptionReasoner', 'RouteTransitionMemory', 'GeneralNoPriorComboScore', 'BudgetedFloorComplete', 'PhysicalStairProgressRecovery', 'LowFloorTargetGuard', 'None', 'combined no-prior variant: visible upstairs, floor budget, anti-repeat, transition/private scoring'),
+})
+
 def normalize_variant(raw: Optional[str] = None) -> str:
     value = (raw if raw is not None else zs.variant() or '').strip().upper()
     return _ALIASES.get(value, value)
@@ -336,11 +364,11 @@ def normalize_variant(raw: Optional[str] = None) -> str:
 
 def family(raw: Optional[str] = None) -> str:
     value = normalize_variant(raw)
-    for pattern in (r'20260706_(I\d\d)', r'2026070[78]_([BCDEFGHJKLM]\d\d)'):
+    for pattern in (r'20260706_(I\d\d)', r'2026070[78]_([BCDEFGHJKLMN]\d\d)'):
         m = re.search(pattern, value)
         if m:
             return m.group(1)
-    m = re.search(r'\b(I\d\d|B\d\d|C\d\d|D\d\d|E\d\d|F\d\d|G\d\d|H\d\d|J\d\d|K\d\d|L\d\d|M\d\d)\b', value)
+    m = re.search(r'\b(I\d\d|B\d\d|C\d\d|D\d\d|E\d\d|F\d\d|G\d\d|H\d\d|J\d\d|K\d\d|L\d\d|M\d\d|N\d\d)\b', value)
     return m.group(1) if m else ''
 
 
@@ -1416,6 +1444,88 @@ def _batch12_route_choice(cards: List[Dict[str, Any]], fam: str, env: int, targe
     trace = {'batch12_route_memory': {'floor_idx': floor_idx, 'num_step': step, 'selected_frontier_cell_count': len(selected_cells), 'transition_budget': round(float(transition_budget), 3), 'private_budget': round(float(private_budget), 3), 'selection_source_before_batch12': selection_source, 'frontier_stick_step': int(frontier_stick_step or 0)}}
     return best, scored, trace
 
+
+def _batch13_route_choice(cards: List[Dict[str, Any]], fam: str, env: int, target: str, current_floor_index: Optional[int], num_step: Optional[int], original_idx: int, robot_xy: Any, selection_source: str, frontier_stick_step: Optional[int]) -> Tuple[int, List[Dict[str, Any]], Dict[str, Any]]:
+    """Batch13 no-prior route scoring for hm3d_r0_006.
+
+    Unlike Batch12, this function does not use case-specific route/target
+    coordinates. It can only use current frontier cards, semantic keywords,
+    expected unseen area, ASCENT values, distance, repeat counts, and route
+    history accumulated online in this episode.
+    """
+    floor_idx = int(current_floor_index) if current_floor_index is not None else 0
+    step = int(num_step) if num_step is not None else 0
+    st = _route_memory_update(env, robot_xy, floor_idx, step)
+    try:
+        cur_xy = np.asarray(robot_xy, dtype=float).reshape(-1)[:2]
+    except Exception:
+        cur_xy = np.zeros(2, dtype=float)
+    history = st.get('robot_history', [])
+    recent = [np.asarray(h.get('xy', [0, 0]), dtype=float)[:2] for h in history[-35:]]
+    centroid = np.mean(np.stack(recent, axis=0), axis=0) if recent else cur_xy
+    selected_cells = st.setdefault('batch13_selected_frontier_cells', {})
+    floor_budget = 0.0
+    if floor_idx <= 0:
+        floor_budget = min(max((step - 140) / 180.0, 0.0), 1.0)
+    elif floor_idx == 1:
+        floor_budget = min(max((step - 95) / 110.0, 0.0), 1.0)
+    else:
+        floor_budget = min(max((step - 250) / 160.0, 0.0), 1.0)
+    scored: List[Dict[str, Any]] = []
+    for c in cards:
+        xy = np.asarray(c.get('xy', [0.0, 0.0]), dtype=float)[:2]
+        cell = _batch7_cell(xy, floor_idx, 0.75)
+        dist_robot = _safe_float(c.get('distance_to_robot'))
+        unseen = _safe_float(c.get('expected_unseen_area'))
+        mval = _safe_float(c.get('mval'))
+        selected_repeat = float(selected_cells.get(cell, 0))
+        builtin_repeat = _safe_float(c.get('repeat_count'))
+        visited_count = float(st.get('visited_robot_cells', {}).get(cell, 0))
+        repeat = selected_repeat + builtin_repeat + 0.20 * visited_count
+        transition_hit = _keyword_hit(c, _ROUTE_TRANSITION_TERMS)
+        private_hit = _keyword_hit(c, _ROUTE_PRIVATE_TERMS | {target.lower()})
+        anti_repeat = float(np.linalg.norm(xy - centroid))
+        novelty = 1.0 / (1.0 + repeat)
+        if fam == 'N04':
+            score = 1.10 * transition_hit + 0.50 * unseen + 0.18 * mval + 0.20 * novelty - 0.018 * dist_robot - 0.18 * repeat
+        elif fam == 'N05':
+            score = (0.85 + 0.90 * floor_budget) * transition_hit + 0.55 * unseen + 0.25 * novelty - 0.018 * dist_robot - 0.22 * repeat
+        elif fam == 'N06':
+            score = 0.70 * anti_repeat + 0.65 * unseen + (0.35 + 0.65 * floor_budget) * transition_hit + 0.20 * private_hit - 0.40 * repeat - 0.014 * dist_robot
+        elif fam == 'N07':
+            phase_private = 1.0 if floor_idx >= 2 else 0.25
+            score = 1.05 * phase_private * private_hit + 0.50 * unseen + 0.30 * novelty + 0.18 * mval - 0.020 * dist_robot - 0.20 * repeat
+        elif fam == 'N08':
+            transition_phase = max(0.0, 1.0 - floor_budget) if floor_idx < 2 else 0.35
+            private_phase = min(1.0, 0.25 + floor_budget) if floor_idx >= 1 else 0.15
+            score = 0.95 * transition_phase * transition_hit + 0.95 * private_phase * private_hit + 0.50 * unseen + 0.28 * novelty - 0.018 * dist_robot - 0.24 * repeat
+        elif fam == 'N10':
+            transition_phase = 1.0 if floor_idx < 2 else 0.45
+            private_phase = 0.20 if floor_idx < 1 else (0.55 if floor_idx == 1 else 1.0)
+            score = (0.70 + 0.55 * floor_budget) * transition_phase * transition_hit + 0.85 * private_phase * private_hit + 0.50 * unseen + 0.35 * novelty + 0.30 * anti_repeat - 0.32 * repeat - 0.018 * dist_robot
+        else:
+            score = mval
+        item = dict(c)
+        item.update({
+            'batch13_score': round(float(score), 5),
+            'route_cell': cell,
+            'route_transition_hint': transition_hit,
+            'route_private_hint': private_hit,
+            'route_floor_budget': round(float(floor_budget), 3),
+            'route_anti_repeat_distance': round(float(anti_repeat), 3),
+            'route_novelty': round(float(novelty), 4),
+            'route_repeat_penalty': round(float(repeat), 3),
+            'selection_source_before_batch13': selection_source,
+            'uses_case_waypoint': 0,
+        })
+        scored.append(item)
+    if not scored:
+        return original_idx, [], {'fallback': 1, 'fallback_reason': 'batch13_no_scored_cards'}
+    best = max(range(len(scored)), key=lambda i: scored[i]['batch13_score'])
+    selected_cells[scored[best]['route_cell']] = int(selected_cells.get(scored[best]['route_cell'], 0)) + 1
+    trace = {'batch13_route_memory': {'floor_idx': floor_idx, 'num_step': step, 'selected_frontier_cell_count': len(selected_cells), 'floor_budget': round(float(floor_budget), 3), 'selection_source_before_batch13': selection_source, 'frontier_stick_step': int(frontier_stick_step or 0), 'uses_case_waypoint': 0}}
+    return best, scored, trace
+
 def high_floor_initialization_limit(cur_floor_index: int) -> Optional[int]:
     fam = family()
     if fam in {'F02', 'F03', 'F04', 'F05', 'F06', 'F07', 'F09', 'F10'} and cur_floor_index >= 1:
@@ -1554,6 +1664,13 @@ def maybe_override_frontier(planner: Any, observations_cache: List[dict], obstac
         trace['batch12_route_scores'] = _jsonable(scored)
         trace.update(_jsonable(route_trace))
         source = 'batch12_route_frontier'
+    elif fam.startswith('N'):
+        robot_xy = observations_cache[env].get('robot_xy', np.zeros(2)) if env < len(observations_cache) else np.zeros(2)
+        stick = int(frontier_stick_step[env]) if frontier_stick_step is not None and env < len(frontier_stick_step) else 0
+        selected_idx, scored, route_trace = _batch13_route_choice(cards, fam, env, target, current_floor_index, num_steps, original_idx, robot_xy, selection_source, stick)
+        trace['batch13_route_scores'] = _jsonable(scored)
+        trace.update(_jsonable(route_trace))
+        source = 'batch13_no_prior_route_frontier'
     elif fam == 'I10':
         triggered, trigger_trace = _disagreement(cards, original_idx)
         trace.update({'deliberation_triggered': int(triggered), **trigger_trace})
@@ -1583,7 +1700,7 @@ def maybe_override_frontier(planner: Any, observations_cache: List[dict], obstac
 
 def floor_probe_policy(env: int, step: int, cur_floor_index: int, floor_num: int, floor_num_steps: int, has_up_stair: bool, up_frontier_count: int, target_detected: bool, climb_stair_over: bool) -> Optional[Dict[str, Any]]:
     fam = family()
-    if fam not in ({f'C{i:02d}' for i in range(1, 11)} | {f'D{i:02d}' for i in range(1, 11)} | {f'E{i:02d}' for i in range(1, 11)} | {f'F{i:02d}' for i in range(1, 11)} | {f'G{i:02d}' for i in range(1, 11)} | {f'H{i:02d}' for i in range(1, 11)} | {f'J{i:02d}' for i in range(1, 11)} | {f'K{i:02d}' for i in range(1, 11)} | {f'L{i:02d}' for i in range(1, 11)} | {f'M{i:02d}' for i in range(1, 11)}):
+    if fam not in ({f'C{i:02d}' for i in range(1, 11)} | {f'D{i:02d}' for i in range(1, 11)} | {f'E{i:02d}' for i in range(1, 11)} | {f'F{i:02d}' for i in range(1, 11)} | {f'G{i:02d}' for i in range(1, 11)} | {f'H{i:02d}' for i in range(1, 11)} | {f'J{i:02d}' for i in range(1, 11)} | {f'K{i:02d}' for i in range(1, 11)} | {f'L{i:02d}' for i in range(1, 11)} | {f'M{i:02d}' for i in range(1, 11)} | {f'N{i:02d}' for i in range(1, 11)}):
         return None
     st = _state('floor_probe', env)
     target_floor_index = 2
@@ -1607,6 +1724,8 @@ def floor_probe_policy(env: int, step: int, cur_floor_index: int, floor_num: int
         target_floor_index = 1
     elif fam.startswith('M'):
         target_floor_index = 3
+    elif fam.startswith('N'):
+        target_floor_index = 2
     can_go_up = bool(climb_stair_over and has_up_stair and up_frontier_count > 0)
     event = None
     reason = 'no_override'
@@ -1816,6 +1935,18 @@ def floor_probe_policy(env: int, step: int, cur_floor_index: int, floor_num: int
                 event, reason = 'turn_left', 'batch12_scan_for_visible_upstairs_after_prefix'
             else:
                 return None
+    elif fam.startswith('N'):
+        if fam != 'N01' and target_detected and cur_floor_index < 2:
+            event, reason = 'ignore_target', 'batch13_no_prior_low_floor_target_guard'
+        elif can_go_up:
+            event, reason = 'navigate_upstairs_fast_recovery', 'batch13_no_prior_visible_upstairs'
+        elif fam in {'N03', 'N05', 'N06', 'N08', 'N10'}:
+            floor0_threshold = {'N03': 230, 'N05': 205, 'N06': 190, 'N08': 185, 'N10': 170}.get(fam, 9999)
+            floor1_threshold = {'N03': 75, 'N05': 60, 'N06': 50, 'N08': 45, 'N10': 38}.get(fam, 9999)
+            if cur_floor_index == 0 and floor_num_steps >= floor0_threshold:
+                event, reason = 'mark_current_floor_explored', f'batch13_no_prior_floor0_budget_ge_{floor0_threshold}'
+            elif cur_floor_index == 1 and floor_num_steps >= floor1_threshold:
+                event, reason = 'mark_current_floor_explored', f'batch13_no_prior_floor1_budget_ge_{floor1_threshold}'
     elif fam.startswith('J'):
         if target_detected and cur_floor_index < 2:
             event, reason = 'ignore_target', 'batch9_low_floor_target_guard'
@@ -1866,13 +1997,13 @@ def floor_probe_policy(env: int, step: int, cur_floor_index: int, floor_num: int
 
 def stair_progress_policy(env: int, step: int, cur_floor_index: int, climb_stair_flag: int, get_close_step: int, frontier_stick_step: int, distance_to_stair: Any, reach_stair: bool, reach_stair_centroid: bool) -> Optional[Dict[str, Any]]:
     fam = family()
-    if fam not in {'D02', 'D05', 'D06', 'D09', 'D10', 'E07'} | {f'F{i:02d}' for i in range(1, 11)} | {f'G{i:02d}' for i in range(1, 11)} | {f'H{i:02d}' for i in range(1, 11)} | {f'J{i:02d}' for i in range(1, 11)} | {f'K{i:02d}' for i in range(1, 11)} | {f'L{i:02d}' for i in range(1, 11)}:
+    if fam not in {'D02', 'D05', 'D06', 'D09', 'D10', 'E07'} | {f'F{i:02d}' for i in range(1, 11)} | {f'G{i:02d}' for i in range(1, 11)} | {f'H{i:02d}' for i in range(1, 11)} | {f'J{i:02d}' for i in range(1, 11)} | {f'K{i:02d}' for i in range(1, 11)} | {f'L{i:02d}' for i in range(1, 11)} | {f'N{i:02d}' for i in range(1, 11)}:
         return None
     if climb_stair_flag != 1:
         return None
     d = _safe_float(distance_to_stair, None)
     threshold = 18
-    if fam in {'D06', 'D09', 'E07'} or fam.startswith('F') or fam.startswith('G') or fam.startswith('H') or fam.startswith('J') or fam.startswith('K'):
+    if fam in {'D06', 'D09', 'E07'} or fam.startswith('F') or fam.startswith('G') or fam.startswith('H') or fam.startswith('J') or fam.startswith('K') or fam.startswith('N'):
         threshold = 8
     elif fam.startswith('L'):
         threshold = int(_batch11_config(fam).get('stair_force_threshold') or 12)
@@ -1880,11 +2011,13 @@ def stair_progress_policy(env: int, step: int, cur_floor_index: int, climb_stair
         threshold = 12
     if fam in {'K05', 'K06', 'K10'}:
         threshold = 5
+    if fam in {'N09', 'N10'}:
+        threshold = 6
     event = None
     reason = 'no_override'
     if not reach_stair and (get_close_step >= threshold or frontier_stick_step >= threshold):
         event, reason = 'force_reach_upstairs', f'get_close_or_stick_ge_{threshold}'
-    elif reach_stair and not reach_stair_centroid and (fam in {'D06', 'D09', 'E07'} or fam.startswith('F') or fam.startswith('K')) and get_close_step >= threshold:
+    elif reach_stair and not reach_stair_centroid and (fam in {'D06', 'D09', 'E07'} or fam.startswith('F') or fam.startswith('K') or fam.startswith('N')) and get_close_step >= threshold:
         event, reason = 'force_reach_centroid', 'aggressive_centroid_skip'
     elif fam == 'D10' and cur_floor_index >= 1 and d is not None and d <= 1.4:
         event, reason = 'force_reach_upstairs', 'upper_floor_close_to_stair'
