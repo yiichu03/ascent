@@ -38,6 +38,15 @@ class Ascent_LLM_Planner:
         self.multi_floor_ask_step = [0 for _ in range(self._num_envs)]
         self.floor_probabilities_df = floor_probabilities_df
         self.frontier_rgb_list = [[] for _ in range(self._num_envs)]
+        self._instrumentation_enabled = (
+            os.environ.get("ASCENT_DECISION_TRACE", "").lower()
+            in {"1", "true", "yes", "on"}
+            or os.environ.get("ASCENT_VISUAL_CAPTURE", "").lower()
+            in {"1", "true", "yes", "on"}
+        )
+        if self._instrumentation_enabled:
+            self.last_decision_trace = [{} for _ in range(self._num_envs)]
+            self.last_llm_trace = [{} for _ in range(self._num_envs)]
         ## knowledge graph
         with open('statistic_priors/knowledge_graph.json', 'r') as f:
             self.knowledge_graph = nx.node_link_graph(json.load(f))
@@ -53,6 +62,9 @@ class Ascent_LLM_Planner:
         self.multi_floor_ask_step[env] = 0
         self.frontier_rgb_list[env] = []
         self.floor_num[env] = 1
+        if self._instrumentation_enabled:
+            self.last_decision_trace[env] = {}
+            self.last_llm_trace[env] = {}
 
     def _get_best_frontier_with_llm(
             self,
@@ -78,8 +90,21 @@ class Ascent_LLM_Planner:
             Returns:
                 Tuple[np.ndarray, float]: The best frontier and its value.
             """
+            if self._instrumentation_enabled:
+                self.last_decision_trace[env] = {}
+                self.last_llm_trace[env] = {}
+
             # 🆕 0. 如果只有一个前沿点，直接导航到该点
             if len(frontiers) == 1:
+                if self._instrumentation_enabled:
+                    self.last_decision_trace[env] = {
+                        "selection_source": "single_frontier",
+                        "candidate_count": 1,
+                        "frontier_topk": [frontiers[0]],
+                        "frontier_values": [1.0],
+                        "selected_frontier": frontiers[0],
+                        "selected_value": 1.0,
+                    }
                 return frontiers[0], 1.0
             
             # 1. 初始化
@@ -87,10 +112,12 @@ class Ascent_LLM_Planner:
             robot_xy = observations_cache[env]["robot_xy"]
             
             best_frontier, best_value = None, None
+            selection_source = "unknown"
 
             # 2. 处理强制前沿
             best_frontier, best_value = self._try_force_frontier(sorted_pts, sorted_values, env)
             if best_frontier is not None:
+                selection_source = "force_frontier"
                 print(f"Force Move.")
 
             # 3. 处理近邻前沿 (如果未选中强制前沿且满足条件)
@@ -101,6 +128,7 @@ class Ascent_LLM_Planner:
                 if activated_neighbor_search:
                     obstacle_map[env]._neighbor_search = True
                     best_frontier, best_value = best_frontier_nearby, best_value_nearby
+                    selection_source = "nearby_frontier"
                     print(f"Frontier {best_frontier} is very close (distance: {np.linalg.norm(best_frontier - robot_xy):.2f}m), selecting it.")
                 else:
                     # 如果尝试近邻搜索但没有找到合适的近邻前沿，则将 _finish_first_explore 设为 False
@@ -112,12 +140,20 @@ class Ascent_LLM_Planner:
             if best_frontier is None:
                 best_frontier, best_value = self._decide_frontier_with_llm(obstacle_map, object_map, sorted_pts, sorted_values, env, topk, use_multi_floor, 
                                                                            floor_num, cur_floor_index, num_steps,obstacle_map_list,object_map_list)
+                if best_value == -100:
+                    selection_source = "llm_floor_up"
+                elif best_value == -200:
+                    selection_source = "llm_floor_down"
+                else:
+                    selection_source = "llm_frontier"
 
             # 5. 处理前沿点粘滞/循环检测和禁用
             # 这一部分逻辑相对独立且复杂，可以封装
             self._handle_frontier_stick_and_disable(best_frontier, robot_xy, env, last_frontier_distance, frontier_stick_step, obstacle_map)
 
             # 6. 更新状态并返回
+            if self._instrumentation_enabled:
+                previous_frontier = self._last_frontier[env].copy()
             self._last_value[env] = best_value
             self._last_frontier[env] = best_frontier
             
@@ -126,6 +162,24 @@ class Ascent_LLM_Planner:
                 self._force_frontier[env] = best_frontier.copy()
                 
             print(f"Now the best_frontier is {best_frontier}")
+            if self._instrumentation_enabled:
+                selected_tuple = tuple(best_frontier) if best_frontier is not None else None
+                self.last_decision_trace[env] = {
+                    "selection_source": selection_source,
+                    "candidate_count": int(len(frontiers)),
+                    "active_candidate_count": int(len(sorted_pts)),
+                    "frontier_topk": sorted_pts[:topk],
+                    "frontier_values": sorted_values[:topk],
+                    "selected_frontier": best_frontier,
+                    "selected_value": best_value,
+                    "robot_xy": robot_xy,
+                    "last_frontier": previous_frontier,
+                    "force_frontier": self._force_frontier[env],
+                    "frontier_stick_step": frontier_stick_step[env],
+                    "selected_count": obstacle_map[env]._best_frontier_selection_count.get(selected_tuple, 0) if selected_tuple is not None else None,
+                    "disabled_frontier_count": len(obstacle_map[env]._disabled_frontiers),
+                    "llm_trace": self.last_llm_trace[env],
+                }
             return best_frontier, best_value
     
     def _sort_frontiers_by_value(
@@ -294,6 +348,9 @@ class Ascent_LLM_Planner:
         # Extract the frontier identifier from the response
         if response == "-1":
             temp_frontier_index = 0
+            parse_status = "llm_returned_minus_one"
+            fallback_reason = "llm_call_failed_or_minus_one"
+            response_index = None
         else:
             # Parse the JSON response
             try:
@@ -302,12 +359,18 @@ class Ascent_LLM_Planner:
             except json.JSONDecodeError:
                 logging.warning(f"Failed to parse JSON response: {response}")
                 temp_frontier_index = 0
+                parse_status = "json_parse_failed"
+                fallback_reason = "json_parse_failed"
+                response_index = None
             else:
                 # Extract Index
                 index = response_dict.get("Index", "N/A")
                 if index == "N/A":
                     logging.warning("Index not found in response")
                     temp_frontier_index = 0
+                    parse_status = "missing_index"
+                    fallback_reason = "missing_index"
+                    response_index = None
                 else:
                     # Extract Reason
                     reason = response_dict.get("Reason", "N/A")
@@ -326,13 +389,33 @@ class Ascent_LLM_Planner:
                     except ValueError:
                         logging.warning(f"Index is not a valid integer: {index}")
                         temp_frontier_index = 0
+                        parse_status = "invalid_index"
+                        fallback_reason = "invalid_index"
+                        response_index = index
                     else:
                         # Check if index is within valid range
                         if 1 <= index_int <= len(frontier_index_list):
                             temp_frontier_index = index_int - 1  # Convert to 0-based index
+                            parse_status = "ok"
+                            fallback_reason = None
+                            response_index = index_int
                         else:
                             logging.warning(f"Index ({index_int}) is out of valid range: 1 to {len(frontier_index_list)}")
                             temp_frontier_index = 0
+                            parse_status = "out_of_range_index"
+                            fallback_reason = "out_of_range_index"
+                            response_index = index_int
+        if self._instrumentation_enabled:
+            self.last_llm_trace[env] = {
+                "kind": "single_floor",
+                "parse_status": parse_status,
+                "fallback_reason": fallback_reason,
+                "response_index": response_index,
+                "selected_prompt_position": temp_frontier_index,
+                "selected_frontier_rank": frontier_index_list[temp_frontier_index],
+                "frontier_index_list": frontier_index_list,
+                "raw_response": response,
+            }
         
         return frontier_index_list[temp_frontier_index]
 
@@ -636,4 +719,3 @@ class Ascent_LLM_Planner:
 
         # 如果解析失败或异常，返回当前楼层
         return cur_floor_index[env] + 1  # 当前楼层（从1开始）
-

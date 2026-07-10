@@ -460,6 +460,7 @@ class MultiFloorTopDownMap(FrontierExplorationMap):
     def update_metric(self, episode, action, *args: Any, **kwargs: Any):
         agent_position = self._sim.get_agent_state().position
         agent_height = agent_position[1]
+        topdown_floor_match = True
         if self._is_on_same_floor(agent_height, self._floor_heights[self._cur_floor]):
             pass
         else:
@@ -472,6 +473,7 @@ class MultiFloorTopDownMap(FrontierExplorationMap):
                     flag = False
                     break
             if flag: # maybe at stair
+                topdown_floor_match = False
                 pass
             else:
                 if hasattr(episode, "goals"):
@@ -503,6 +505,11 @@ class MultiFloorTopDownMap(FrontierExplorationMap):
             "fog_of_war_mask": self._fog_of_war_mask,
             "agent_map_coord": map_positions,
             "agent_angle": map_angles,
+            "agent_height": float(agent_height),
+            "topdown_floor_index": int(self._cur_floor),
+            "topdown_floor_height": float(self._floor_heights[self._cur_floor]),
+            "topdown_floor_heights": [float(height) for height in self._floor_heights],
+            "topdown_floor_match": bool(topdown_floor_match),
         }
 
         ### For frontier exploration
