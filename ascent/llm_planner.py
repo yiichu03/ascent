@@ -47,6 +47,7 @@ class Ascent_LLM_Planner:
         if self._instrumentation_enabled:
             self.last_decision_trace = [{} for _ in range(self._num_envs)]
             self.last_llm_trace = [{} for _ in range(self._num_envs)]
+            self.last_multi_floor_trace = [{} for _ in range(self._num_envs)]
         ## knowledge graph
         with open('statistic_priors/knowledge_graph.json', 'r') as f:
             self.knowledge_graph = nx.node_link_graph(json.load(f))
@@ -65,6 +66,7 @@ class Ascent_LLM_Planner:
         if self._instrumentation_enabled:
             self.last_decision_trace[env] = {}
             self.last_llm_trace[env] = {}
+            self.last_multi_floor_trace[env] = {}
 
     def _get_best_frontier_with_llm(
             self,
@@ -93,6 +95,7 @@ class Ascent_LLM_Planner:
             if self._instrumentation_enabled:
                 self.last_decision_trace[env] = {}
                 self.last_llm_trace[env] = {}
+                self.last_multi_floor_trace[env] = {}
 
             # 🆕 0. 如果只有一个前沿点，直接导航到该点
             if len(frontiers) == 1:
@@ -179,6 +182,7 @@ class Ascent_LLM_Planner:
                     "selected_count": obstacle_map[env]._best_frontier_selection_count.get(selected_tuple, 0) if selected_tuple is not None else None,
                     "disabled_frontier_count": len(obstacle_map[env]._disabled_frontiers),
                     "llm_trace": self.last_llm_trace[env],
+                    "multi_floor_trace": self.last_multi_floor_trace[env],
                 }
             return best_frontier, best_value
     
@@ -267,25 +271,85 @@ class Ascent_LLM_Planner:
 
         best_frontier_idx = 0 # 默认值
 
+        multi_floor_eligible = bool(
+            floor_num[env] > 1
+            and num_steps[env] - self.multi_floor_ask_step[env] >= MULTI_FLOOR_ASK_STEP_THRESHOLD
+            and obstacle_map[env]._floor_num_steps >= FLOOR_EXP_STEP_THRESHOLD
+            and use_multi_floor
+        )
+        if self._instrumentation_enabled:
+            self.last_multi_floor_trace[env] = {
+                "schema": "multi_floor_decision_v1",
+                "phase": "pre_action_decision",
+                "eligible": multi_floor_eligible,
+                "asked": False,
+                "current_floor": cur_floor_index[env] + 1,
+                "known_floor_count": floor_num[env],
+                "direction": None,
+                "planner_sentinel": None,
+            }
+
         # 多楼层决策
-        if floor_num[env] > 1 and num_steps[env] - self.multi_floor_ask_step[env] >= MULTI_FLOOR_ASK_STEP_THRESHOLD and obstacle_map[env]._floor_num_steps >= FLOOR_EXP_STEP_THRESHOLD and use_multi_floor:
+        if multi_floor_eligible:
             self.multi_floor_ask_step[env] = num_steps[env]
             multi_floor_prompt = self._prepare_multiple_floor_prompt(target_object_category, env, cur_floor_index, obstacle_map_list, object_map_list)
             print(f"## Multi-floor Prompt: {multi_floor_prompt}")
             multi_floor_response = self._llm.chat(multi_floor_prompt)
+            if self._instrumentation_enabled:
+                self.last_multi_floor_trace[env].update(
+                    {
+                        "asked": True,
+                        "raw_response": multi_floor_response,
+                    }
+                )
 
             if multi_floor_response == "-1": # LLM调用失败或返回-1
+                if self._instrumentation_enabled:
+                    self.last_multi_floor_trace[env].update(
+                        {
+                            "parse_status": "llm_returned_minus_one",
+                            "fallback": "single_floor_frontier_selection",
+                        }
+                    )
                 best_frontier_idx = self.llm_analyze_single_floor(env, target_object_category, frontier_index_list, obstacle_map, object_map)
             else:
                 current_floor = cur_floor_index[env] + 1
                 temp_llm_floor_decision = self._extract_multiple_floor_decision(multi_floor_response, env, cur_floor_index)
                 if temp_llm_floor_decision > current_floor: # 上楼
+                    if self._instrumentation_enabled:
+                        self.last_multi_floor_trace[env].update(
+                            {
+                                "direction": "up",
+                                "selected_floor": temp_llm_floor_decision,
+                                "planner_sentinel": -100,
+                                "fallback": None,
+                            }
+                        )
                     return sorted_pts[0], -100 # 特殊值表示上楼
                 elif temp_llm_floor_decision < current_floor: # 下楼
+                    if self._instrumentation_enabled:
+                        self.last_multi_floor_trace[env].update(
+                            {
+                                "direction": "down",
+                                "selected_floor": temp_llm_floor_decision,
+                                "planner_sentinel": -200,
+                                "fallback": None,
+                            }
+                        )
                     return sorted_pts[0], -200 # 特殊值表示下楼
                 else: # 留在当前楼层
+                    if self._instrumentation_enabled:
+                        self.last_multi_floor_trace[env].update(
+                            {
+                                "direction": "stay",
+                                "selected_floor": current_floor,
+                                "fallback": "single_floor_frontier_selection",
+                            }
+                        )
                     best_frontier_idx = self.llm_analyze_single_floor(env, target_object_category, frontier_index_list, obstacle_map, object_map)
         else: # 单楼层决策
+            if self._instrumentation_enabled:
+                self.last_multi_floor_trace[env]["not_asked_reason"] = "eligibility_gate_false"
             best_frontier_idx = self.llm_analyze_single_floor(env, target_object_category, frontier_index_list, obstacle_map, object_map)
 
         return sorted_pts[best_frontier_idx], sorted_values[best_frontier_idx]
@@ -692,13 +756,15 @@ class Ascent_LLM_Planner:
         返回:
             int: 楼层决策 0/1/2，解析失败返回0
         """
-        # 防御性输入检查
+        current_floor = cur_floor_index[env] + 1  # 当前楼层（从1开始）
+        parse_status = "unknown"
+        target_floor_index = None
+        reason = None
         try:
             # 解析 LLM 的回复
             cleaned_response = multi_floor_response.replace("\n", "").replace("\r", "")
             response_dict = json.loads(cleaned_response)
             target_floor_index = int(response_dict.get("Index", -1))
-            current_floor = cur_floor_index[env] + 1  # 当前楼层（从1开始）
             reason = response_dict.get("Reason", "N/A")
             # Form the response string
             if reason != "N/A":
@@ -708,14 +774,28 @@ class Ascent_LLM_Planner:
             # 检查目标楼层是否合理
             if target_floor_index <= 0 or target_floor_index > self.floor_num[env]:
                 logging.warning("Invalid floor index from LLM response. Returning current floor.")
-                return current_floor  # 返回当前楼层
-
-            return target_floor_index  # 返回目标楼层
+                parse_status = "invalid_floor_index"
+                returned_floor = current_floor
+            else:
+                parse_status = "ok"
+                returned_floor = target_floor_index
 
         except json.JSONDecodeError as e:
             logging.error(f"Failed to parse LLM response: {e}")
+            parse_status = "json_parse_failed"
+            returned_floor = current_floor
         except Exception as e:
             logging.error(f"Error extracting floor decision: {e}")
+            parse_status = "extract_error"
+            returned_floor = current_floor
 
-        # 如果解析失败或异常，返回当前楼层
-        return cur_floor_index[env] + 1  # 当前楼层（从1开始）
+        if self._instrumentation_enabled:
+            self.last_multi_floor_trace[env].update(
+                {
+                    "parse_status": parse_status,
+                    "requested_floor": target_floor_index,
+                    "returned_floor": returned_floor,
+                    "reason": reason,
+                }
+            )
+        return returned_floor

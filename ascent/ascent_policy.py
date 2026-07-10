@@ -533,6 +533,7 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 self._last_explore_trace[env] = {}
                 self.llm_planner.last_decision_trace[env] = {}
                 self.llm_planner.last_llm_trace[env] = {}
+                self.llm_planner.last_multi_floor_trace[env] = {}
 
             robot_xy = self._observations_cache[env]["robot_xy"]
             goal = self._get_target_object_location(robot_xy, env)

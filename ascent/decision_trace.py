@@ -272,8 +272,54 @@ class DecisionTraceWriter:
                 floor_key = self._floor_key(topdown_trace)
                 self._last_topdown_maps.setdefault(key, {})[floor_key] = np.asarray(map_array).copy()
 
+        frontier_decision = trace_for_record.get("frontier_decision") or {}
+        explore_context = trace_for_record.get("explore_trace") or {}
+        pre_action_decision = {
+            "timing": "planner_decision_before_low_level_action",
+            "policy_info_packaged_timing": (
+                "after_action_selection_before_env_step"
+            ),
+            "mode": trace_for_record.get("mode"),
+            "robot_xy": _to_jsonable(trace_for_record.get("robot_xy")),
+            "robot_heading": _to_jsonable(
+                trace_for_record.get("robot_heading")
+            ),
+            "policy_floor_index": trace_for_record.get("floor_index"),
+            "frontier_decision": deepcopy(frontier_decision),
+            "floor_decision": deepcopy(
+                frontier_decision.get("multi_floor_trace") or {}
+            ),
+            "no_frontier_context": {
+                "active": bool(explore_context.get("no_frontier")),
+                "fallback_action": explore_context.get(
+                    "no_frontier_action"
+                ),
+            },
+            "target_evidence": {
+                "target_object": policy_info.get("target_object"),
+                "target_detected": bool(
+                    trace_for_record.get("target_detected")
+                ),
+                "stop_called": bool(trace_for_record.get("stop_called")),
+            },
+        }
+        action_selection = {
+            "timing": "policy_output_before_env_step",
+            "mode": trace_for_record.get("mode"),
+            "policy_action": _to_jsonable(
+                trace_for_record.get("action")
+            ),
+            "executed_action": _to_jsonable(action),
+        }
+        post_action_outcome = {
+            "timing": "after_env_step",
+            "done": bool(done),
+            "metrics": metrics,
+            "top_down_trace": topdown_trace,
+        }
         record = {
             "event": "step",
+            "schema": "decision_outcome_v1",
             "env": env_index,
             "scene_id": scene_id,
             "episode_id": episode_id,
@@ -282,6 +328,9 @@ class DecisionTraceWriter:
             "done": bool(done),
             "metrics": metrics,
             "trace": trace_for_record,
+            "pre_action_decision": pre_action_decision,
+            "action_selection": action_selection,
+            "post_action_outcome": post_action_outcome,
         }
         if identity_trace:
             record["identity_trace"] = identity_trace
@@ -379,12 +428,17 @@ class DecisionTraceWriter:
         robot_xy = self._as_xy(trace.get("robot_xy"))
         nav_goal = self._as_xy(trace.get("nav_goal"))
         frontier_decision = trace.get("frontier_decision") or {}
+        multi_floor_trace = frontier_decision.get("multi_floor_trace") or {}
         explore_trace = trace.get("explore_trace") or {}
         selected_frontier = self._as_xy(frontier_decision.get("selected_frontier"))
 
-        robot_submap_id = self._submap_id(robot_xy, floor_index)
-        selected_frontier_id = self._coord_id("frontier", selected_frontier, floor_index)
-        selected_frontier_submap_id = self._submap_id(selected_frontier, floor_index)
+        robot_spatial_bin_id = self._spatial_bin_id(robot_xy, floor_index)
+        selected_frontier_bin_id = self._coord_id(
+            "frontier_bin", selected_frontier, floor_index
+        )
+        selected_frontier_spatial_bin_id = self._spatial_bin_id(
+            selected_frontier, floor_index
+        )
 
         candidates = []
         topk = _sequence_or_empty(frontier_decision.get("frontier_topk"))
@@ -394,12 +448,21 @@ class DecisionTraceWriter:
         for rank, xy in enumerate(topk_xy):
             if xy is None:
                 continue
-            candidate_id = self._coord_id("frontier", xy, floor_index)
-            if selected_frontier_id is not None and candidate_id == selected_frontier_id:
+            candidate_id = self._coord_id("frontier_bin", xy, floor_index)
+            if (
+                selected_frontier_bin_id is not None
+                and candidate_id == selected_frontier_bin_id
+            ):
                 selected_rank = rank
                 break
-        selected_value = self._as_optional_float(frontier_decision.get("selected_value"))
-        if selected_value is None and selected_rank is not None and selected_rank < len(values):
+        selected_value = self._as_optional_float(
+            frontier_decision.get("selected_value")
+        )
+        if (
+            selected_value is None
+            and selected_rank is not None
+            and selected_rank < len(values)
+        ):
             selected_value = self._as_optional_float(values[selected_rank])
         selected_distance = self._distance(robot_xy, selected_frontier)
         llm_trace = frontier_decision.get("llm_trace") or {}
@@ -422,18 +485,23 @@ class DecisionTraceWriter:
                 continue
             value = values[rank] if rank < len(values) else None
             value_float = self._as_optional_float(value)
-            candidate_id = self._coord_id("frontier", xy, floor_index)
-            is_selected = selected_frontier_id is not None and candidate_id == selected_frontier_id
+            candidate_id = self._coord_id("frontier_bin", xy, floor_index)
+            is_selected = (
+                selected_frontier_bin_id is not None
+                and candidate_id == selected_frontier_bin_id
+            )
             distance_to_robot = self._distance(robot_xy, xy)
             prompt_order = None
             if rank in llm_prompt_indices:
                 prompt_order = llm_prompt_indices.index(rank)
+            candidate_spatial_bin_id = self._spatial_bin_id(xy, floor_index)
             candidates.append(
                 {
                     "rank": rank,
                     "candidate_type": "frontier",
                     "candidate_id": candidate_id,
-                    "submap_id": self._submap_id(xy, floor_index),
+                    "candidate_identity_kind": "quantized_spatial_bin",
+                    "spatial_bin_id": candidate_spatial_bin_id,
                     "xy": list(xy),
                     "value": _to_jsonable(value),
                     "value_delta_from_selected": (
@@ -444,54 +512,114 @@ class DecisionTraceWriter:
                     "distance_to_robot": distance_to_robot,
                     "distance_delta_from_selected": (
                         float(distance_to_robot - selected_distance)
-                        if distance_to_robot is not None and selected_distance is not None
+                        if distance_to_robot is not None
+                        and selected_distance is not None
                         else None
                     ),
-                    "distance_to_selected_frontier": self._distance(xy, selected_frontier),
-                    "rank_delta_from_selected": rank - selected_rank if selected_rank is not None else None,
+                    "distance_to_selected_frontier": self._distance(
+                        xy, selected_frontier
+                    ),
+                    "rank_delta_from_selected": (
+                        rank - selected_rank
+                        if selected_rank is not None
+                        else None
+                    ),
                     "is_selected": bool(is_selected),
-                    "same_submap_as_robot": self._submap_id(xy, floor_index) == robot_submap_id,
-                    "same_submap_as_selected": self._submap_id(xy, floor_index) == selected_frontier_submap_id,
+                    "same_spatial_bin_as_robot": (
+                        candidate_spatial_bin_id == robot_spatial_bin_id
+                    ),
+                    "same_spatial_bin_as_selected": (
+                        candidate_spatial_bin_id
+                        == selected_frontier_spatial_bin_id
+                    ),
                     "same_as_last_frontier": self._same_xy(xy, last_frontier),
-                    "same_as_force_frontier": self._same_xy(xy, force_frontier),
+                    "same_as_force_frontier": self._same_xy(
+                        xy, force_frontier
+                    ),
                     "in_llm_prompt": prompt_order is not None,
                     "llm_prompt_order": prompt_order,
-                    "is_llm_response_rank": rank == llm_selected_rank if llm_selected_rank is not None else None,
-                    "selection_source": frontier_decision.get("selection_source"),
+                    "is_llm_response_rank": (
+                        rank == llm_selected_rank
+                        if llm_selected_rank is not None
+                        else None
+                    ),
+                    "selection_source": frontier_decision.get(
+                        "selection_source"
+                    ),
                 }
             )
 
         no_frontier = bool(explore_trace.get("no_frontier"))
-        transition_active = bool(
+        stair_transition_active = bool(
             trace.get("stair_flag")
             or trace.get("reach_stair")
             or trace.get("reach_stair_centroid")
-            or trace.get("mode") == "climb_stair"
-            or no_frontier
+            or trace.get("mode") in {
+                "climb_stair",
+                "get_close_to_stair",
+                "up_stair_detected",
+                "down_stair_detected",
+            }
         )
         transition_anchor = nav_goal if nav_goal is not None else robot_xy
         transition_id = (
-            self._coord_id("transition", transition_anchor, floor_index)
-            if transition_active
+            self._coord_id(
+                "stair_transition_bin", transition_anchor, floor_index
+            )
+            if stair_transition_active
             else None
         )
+        floor_direction = multi_floor_trace.get("direction")
+        cross_floor_decision_active = floor_direction in {"up", "down"}
 
         object_evidence_id = None
         if trace.get("target_detected") and target_object:
             target = str(target_object).split("|")[0]
-            object_evidence_id = f"object:{target}@{robot_submap_id or 'unknown_submap'}"
+            object_evidence_id = (
+                f"object:{target}@"
+                f"{robot_spatial_bin_id or 'unknown_spatial_bin'}"
+            )
 
         return {
-            "schema": "identity_v0",
-            "identity_resolution_m": self.identity_resolution_m,
+            "schema": "identity_v1",
+            "spatial_identity_kind": "quantized_spatial_bin_not_region_or_submap",
+            "spatial_bin_resolution_m": self.identity_resolution_m,
             "floor_index": floor_index,
-            "robot_submap_id": robot_submap_id,
-            "nav_goal_submap_id": self._submap_id(nav_goal, floor_index),
-            "selected_frontier_id": selected_frontier_id,
-            "selected_frontier_submap_id": selected_frontier_submap_id,
+            "robot_spatial_bin_id": robot_spatial_bin_id,
+            "nav_goal_spatial_bin_id": self._spatial_bin_id(
+                nav_goal, floor_index
+            ),
+            "selected_frontier_bin_id": selected_frontier_bin_id,
+            "selected_frontier_spatial_bin_id": (
+                selected_frontier_spatial_bin_id
+            ),
             "selected_frontier_rank": selected_rank,
             "frontier_candidates": candidates,
-            "transition_active": transition_active,
+            "no_frontier_context": {
+                "active": no_frontier,
+                "fallback_action": explore_trace.get("no_frontier_action"),
+            },
+            "stair_transition": {
+                "active": stair_transition_active,
+                "stair_flag": trace.get("stair_flag"),
+                "reach_stair": trace.get("reach_stair"),
+                "reach_stair_centroid": trace.get(
+                    "reach_stair_centroid"
+                ),
+                "mode": trace.get("mode"),
+                "transition_bin_id": transition_id,
+            },
+            "cross_floor_decision": {
+                "active": cross_floor_decision_active,
+                "direction": floor_direction,
+                "current_floor": multi_floor_trace.get("current_floor"),
+                "selected_floor": multi_floor_trace.get("selected_floor"),
+                "parse_status": multi_floor_trace.get("parse_status"),
+                "planner_sentinel": multi_floor_trace.get(
+                    "planner_sentinel"
+                ),
+            },
+            "transition_active": stair_transition_active,
             "transition_id": transition_id,
             "object_evidence_id": object_evidence_id,
         }
@@ -537,12 +665,12 @@ class DecisionTraceWriter:
         y_bin = int(np.round(xy[1] / self.identity_resolution_m))
         return f"{prefix}:floor={floor}:x={x_bin}:y={y_bin}"
 
-    def _submap_id(
+    def _spatial_bin_id(
         self,
         xy: Optional[Tuple[float, float]],
         floor_index: Any,
     ) -> Optional[str]:
-        return self._coord_id("submap", xy, floor_index)
+        return self._coord_id("spatial_bin", xy, floor_index)
 
     def _distance(
         self,
