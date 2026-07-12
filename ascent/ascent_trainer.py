@@ -40,7 +40,16 @@ from habitat_baselines.rl.ppo.evaluator import pause_envs ## For Habitat 3.0
 from gym import spaces
 import time
 def extract_scalars_from_info(info: Dict[str, Any]) -> Dict[str, float]:
-    info_filtered = {k: v for k, v in info.items() if not isinstance(v, list)}
+    # Structured decision traces are written separately by DecisionTraceWriter.  They
+    # contain diagnostic None/list/dict values and are not episode scalar metrics.
+    # Passing them to Habitat's recursive scalar flattener can call float(None) at
+    # episode close.  Excluding this logging payload does not alter policy behavior or
+    # the JSONL trace written above.
+    info_filtered = {
+        k: v
+        for k, v in info.items()
+        if not isinstance(v, list) and k != "decision_trace"
+    }
     return extract_scalars_from_info_habitat(info_filtered)
 
 
