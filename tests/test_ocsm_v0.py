@@ -252,6 +252,8 @@ def make_memory(num_envs=1):
             low_gain_area_m2=0.5,
             hard_streak=2,
             suppression_radius_m=0.5,
+            revisit_frontier_distance_m=0.5,
+            revisit_robot_distance_m=1.4,
         ),
     )
 
@@ -272,6 +274,30 @@ def start(memory, obstacle, env=0, target="chair", frontier=(0.0, 0.0), step=0):
     )
 
 
+def start_independent_return(
+    memory,
+    obstacle,
+    *,
+    step,
+    target="chair",
+    memory_frontier=(0.0, 0.0),
+    away_frontier=(3.0, 0.0),
+    away_robot=(1.5, 0.0),
+):
+    memory.register_selection(
+        0, target, 0, away_frontier, step, (0.0, 0.0), obstacle,
+        False, False, False, np.array([away_frontier, memory_frontier]),
+    )
+    memory.observe(
+        0, target, 0, step + 1, away_robot, obstacle, False, False, False,
+        np.array([away_frontier, memory_frontier]), 0.9,
+    )
+    memory.register_selection(
+        0, target, 0, memory_frontier, step + 2, away_robot, obstacle,
+        False, False, False, np.array([memory_frontier, away_frontier]),
+    )
+
+
 class OCSMV0Test(unittest.TestCase):
     def test_default_off_and_configurable_defaults(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -281,6 +307,8 @@ class OCSMV0Test(unittest.TestCase):
         self.assertEqual(config.low_gain_area_m2, 0.5)
         self.assertEqual(config.hard_streak, 2)
         self.assertEqual(config.suppression_radius_m, 0.5)
+        self.assertEqual(config.revisit_frontier_distance_m, 0.5)
+        self.assertEqual(config.revisit_robot_distance_m, 1.4)
 
     def test_association_distance_and_replanning_switch(self):
         memory = make_memory()
@@ -325,22 +353,25 @@ class OCSMV0Test(unittest.TestCase):
         memory = make_memory()
         obstacle = FakeObstacleMap()
         points = np.array([(0.0, 0.0), (2.0, 0.0)])
-        for attempt_index in range(2):
-            start(memory, obstacle, step=attempt_index * 2)
-            memory.finish_attempt(
-                0, "completed", "low_gain", attempt_index * 2 + 1, obstacle, points
-            )
-            calibrated, values, trace = memory.calibrate_candidates(
-                0, "chair", 0, points, [0.9, 0.8]
-            )
-            if attempt_index == 0:
-                self.assertEqual(calibrated.tolist(), [[2.0, 0.0], [0.0, 0.0]])
-                self.assertEqual(values, [0.8, 0.9])
-                self.assertEqual(trace["candidates"][0]["status"], "soft")
-            else:
-                self.assertEqual(calibrated.tolist(), [[2.0, 0.0]])
-                self.assertEqual(values, [0.8])
-                self.assertEqual(trace["candidates"][0]["status"], "hard-suppressed")
+        start(memory, obstacle)
+        memory.finish_attempt(0, "completed", "low_gain", 1, obstacle, points)
+        calibrated, values, trace = memory.calibrate_candidates(
+            0, "chair", 0, points, [0.9, 0.8]
+        )
+        self.assertEqual(calibrated.tolist(), [[2.0, 0.0], [0.0, 0.0]])
+        self.assertEqual(values, [0.8, 0.9])
+        self.assertEqual(trace["candidates"][0]["status"], "soft")
+
+        start_independent_return(memory, obstacle, step=2)
+        event = memory.finish_attempt(0, "completed", "low_gain", 5, obstacle, points)
+        self.assertTrue(event["independent_revisit_eligible_before_finish"])
+        self.assertTrue(event["streak_increment_applied"])
+        calibrated, values, trace = memory.calibrate_candidates(
+            0, "chair", 0, points, [0.9, 0.8]
+        )
+        self.assertEqual(calibrated.tolist(), [[2.0, 0.0]])
+        self.assertEqual(values, [0.8])
+        self.assertEqual(trace["candidates"][0]["status"], "hard-suppressed")
         calibrated, values, trace = memory.calibrate_candidates(
             0, "chair", 0, np.array([(0.0, 0.0)]), [0.9]
         )
@@ -348,16 +379,71 @@ class OCSMV0Test(unittest.TestCase):
         self.assertEqual(calibrated.tolist(), [[0.0, 0.0]])
         self.assertEqual(values, [0.9])
 
+    def test_adjacent_repeat_does_not_create_false_hard(self):
+        memory = make_memory()
+        obstacle = FakeObstacleMap()
+        start(memory, obstacle)
+        memory.finish_attempt(0, "completed", "first_low", 1, obstacle, [])
+        start(memory, obstacle, frontier=(0.2, 0.0), step=2)
+        event = memory.finish_attempt(0, "completed", "adjacent_low", 3, obstacle, [])
+        self.assertTrue(event["low_gain"])
+        self.assertTrue(event["independent_revisit_required"])
+        self.assertFalse(event["independent_revisit_eligible_before_finish"])
+        self.assertFalse(event["streak_increment_applied"])
+        self.assertEqual(event["memory_update"], "low_gain_repeat_not_independent")
+        self.assertEqual(event["streak_after"], 1)
+        self.assertEqual(memory.trace(0)["memory_entries"][0]["low_gain_streak"], 1)
+
+    def test_both_strict_leave_signals_are_required(self):
+        scenarios = (
+            ((3.0, 0.0), (1.4, 0.0), False),
+            ((0.5, 0.0), (1.5, 0.0), False),
+            ((3.0, 0.0), (1.5, 0.0), True),
+        )
+        for away_frontier, away_robot, expected_increment in scenarios:
+            with self.subTest(
+                away_frontier=away_frontier, away_robot=away_robot
+            ):
+                memory = make_memory()
+                obstacle = FakeObstacleMap()
+                start(memory, obstacle)
+                memory.finish_attempt(0, "completed", "first_low", 1, obstacle, [])
+                if away_frontier == (0.5, 0.0):
+                    memory.register_selection(
+                        0, "chair", 0, away_frontier, 2, (0.0, 0.0), obstacle,
+                        False, False, False, np.array([away_frontier]),
+                    )
+                    memory.observe(
+                        0, "chair", 0, 3, away_robot, obstacle,
+                        False, False, False, np.array([away_frontier]), 0.9,
+                    )
+                else:
+                    start_independent_return(
+                        memory,
+                        obstacle,
+                        step=2,
+                        away_frontier=away_frontier,
+                        away_robot=away_robot,
+                    )
+                event = memory.finish_attempt(
+                    0, "completed", "second_low", 5, obstacle, []
+                )
+                self.assertEqual(
+                    event["streak_increment_applied"], expected_increment
+                )
+                self.assertEqual(event["streak_after"], 2 if expected_increment else 1)
+
     def test_positive_gain_clears_local_streak(self):
         memory = make_memory()
         obstacle = FakeObstacleMap()
-        for index in range(2):
-            start(memory, obstacle, step=index * 2)
-            memory.finish_attempt(0, "completed", "low", index * 2 + 1, obstacle, [])
+        start(memory, obstacle)
+        memory.finish_attempt(0, "completed", "low", 1, obstacle, [])
+        start_independent_return(memory, obstacle, step=2)
+        memory.finish_attempt(0, "completed", "low", 5, obstacle, [])
         self.assertEqual(memory.trace(0)["memory_entries"][0]["low_gain_streak"], 2)
-        start(memory, obstacle, step=5)
+        start(memory, obstacle, step=6)
         obstacle.add_explored_pixels(50)
-        event = memory.finish_attempt(0, "completed", "positive", 6, obstacle, [])
+        event = memory.finish_attempt(0, "completed", "positive", 7, obstacle, [])
         self.assertFalse(event["low_gain"])
         self.assertEqual(event["streak_after"], 0)
 
@@ -492,12 +578,23 @@ class OCSMV0Test(unittest.TestCase):
     def test_hard_force_is_cancelled_and_sentinel_is_preserved(self):
         memory = make_memory()
         obstacle_map = FakeObstacleMap()
-        for index in range(2):
-            start(memory, obstacle_map, frontier=(1.0, 2.0), step=index * 2)
-            memory.finish_attempt(
-                0, "completed", "low", index * 2 + 1, obstacle_map,
-                np.array([(1.0, 2.0), (3.0, 4.0)]),
-            )
+        start(memory, obstacle_map, frontier=(1.0, 2.0))
+        memory.finish_attempt(
+            0, "completed", "low", 1, obstacle_map,
+            np.array([(1.0, 2.0), (3.0, 4.0)]),
+        )
+        start_independent_return(
+            memory,
+            obstacle_map,
+            step=2,
+            memory_frontier=(1.0, 2.0),
+            away_frontier=(4.0, 2.0),
+            away_robot=(2.5, 2.0),
+        )
+        memory.finish_attempt(
+            0, "completed", "low", 5, obstacle_map,
+            np.array([(1.0, 2.0), (3.0, 4.0)]),
+        )
         current_method = compile_planner_method(
             (ASCENT_ROOT / "ascent/llm_planner.py").read_text()
         )

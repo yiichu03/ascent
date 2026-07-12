@@ -28,6 +28,8 @@ class OCSMConfig:
     low_gain_area_m2: float = 0.5
     hard_streak: int = 2
     suppression_radius_m: float = 0.5
+    revisit_frontier_distance_m: float = 0.5
+    revisit_robot_distance_m: float = 1.4
 
     @classmethod
     def from_env(cls) -> "OCSMConfig":
@@ -43,6 +45,12 @@ class OCSMConfig:
             suppression_radius_m=float(
                 os.environ.get("ASCENT_OCSM_SUPPRESSION_RADIUS_M", "0.5")
             ),
+            revisit_frontier_distance_m=float(
+                os.environ.get("ASCENT_OCSM_REVISIT_FRONTIER_DISTANCE_M", "0.5")
+            ),
+            revisit_robot_distance_m=float(
+                os.environ.get("ASCENT_OCSM_REVISIT_ROBOT_DISTANCE_M", "1.4")
+            ),
         )
 
     def __post_init__(self) -> None:
@@ -54,6 +62,10 @@ class OCSMConfig:
             raise ValueError("hard_streak must be at least 2")
         if self.suppression_radius_m <= 0:
             raise ValueError("suppression_radius_m must be positive")
+        if self.revisit_frontier_distance_m <= 0:
+            raise ValueError("revisit_frontier_distance_m must be positive")
+        if self.revisit_robot_distance_m <= 0:
+            raise ValueError("revisit_robot_distance_m must be positive")
 
 
 @dataclass
@@ -84,6 +96,10 @@ class MemoryEntry:
     location: np.ndarray
     low_gain_streak: int = 0
     completed_attempts: int = 0
+    selected_away_frontier_since_low_gain: bool = False
+    robot_left_since_low_gain: bool = False
+    max_selected_frontier_distance_since_low_gain_m: float = 0.0
+    max_robot_distance_since_low_gain_m: float = 0.0
 
 
 class ObjectConditionedSearchMemory:
@@ -157,6 +173,63 @@ class ObjectConditionedSearchMemory:
             return None, None
         distance, entry = min(matches, key=lambda item: item[0])
         return entry, float(distance)
+
+    def _record_selected_frontier(
+        self,
+        env: int,
+        target: str,
+        floor_index: int,
+        selected_frontier: Sequence[float],
+    ) -> None:
+        selected = self._xy(selected_frontier)
+        for entry in self._entries[env]:
+            if (
+                entry.target != target
+                or entry.floor_index != int(floor_index)
+                or entry.low_gain_streak <= 0
+            ):
+                continue
+            distance = self._distance(entry.location, selected)
+            entry.max_selected_frontier_distance_since_low_gain_m = max(
+                entry.max_selected_frontier_distance_since_low_gain_m, distance
+            )
+            if distance > self.config.revisit_frontier_distance_m:
+                entry.selected_away_frontier_since_low_gain = True
+
+    def _record_robot_position(
+        self,
+        env: int,
+        target: str,
+        floor_index: int,
+        robot_xy: Sequence[float],
+    ) -> None:
+        for entry in self._entries[env]:
+            if (
+                entry.target != target
+                or entry.floor_index != int(floor_index)
+                or entry.low_gain_streak <= 0
+            ):
+                continue
+            distance = self._distance(entry.location, robot_xy)
+            entry.max_robot_distance_since_low_gain_m = max(
+                entry.max_robot_distance_since_low_gain_m, distance
+            )
+            if distance > self.config.revisit_robot_distance_m:
+                entry.robot_left_since_low_gain = True
+
+    @staticmethod
+    def _independent_revisit_eligible(entry: MemoryEntry) -> bool:
+        return bool(
+            entry.selected_away_frontier_since_low_gain
+            and entry.robot_left_since_low_gain
+        )
+
+    @staticmethod
+    def _clear_revisit_evidence(entry: MemoryEntry) -> None:
+        entry.selected_away_frontier_since_low_gain = False
+        entry.robot_left_since_low_gain = False
+        entry.max_selected_frontier_distance_since_low_gain_m = 0.0
+        entry.max_robot_distance_since_low_gain_m = 0.0
 
     def start_attempt(
         self,
@@ -259,8 +332,26 @@ class ObjectConditionedSearchMemory:
             env, attempt.target, attempt.floor_index, attempt.start_frontier
         )
         streak_before = entry.low_gain_streak if entry is not None else 0
+        independent_revisit_eligible = bool(
+            entry is not None and self._independent_revisit_eligible(entry)
+        )
+        selected_away_before_finish = bool(
+            entry is not None and entry.selected_away_frontier_since_low_gain
+        )
+        robot_left_before_finish = bool(
+            entry is not None and entry.robot_left_since_low_gain
+        )
+        max_selected_distance_before_finish = (
+            entry.max_selected_frontier_distance_since_low_gain_m
+            if entry is not None
+            else 0.0
+        )
+        max_robot_distance_before_finish = (
+            entry.max_robot_distance_since_low_gain_m if entry is not None else 0.0
+        )
         streak_after = streak_before
         memory_update = "none"
+        streak_increment_applied = False
         if outcome == "completed":
             if entry is None:
                 entry = MemoryEntry(
@@ -272,11 +363,17 @@ class ObjectConditionedSearchMemory:
                 entry_distance = 0.0
             entry.completed_attempts += 1
             if low_gain:
-                entry.low_gain_streak += 1
-                memory_update = "increment_low_gain_streak"
+                if entry.low_gain_streak == 0 or independent_revisit_eligible:
+                    entry.low_gain_streak += 1
+                    streak_increment_applied = True
+                    memory_update = "increment_low_gain_streak"
+                    self._clear_revisit_evidence(entry)
+                else:
+                    memory_update = "low_gain_repeat_not_independent"
             else:
                 entry.low_gain_streak = 0
                 memory_update = "clear_streak_on_positive_gain"
+                self._clear_revisit_evidence(entry)
             streak_after = entry.low_gain_streak
 
         event = {
@@ -298,8 +395,25 @@ class ObjectConditionedSearchMemory:
             "low_gain_threshold_m2": self.config.low_gain_area_m2,
             "streak_before": int(streak_before),
             "streak_after": int(streak_after),
+            "streak_increment_applied": streak_increment_applied,
             "memory_update": memory_update,
             "memory_association_distance_m": entry_distance,
+            "independent_revisit_required": bool(streak_before > 0),
+            "independent_revisit_eligible_before_finish": independent_revisit_eligible,
+            "selected_away_frontier_since_low_gain": selected_away_before_finish,
+            "robot_left_since_low_gain": robot_left_before_finish,
+            "max_selected_frontier_distance_since_low_gain_m": float(
+                max_selected_distance_before_finish
+            ),
+            "max_robot_distance_since_low_gain_m": float(
+                max_robot_distance_before_finish
+            ),
+            "revisit_frontier_distance_threshold_m": (
+                self.config.revisit_frontier_distance_m
+            ),
+            "revisit_robot_distance_threshold_m": (
+                self.config.revisit_robot_distance_m
+            ),
             "min_robot_distance_m": float(attempt.min_robot_distance_m),
             "last_frontier_association_distance_m": attempt.last_association_distance_m,
             "frontier_novelty": self._frontier_novelty(attempt, current_frontiers),
@@ -326,6 +440,7 @@ class ObjectConditionedSearchMemory:
         frontiers: Sequence[Sequence[float]],
         arrival_radius_m: float,
     ) -> Optional[Dict[str, Any]]:
+        self._record_robot_position(env, target, floor_index, robot_xy)
         attempt = self._active[env]
         if attempt is None:
             return None
@@ -392,6 +507,7 @@ class ObjectConditionedSearchMemory:
         frontiers: Sequence[Sequence[float]],
     ) -> Optional[Dict[str, Any]]:
         selected = self._xy(selected_frontier)
+        self._record_selected_frontier(env, target, floor_index, selected)
         attempt = self._active[env]
         if attempt is not None:
             association_distance = self._distance(selected, attempt.start_frontier)
@@ -546,6 +662,19 @@ class ObjectConditionedSearchMemory:
                     "location": entry.location.tolist(),
                     "low_gain_streak": entry.low_gain_streak,
                     "completed_attempts": entry.completed_attempts,
+                    "selected_away_frontier_since_low_gain": (
+                        entry.selected_away_frontier_since_low_gain
+                    ),
+                    "robot_left_since_low_gain": entry.robot_left_since_low_gain,
+                    "independent_revisit_eligible": (
+                        self._independent_revisit_eligible(entry)
+                    ),
+                    "max_selected_frontier_distance_since_low_gain_m": (
+                        entry.max_selected_frontier_distance_since_low_gain_m
+                    ),
+                    "max_robot_distance_since_low_gain_m": (
+                        entry.max_robot_distance_since_low_gain_m
+                    ),
                 }
                 for entry in self._entries[env]
             ],
