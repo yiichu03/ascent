@@ -298,6 +298,13 @@ class OCSMV0Test(unittest.TestCase):
         )
         self.assertEqual(memory.trace(0)["active_attempt"]["attempt_id"], 2)
         self.assertEqual(memory.trace(0)["last_event"]["event"], "attempt_started")
+        finished = memory.trace(0)["last_finished_event"]
+        self.assertEqual(finished["event"], "attempt_finished")
+        self.assertEqual(finished["attempt_id"], 1)
+        self.assertEqual(finished["outcome"], "interrupted")
+        self.assertEqual(finished["reason"], "replanning_switch")
+        self.assertEqual(finished["end_step"], 2)
+        self.assertFalse(finished["low_gain"])
         self.assertEqual(memory.trace(0)["memory_entries"], [])
 
     def test_area_threshold_below_equal_above(self):

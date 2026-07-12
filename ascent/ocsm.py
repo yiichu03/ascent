@@ -97,6 +97,9 @@ class ObjectConditionedSearchMemory:
         self._entries: List[List[MemoryEntry]] = [[] for _ in range(num_envs)]
         self._attempt_seq: List[int] = [0] * num_envs
         self._last_event: List[Dict[str, Any]] = [{} for _ in range(num_envs)]
+        self._last_finished_event: List[Dict[str, Any]] = [
+            {} for _ in range(num_envs)
+        ]
         self._last_calibration: List[Dict[str, Any]] = [{} for _ in range(num_envs)]
 
     def reset(self, env: int) -> None:
@@ -104,6 +107,7 @@ class ObjectConditionedSearchMemory:
         self._entries[env] = []
         self._attempt_seq[env] = 0
         self._last_event[env] = {"event": "reset"}
+        self._last_finished_event[env] = {}
         self._last_calibration[env] = {}
 
     @staticmethod
@@ -302,6 +306,10 @@ class ObjectConditionedSearchMemory:
         }
         self._active[env] = None
         self._last_event[env] = event
+        # A replacement attempt can start in the same policy step and overwrite
+        # last_event.  Preserve the most recent settlement independently so the
+        # decision trace cannot lose its outcome or gain fields.
+        self._last_finished_event[env] = event
         return event
 
     def observe(
@@ -529,6 +537,7 @@ class ObjectConditionedSearchMemory:
             "config": asdict(self.config),
             "active_attempt": active,
             "last_event": self._last_event[env],
+            "last_finished_event": self._last_finished_event[env],
             "candidate_calibration": self._last_calibration[env],
             "memory_entries": [
                 {
