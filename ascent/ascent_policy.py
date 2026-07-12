@@ -30,6 +30,7 @@ from constants import (
     LOOK_DOWN,
 )
 from ascent.llm_planner import Ascent_LLM_Planner
+from ascent.ocsm import OCSMConfig, ObjectConditionedSearchMemory
 from ascent.map_controller import Map_Controller
 from ascent.utils import (
     xyz_yaw_pitch_roll_to_tf_matrix,
@@ -121,9 +122,14 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         self._instrumentation_enabled = (
             self._visual_capture_enabled or self._decision_trace_enabled
         )
-
         # 3. 批量初始化列表和地图相关参数
         self._num_envs = kwargs['num_envs']
+        self._ocsm_config = OCSMConfig.from_env()
+        self._ocsm = (
+            ObjectConditionedSearchMemory(self._num_envs, self._ocsm_config)
+            if self._ocsm_config.enabled
+            else None
+        )
         self._depth_image_shape = tuple(kwargs["depth_image_shape"]) # (224, 224)
         self._num_steps: List[int] = [0] * self._num_envs
         self._did_reset: List[bool] = [False] * self._num_envs
@@ -205,7 +211,8 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             nearby_distance=self.nearby_distance, 
             topk=self.topk, 
             target_object_list=self._map_controller._target_object, ##
-            floor_probabilities_df=self.floor_probabilities_df
+            floor_probabilities_df=self.floor_probabilities_df,
+            ocsm=self._ocsm,
         )
     def _reset(self, env: int) -> None:
         ## 核心策略状态重置
@@ -236,6 +243,8 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
 
         self.min_distance_xy[env] = np.inf
         self.cur_frontier[env] = np.array([])
+        if self._ocsm is not None:
+            self._ocsm.reset(env)
         if self._instrumentation_enabled:
             self._last_mode[env] = "reset"
             self._last_action[env] = -1
@@ -332,6 +341,8 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 "explore_trace": self._last_explore_trace[env],
                 "frontier_decision": frontier_decision,
             }
+            if self._ocsm is not None:
+                policy_info["decision_trace"]["ocsm"] = self._ocsm.trace(env)
 
         if self._visual_capture_enabled:
             def det_json(detections: Any) -> Dict[str, Any]:
@@ -475,6 +486,38 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         else:
             return None
 
+    def _ocsm_stair_presence(self, env: int) -> Tuple[bool, bool]:
+        obstacle_map = self._map_controller._obstacle_map[env]
+        up_present = bool(
+            obstacle_map._has_up_stair
+            or len(obstacle_map._up_stair_frontiers) > 0
+        )
+        down_present = bool(
+            obstacle_map._has_down_stair
+            or len(obstacle_map._down_stair_frontiers) > 0
+        )
+        return up_present, down_present
+
+    def _ocsm_observe(self, env: int) -> None:
+        if self._ocsm is None:
+            return
+        obstacle_map = self._map_controller._obstacle_map[env]
+        target = self._map_controller._target_object[env]
+        up_present, down_present = self._ocsm_stair_presence(env)
+        self._ocsm.observe(
+            env=env,
+            target=target,
+            floor_index=self._map_controller._cur_floor_index[env],
+            step=self._num_steps[env],
+            robot_xy=self._observations_cache[env]["robot_xy"],
+            obstacle_map=obstacle_map,
+            target_present=self._map_controller._object_map[env].has_object(target),
+            up_stair_present=up_present,
+            down_stair_present=down_present,
+            frontiers=self._observations_cache[env]["frontier_sensor"],
+            arrival_radius_m=self._pointnav_stop_radius,
+        )
+
     def act(
         self,
         observations: Dict,
@@ -525,6 +568,10 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         self._map_controller._update_obstacle_map(self._observations_cache, self.red_semantic_pred_list, self._pitch_angle) # observations
         self._map_controller._update_value_map(self._observations_cache)
         self._map_controller._update_distance_on_object_map(self._observations_cache)
+
+        if self._ocsm is not None:
+            for env in range(self._num_envs):
+                self._ocsm_observe(env)
         
         pointnav_action_env_list = []
 
@@ -681,6 +728,22 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             if pointnav_action is None:
                 action_numpy = 0
                 pointnav_action = torch.tensor([[action_numpy]], dtype=torch.int64, device=masks.device)
+
+            if self._ocsm is not None and mode in {
+                "down_stair_detected",
+                "up_stair_detected",
+                "get_close_to_stair",
+                "climb_stair",
+                "climb_stair_initialize",
+                "look_for_downstair",
+            }:
+                self._ocsm.end_for_stair_mode(
+                    env,
+                    self._num_steps[env],
+                    self._map_controller._obstacle_map[env],
+                    self._observations_cache[env]["frontier_sensor"],
+                    f"stair_mode_{mode}",
+                )
             
             action_numpy = pointnav_action.detach().cpu().numpy()[0]
             if isinstance(action_numpy, np.ndarray) and action_numpy.size == 1: # 确保action_numpy是标量
@@ -706,6 +769,15 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     print("Continuous forward to force turn right.")
 
             if self._num_steps[env] == self.max_episode_steps - 1:
+                if self._ocsm is not None:
+                    self._ocsm.finish_attempt(
+                        env,
+                        "interrupted",
+                        "episode_step_limit",
+                        self._num_steps[env],
+                        self._map_controller._obstacle_map[env],
+                        self._observations_cache[env]["frontier_sensor"],
+                    )
                 action_numpy = 0
                 pointnav_action = torch.tensor([[action_numpy]], dtype=torch.int64, device=masks.device)
                 print("Force stop.")
@@ -768,6 +840,15 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                self._map_controller._obstacle_map[env]._floor_num_steps < 50 and \
                ((self._map_controller._obstacle_map[env]._explored_up_stair == False and self._map_controller._obstacle_map[env]._up_stair_frontiers.size == 0) or \
                 (self._map_controller._obstacle_map[env]._explored_down_stair == False and self._map_controller._obstacle_map[env]._down_stair_frontiers.size == 0)):
+                if self._ocsm is not None:
+                    self._ocsm.finish_attempt(
+                        env,
+                        "interrupted",
+                        "stairwell_reinitialization",
+                        self._num_steps[env],
+                        self._map_controller._obstacle_map[env],
+                        frontiers,
+                    )
                 return self._handle_stairwell_reinitialization(env, masks)
 
             # 标记当前楼层已探索
@@ -783,11 +864,28 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 action = self._navigate_stair_if_unexplored_floor(observations, env, 'down')
 
             if action is not None:
+                if self._ocsm is not None:
+                    self._ocsm.end_for_stair_mode(
+                        env,
+                        self._num_steps[env],
+                        self._map_controller._obstacle_map[env],
+                        frontiers,
+                        "no_frontier_stair_navigation",
+                    )
                 if self._instrumentation_enabled:
                     self._last_explore_trace[env]["no_frontier_action"] = "stair_navigation"
                 return action
             else:
                 print(f"Environment {env}: In all floors, no unexplored stairs or frontiers found, stopping.")
+                if self._ocsm is not None:
+                    self._ocsm.finish_attempt(
+                        env,
+                        "interrupted",
+                        "no_frontier_stop",
+                        self._num_steps[env],
+                        self._map_controller._obstacle_map[env],
+                        frontiers,
+                    )
                 if self._instrumentation_enabled:
                     self._last_explore_trace[env]["no_frontier_action"] = "stop"
                 return self._stop_action.to(masks.device)
@@ -806,12 +904,56 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             # LLM 判断上楼或下楼的保底机制
             if best_value == -100: # LLM 判断上楼
                 action = self._navigate_stair_if_unexplored_floor(observations, env, 'up')
-                if action: return action
+                if action:
+                    if self._ocsm is not None:
+                        self._ocsm.end_for_stair_mode(
+                            env,
+                            self._num_steps[env],
+                            self._map_controller._obstacle_map[env],
+                            frontiers,
+                            "llm_floor_up",
+                        )
+                    return action
                 print(f"Environment {env}: Can't go upstairs or have already fully explored upstairs, exploring current floor instead.")
             elif best_value == -200: # LLM 判断下楼
                 action = self._navigate_stair_if_unexplored_floor(observations, env, 'down')
-                if action: return action
+                if action:
+                    if self._ocsm is not None:
+                        self._ocsm.end_for_stair_mode(
+                            env,
+                            self._num_steps[env],
+                            self._map_controller._obstacle_map[env],
+                            frontiers,
+                            "llm_floor_down",
+                        )
+                    return action
                 print(f"Environment {env}: Can't go downstairs or have already fully explored downstairs, exploring current floor instead.")
+
+            if self._ocsm is not None:
+                disable_event = self.llm_planner.last_frontier_disable_event[env]
+                target = self._map_controller._target_object[env]
+                up_present, down_present = self._ocsm_stair_presence(env)
+                self._ocsm.register_selection(
+                    env=env,
+                    target=target,
+                    floor_index=self._map_controller._cur_floor_index[env],
+                    selected_frontier=best_frontier,
+                    step=self._num_steps[env],
+                    robot_xy=self._observations_cache[env]["robot_xy"],
+                    obstacle_map=self._map_controller._obstacle_map[env],
+                    target_present=self._map_controller._object_map[env].has_object(target),
+                    up_stair_present=up_present,
+                    down_stair_present=down_present,
+                    frontiers=frontiers,
+                )
+                if disable_event is not None:
+                    self._ocsm.mark_execution_failure(
+                        env,
+                        disable_event["reason"],
+                        self._num_steps[env],
+                        self._map_controller._obstacle_map[env],
+                        frontiers,
+                    )
             
             # 执行点导航到最佳 Frontier
             self.cur_frontier[env] = best_frontier

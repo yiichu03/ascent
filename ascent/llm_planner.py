@@ -7,6 +7,7 @@ from model_api.qwen25_out import Qwen2_5Client
 from ascent.mapping.object_point_cloud_map import ObjectPointCloudMap
 from ascent.mapping.obstacle_map import ObstacleMap
 from ascent.mapping.value_map import ValueMap
+from ascent.ocsm import ObjectConditionedSearchMemory
 import json
 from skimage.metrics import structural_similarity as ssim
 from constants import (
@@ -23,7 +24,7 @@ from constants import (
 import networkx as nx
 
 class Ascent_LLM_Planner:
-    def __init__(self, num_envs=1, nearby_distance = 3.0, topk = 3, target_object_list = [""], floor_probabilities_df=None):
+    def __init__(self, num_envs=1, nearby_distance = 3.0, topk = 3, target_object_list = [""], floor_probabilities_df=None, ocsm: ObjectConditionedSearchMemory = None):
 
         self._num_envs = num_envs
         self._force_frontier = [np.zeros(2) for _ in range(self._num_envs)]
@@ -37,6 +38,8 @@ class Ascent_LLM_Planner:
         self._llm = Qwen2_5Client(port=int(os.environ.get("QWEN2_5_PORT", "13181")))
         self.multi_floor_ask_step = [0 for _ in range(self._num_envs)]
         self.floor_probabilities_df = floor_probabilities_df
+        self._ocsm = ocsm
+        self.last_frontier_disable_event = [None for _ in range(self._num_envs)]
         self.frontier_rgb_list = [[] for _ in range(self._num_envs)]
         self._instrumentation_enabled = (
             os.environ.get("ASCENT_DECISION_TRACE", "").lower()
@@ -63,6 +66,7 @@ class Ascent_LLM_Planner:
         self.multi_floor_ask_step[env] = 0
         self.frontier_rgb_list[env] = []
         self.floor_num[env] = 1
+        self.last_frontier_disable_event[env] = None
         if self._instrumentation_enabled:
             self.last_decision_trace[env] = {}
             self.last_llm_trace[env] = {}
@@ -96,11 +100,35 @@ class Ascent_LLM_Planner:
                 self.last_decision_trace[env] = {}
                 self.last_llm_trace[env] = {}
                 self.last_multi_floor_trace[env] = {}
+            self.last_frontier_disable_event[env] = None
 
-            # 🆕 0. 如果只有一个前沿点，直接导航到该点
+            # 🆕 0. 如果只有一个前沿点，保留原始固定 value=1.0 语义。
+            # OCSM-on 只校准这个原始候选，不额外读取或改变 ValueMap 值。
+            if len(frontiers) == 1:
+                sorted_pts = np.asarray(frontiers)
+                sorted_values = [1.0]
+            else:
+                # 1. ASCENT 原始 ValueMap 排序
+                sorted_pts, sorted_values = self._sort_frontiers_by_value(
+                    obstacle_map, value_map, frontiers, env
+                )
+            ocsm_calibration = {}
+            if self._ocsm is not None:
+                floor_index = cur_floor_index[env] if env < len(cur_floor_index) else 0
+                sorted_pts, sorted_values, ocsm_calibration = self._ocsm.calibrate_candidates(
+                    env,
+                    self._target_object[env],
+                    floor_index,
+                    sorted_pts,
+                    sorted_values,
+                )
+            robot_xy = observations_cache[env]["robot_xy"]
+
+            # 只有 ASCENT 原始输入本来就是单候选时才走快捷路径。OCSM 将多候选
+            # 校准为单候选时仍继续原 force/nearby/LLM 流程，避免绕过 floor sentinel。
             if len(frontiers) == 1:
                 if self._instrumentation_enabled:
-                    self.last_decision_trace[env] = {
+                    decision_trace = {
                         "selection_source": "single_frontier",
                         "candidate_count": 1,
                         "frontier_topk": [frontiers[0]],
@@ -108,11 +136,15 @@ class Ascent_LLM_Planner:
                         "selected_frontier": frontiers[0],
                         "selected_value": 1.0,
                     }
-                return frontiers[0], 1.0
-            
-            # 1. 初始化
-            sorted_pts, sorted_values = self._sort_frontiers_by_value(obstacle_map, value_map, frontiers, env)
-            robot_xy = observations_cache[env]["robot_xy"]
+                    if self._ocsm is not None:
+                        decision_trace.update(
+                            {
+                                "active_candidate_count": int(len(sorted_pts)),
+                                "ocsm_calibration": ocsm_calibration,
+                            }
+                        )
+                    self.last_decision_trace[env] = decision_trace
+                return sorted_pts[0], sorted_values[0]
             
             best_frontier, best_value = None, None
             selection_source = "unknown"
@@ -152,7 +184,14 @@ class Ascent_LLM_Planner:
 
             # 5. 处理前沿点粘滞/循环检测和禁用
             # 这一部分逻辑相对独立且复杂，可以封装
-            self._handle_frontier_stick_and_disable(best_frontier, robot_xy, env, last_frontier_distance, frontier_stick_step, obstacle_map)
+            self.last_frontier_disable_event[env] = self._handle_frontier_stick_and_disable(
+                best_frontier,
+                robot_xy,
+                env,
+                last_frontier_distance,
+                frontier_stick_step,
+                obstacle_map,
+            )
 
             # 6. 更新状态并返回
             if self._instrumentation_enabled:
@@ -167,7 +206,7 @@ class Ascent_LLM_Planner:
             print(f"Now the best_frontier is {best_frontier}")
             if self._instrumentation_enabled:
                 selected_tuple = tuple(best_frontier) if best_frontier is not None else None
-                self.last_decision_trace[env] = {
+                decision_trace = {
                     "selection_source": selection_source,
                     "candidate_count": int(len(frontiers)),
                     "active_candidate_count": int(len(sorted_pts)),
@@ -184,6 +223,14 @@ class Ascent_LLM_Planner:
                     "llm_trace": self.last_llm_trace[env],
                     "multi_floor_trace": self.last_multi_floor_trace[env],
                 }
+                if self._ocsm is not None:
+                    decision_trace.update(
+                        {
+                            "ocsm_calibration": ocsm_calibration,
+                            "frontier_disable_event": self.last_frontier_disable_event[env],
+                        }
+                    )
+                self.last_decision_trace[env] = decision_trace
             return best_frontier, best_value
     
     def _sort_frontiers_by_value(
@@ -356,6 +403,7 @@ class Ascent_LLM_Planner:
 
     def _handle_frontier_stick_and_disable(self, current_best_frontier, robot_xy, env, last_frontier_distance, frontier_stick_step, obstacle_map,):
         # 将前沿点粘滞和禁用逻辑封装
+        disable_event = None
         if np.array_equal(self._last_frontier[env], current_best_frontier):
             if frontier_stick_step[env] == 0:
                 last_frontier_distance[env] = np.linalg.norm(current_best_frontier - robot_xy)
@@ -370,6 +418,10 @@ class Ascent_LLM_Planner:
                     if frontier_stick_step[env] >= STICKY_FRONTIER_STEP_THRESHOLD:
                         obstacle_map[env]._disabled_frontiers.add(tuple(current_best_frontier))
                         print(f"Frontier {current_best_frontier} is disabled due to no movement.")
+                        disable_event = {
+                            "reason": "no_progress_proxy",
+                            "frontier": current_best_frontier.copy(),
+                        }
                         frontier_stick_step[env] = 0
                     else:
                         frontier_stick_step[env] += 1
@@ -387,6 +439,11 @@ class Ascent_LLM_Planner:
             if obstacle_map[env]._best_frontier_selection_count[frontier_tuple] >= REPEATED_SELECTION_THRESHOLD:
                 obstacle_map[env]._disabled_frontiers.add(frontier_tuple)
                 print(f"Frontier {current_best_frontier} is disabled due to repeated non-consecutive selection.")
+                disable_event = {
+                    "reason": "repeated_selection_proxy",
+                    "frontier": current_best_frontier.copy(),
+                }
+        return disable_event
 
     def llm_analyze_single_floor(self, env, target_object_category, frontier_index_list, obstacle_map, object_map):
         """
