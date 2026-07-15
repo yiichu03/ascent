@@ -38,7 +38,7 @@ register_hydra_plugin(HabitatConfigPlugin)
     config_name="eval_ascent_hm3d.yaml",  # 修改：文件名不带 .yaml 后缀
 )
 def main(cfg: DictConfig) -> None:
-    cfg = patch_config(cfg)
+    cfg = patch_config(cfg) # 用于 Habitat 配置兼容和规范化。
     execute_exp(cfg, "eval" if cfg.habitat_baselines.evaluate else "train")
 
 
