@@ -42,6 +42,32 @@ from ascent.utils import (
 )
 from omegaconf import DictConfig
 
+
+def _min_stair_map_l1_distance_px(
+    stair_map: np.ndarray,
+    robot_px_xy: np.ndarray,
+    *,
+    correct_coordinate_order: bool,
+) -> int:
+    """Return the nearest stair-map L1 distance in pixels.
+
+    ``np.argwhere`` returns map indices as ``(row=y, col=x)`` while
+    ``BaseMap._xy_to_px`` returns robot pixels as ``(x, y)``.  The historical
+    ASCENT behavior compared these arrays without converting their order.
+    """
+    stair_pixels_yx = np.argwhere(stair_map)
+    if stair_pixels_yx.size == 0:
+        raise ValueError("stair_map must contain at least one stair pixel")
+
+    stair_pixels = (
+        stair_pixels_yx[:, ::-1]
+        if correct_coordinate_order
+        else stair_pixels_yx
+    )
+    robot_px_xy = np.asarray(robot_px_xy).reshape(2)
+    return int(np.min(np.abs(stair_pixels - robot_px_xy).sum(axis=1)))
+
+
 @baseline_registry.register_policy
 class Ascent_Policy(HabitatMixin, ITMPolicyV2):
 
@@ -105,6 +131,9 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         self._policy_info = {}
         self._pointnav_stop_radius = kwargs["pointnav_stop_radius"]
         self._visualize = kwargs["visualize"]
+        self._stair_distance_order_fix = os.environ.get(
+            "ASCENT_STAIR_DISTANCE_ORDER_FIX", ""
+        ).lower() in {"1", "true", "yes", "on"}
 
         # 3. 批量初始化列表和地图相关参数
         self._num_envs = kwargs['num_envs']
@@ -610,8 +639,29 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                         mode = "look_for_downstair"
                         pointnav_action = self._look_for_downstair(observations, env, masks)
                     elif self._map_controller._climb_stair_flag[env] == 1 and self._pitch_angle[env] == 0 and np.sum(self._map_controller._obstacle_map[env]._up_stair_map) > 0:
-                        min_dis_to_upstair = np.min(np.abs(np.argwhere(self._map_controller._obstacle_map[env]._up_stair_map) - robot_px[0]).sum(axis=1))
-                        print(f"min_dis_to_upstair: {min_dis_to_upstair}")
+                        up_stair_map = self._map_controller._obstacle_map[env]._up_stair_map
+                        legacy_min_dis_to_upstair = _min_stair_map_l1_distance_px(
+                            up_stair_map,
+                            robot_px[0],
+                            correct_coordinate_order=False,
+                        )
+                        corrected_min_dis_to_upstair = _min_stair_map_l1_distance_px(
+                            up_stair_map,
+                            robot_px[0],
+                            correct_coordinate_order=True,
+                        )
+                        min_dis_to_upstair = (
+                            corrected_min_dis_to_upstair
+                            if self._stair_distance_order_fix
+                            else legacy_min_dis_to_upstair
+                        )
+                        print(
+                            "min_dis_to_upstair: "
+                            f"{min_dis_to_upstair} "
+                            f"legacy_yx_vs_xy={legacy_min_dis_to_upstair} "
+                            f"corrected_xy_vs_xy={corrected_min_dis_to_upstair} "
+                            f"coordinate_order_fix={int(self._stair_distance_order_fix)}"
+                        )
                         if min_dis_to_upstair <= 2.0 * self._map_controller._obstacle_map[env].pixels_per_meter and check_stairs_in_upper_50_percent(self.red_semantic_pred_list[env] == STAIR_CLASS_ID):
                             self._pitch_angle[env] += self._pitch_angle_offset
                             mode = "look_up"
@@ -620,8 +670,29 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                             mode = "get_close_to_stair"
                             pointnav_action = self._get_close_to_stair(observations, env, masks)
                     elif self._map_controller._climb_stair_flag[env] == 2 and self._pitch_angle[env] == 0 and np.sum(self._map_controller._obstacle_map[env]._down_stair_map) > 0:
-                        min_dis_to_downstair = np.min(np.abs(np.argwhere(self._map_controller._obstacle_map[env]._down_stair_map) - robot_px[0]).sum(axis=1))
-                        print(f"min_dis_to_downstair: {min_dis_to_downstair}")
+                        down_stair_map = self._map_controller._obstacle_map[env]._down_stair_map
+                        legacy_min_dis_to_downstair = _min_stair_map_l1_distance_px(
+                            down_stair_map,
+                            robot_px[0],
+                            correct_coordinate_order=False,
+                        )
+                        corrected_min_dis_to_downstair = _min_stair_map_l1_distance_px(
+                            down_stair_map,
+                            robot_px[0],
+                            correct_coordinate_order=True,
+                        )
+                        min_dis_to_downstair = (
+                            corrected_min_dis_to_downstair
+                            if self._stair_distance_order_fix
+                            else legacy_min_dis_to_downstair
+                        )
+                        print(
+                            "min_dis_to_downstair: "
+                            f"{min_dis_to_downstair} "
+                            f"legacy_yx_vs_xy={legacy_min_dis_to_downstair} "
+                            f"corrected_xy_vs_xy={corrected_min_dis_to_downstair} "
+                            f"coordinate_order_fix={int(self._stair_distance_order_fix)}"
+                        )
                         if min_dis_to_downstair <= 2.0 * self._map_controller._obstacle_map[env].pixels_per_meter:
                             self._pitch_angle[env] -= self._pitch_angle_offset
                             mode = "look_down"
