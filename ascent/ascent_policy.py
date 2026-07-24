@@ -228,10 +228,18 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             return
         rgb = observations["rgb"][env].cpu().numpy() ## modify this to fit on multiple environments
         depth = observations["depth"][env].cpu().numpy()
-        x, y = observations["gps"][env].cpu().numpy()
-        camera_yaw = observations["compass"][env].cpu().item()
+        estimated_pose = (
+            observations["estimated_pose"][env].cpu().numpy()
+        )
+        if estimated_pose.shape != (3,) or not np.isfinite(
+            estimated_pose
+        ).all():
+            raise RuntimeError(
+                f"Invalid policy-visible estimated pose: {estimated_pose}"
+            )
+        x, y, camera_yaw = map(float, estimated_pose)
         depth = filter_depth(depth.reshape(depth.shape[:2]), blur_type=None)
-        camera_position = np.array([x, -y, self._camera_height])
+        camera_position = np.array([x, y, self._camera_height])
         robot_xy = camera_position[:2]
         camera_pitch = np.radians(-self._pitch_angle[env]) # 应该是弧度制 -
         camera_roll = 0
@@ -248,7 +256,10 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             "fx": self._fx,
             "fy": self._fy,
             "camera_fov": self._camera_fov,
-            "habitat_start_yaw": observations["heading"][env].item(),
+            # The estimated episodic frame is initialized at yaw zero and
+            # never aligned to Habitat's world/start heading.
+            "habitat_start_yaw": 0.0,
+            "pose_source": "zhao_rgbd_2021",
             
         }
 
@@ -278,6 +289,7 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             "render_below_images": ["target_object"],
             "seg_map": self.seg_map_color_list[env], # seg_map_color,
             "num_steps": self._num_steps[env],
+            "pose_source": self._observations_cache[env]["pose_source"],
             # "floor_num_steps": self._map_controller._obstacle_map[env]._floor_num_steps,
         }
 

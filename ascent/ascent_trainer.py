@@ -1,5 +1,6 @@
 import os
 from collections import defaultdict
+from pathlib import Path
 from typing import Any, Dict, List
 
 import numpy as np
@@ -37,6 +38,15 @@ from omegaconf import OmegaConf
 from habitat_baselines.rl.ppo.evaluator import pause_envs ## For Habitat 3.0 
 from gym import spaces
 import time
+from ascent.vo.diagnostics import VODiagnosticsWriter
+from ascent.vo.habitat_extensions import configure_gt_isolated_vo
+from ascent.vo.pose_provider import VOInferenceError, ZhaoRGBDPoseProvider
+from ascent.vo.zhao_model import (
+    FORWARD_CHECKPOINT_SHA256,
+    POINTNAV_VO_SOURCE_COMMIT,
+    TURN_CHECKPOINT_SHA256,
+)
+
 def extract_scalars_from_info(info: Dict[str, Any]) -> Dict[str, float]:
     info_filtered = {k: v for k, v in info.items() if not isinstance(v, list)}
     return extract_scalars_from_info_habitat(info_filtered)
@@ -80,6 +90,11 @@ class AscentTrainer(PPOTrainer):
 
         with read_write(config):
             config.habitat.dataset.split = config.habitat_baselines.eval.split
+        configure_gt_isolated_vo(config)
+        if config.habitat_baselines.num_environments != 1:
+            raise RuntimeError(
+                "ASCENT-VO requires one Habitat environment per 3-shared lane"
+            )
 # when liuyi debug, the video_option=[],所以这整段跳过。第一次理解主流程时，不需要设置断点。
         if len(self.config.habitat_baselines.eval.video_option) > 0:
             # 只有保存视频时才添加额外相机、打开 debug_render。
@@ -111,8 +126,54 @@ class AscentTrainer(PPOTrainer):
 
         if self._agent.actor_critic.should_load_agent_state:
             self._agent.load_state_dict(ckpt_dict)
+        if config.ascent_vo.provider != "zhao_rgbd_2021":
+            raise RuntimeError(
+                f"Unsupported pose provider {config.ascent_vo.provider}"
+            )
+        vo_depth_config = get_agent_config(
+            config.habitat.simulator
+        ).sim_sensors.vo_depth_sensor
+        self._vo_pose_provider = ZhaoRGBDPoseProvider(
+            num_envs=self.envs.num_envs,
+            device=self.device,
+            checkpoint_dir=Path(config.ascent_vo.checkpoint_dir),
+            source_min_depth=float(vo_depth_config.min_depth),
+            source_max_depth=float(vo_depth_config.max_depth),
+            source_hfov_degrees=float(vo_depth_config.hfov),
+        )
+        self._vo_diagnostics = VODiagnosticsWriter(
+            Path(config.ascent_vo.diagnostics_path),
+            metadata={
+                "provider": "zhao_rgbd_2021",
+                "run_id": os.environ.get(
+                    "ASCENT_VO_RUN_ID", "unrecorded"
+                ),
+                "ascent_source_commit": os.environ.get(
+                    "ASCENT_VO_SOURCE_COMMIT", "unrecorded"
+                ),
+                "dataset": (
+                    "hm3d"
+                    if "hm3d" in config.habitat.dataset.data_path
+                    else "mp3d"
+                ),
+                "seed": int(config.habitat.seed),
+                "checkpoint_dir": str(
+                    Path(config.ascent_vo.checkpoint_dir).resolve()
+                ),
+                "pointnav_vo_source_commit": POINTNAV_VO_SOURCE_COMMIT,
+                "forward_checkpoint_sha256": FORWARD_CHECKPOINT_SHA256,
+                "turn_checkpoint_sha256": TURN_CHECKPOINT_SHA256,
+                "source_hfov_degrees": float(vo_depth_config.hfov),
+                "checkpoint_hfov_degrees": 70.0,
+                "action_contract": "native_0.25m_or_30deg_single_pair",
+                "pose_initialization": "episode_local_zero_se2",
+                "gt_policy_isolation": True,
+            },
+        )
         # 环境 reset：取得第一帧 observation 这是 episode 真正开始的位置。 1. Habitat 原始 observation
         observations = self.envs.reset()
+        self._vo_pose_provider.reset_batch(observations)
+        self._vo_pose_provider.inject_estimated_pose(observations)
         # 把“每个 environment 一个字典”整理为“每个 sensor 一个 batched tensor”：  2. → batched tensor
         batch = batch_obs(observations, device=self.device)
         # 应用 resize 等 observation transform。   3. → policy 可以直接使用的输入
@@ -204,6 +265,10 @@ class AscentTrainer(PPOTrainer):
 
         hab_vis = HabitatVis(self.envs.num_envs)
         goal_name = ["" for _ in range(self.envs.num_envs)]
+        vo_action_steps = [0 for _ in range(self.envs.num_envs)]
+        vo_dataset = (
+            "hm3d" if "hm3d" in config.habitat.dataset.data_path else "mp3d"
+        )
         # 最核心的 timestep 循环
         # 只要：目标 episode 数还没完成 并且仍有活跃 environment 就继续执行。
         while len(stats_episodes) < (number_of_eval_episodes * evals_per_ep) and self.envs.num_envs > 0:
@@ -255,6 +320,9 @@ class AscentTrainer(PPOTrainer):
                 ]
             else:
                 step_data = [a.item() for a in action_data.env_actions.cpu()]
+            executed_action_ids = [
+                int(np.asarray(action).item()) for action in step_data
+            ]
             # 执行 Habitat 动作
             # 它把动作真正交给 simulator，例如：MOVE_FORWARD, TURN_LEFT, ...
             outputs = self.envs.step(step_data)
@@ -264,6 +332,45 @@ class AscentTrainer(PPOTrainer):
             # 3. dones 当前 episode 是否结束。
             # 4. infos Habitat measurements，例如：success spl distance_to_goal...
             observations, rewards_l, dones, infos = [list(x) for x in zip(*outputs)]
+            try:
+                pose_updates = self._vo_pose_provider.update_batch(
+                    observations, executed_action_ids, dones
+                )
+            except VOInferenceError as exc:
+                for i, action_id in enumerate(executed_action_ids):
+                    self._vo_diagnostics.record_error(
+                        dataset=vo_dataset,
+                        scene_id=current_episodes_info[i].scene_id,
+                        episode_id=current_episodes_info[i].episode_id,
+                        seed=int(config.habitat.seed),
+                        action_step=vo_action_steps[i] + 1,
+                        action=action_id,
+                        error=exc,
+                    )
+                raise
+            for i, pose_update in enumerate(pose_updates):
+                vo_action_steps[i] += 1
+                gt_pose = infos[i].pop("gt_start_aligned_pose", None)
+                self._vo_diagnostics.record_step(
+                    dataset=vo_dataset,
+                    scene_id=current_episodes_info[i].scene_id,
+                    episode_id=current_episodes_info[i].episode_id,
+                    seed=int(config.habitat.seed),
+                    action_step=vo_action_steps[i],
+                    update=pose_update,
+                    gt_pose=gt_pose,
+                )
+                if dones[i]:
+                    self._vo_diagnostics.record_episode_end(
+                        dataset=vo_dataset,
+                        scene_id=current_episodes_info[i].scene_id,
+                        episode_id=current_episodes_info[i].episode_id,
+                        seed=int(config.habitat.seed),
+                        action_steps=vo_action_steps[i],
+                        native_metrics=extract_scalars_from_info(infos[i]),
+                    )
+                    vo_action_steps[i] = 0
+            self._vo_pose_provider.inject_estimated_pose(observations)
             
             # 合并 policy 信息
             policy_infos = self._agent.actor_critic.get_extra(action_data, infos, dones)
@@ -466,4 +573,5 @@ class AscentTrainer(PPOTrainer):
         for k, v in metrics.items():
             writer.add_scalar(f"eval_metrics/{k}", v, step_id)
 
+        self._vo_diagnostics.close()
         self.envs.close()

@@ -3,15 +3,18 @@ defaults:
   - /benchmark/nav/objectnav: objectnav_hm3d
   - /habitat/task/lab_sensors:
       - base_explorer
-      - compass_sensor
-      - gps_sensor
-      - heading_sensor
       - frontier_sensor
   - /habitat/task/measurements:
     - multi_floor_map # frontier_exploration_map
     - traveled_stairs
   - /habitat_baselines/rl/policy: ascent_policy
   - _self_
+
+ascent_vo:
+  enabled: true
+  provider: "zhao_rgbd_2021"
+  checkpoint_dir: ${oc.env:ASCENT_VO_CHECKPOINT_DIR,../PointNav-VO/pretrained_ckpts/vo}
+  diagnostics_path: ${oc.env:ASCENT_VO_DIAGNOSTICS_PATH,debug/ascent_vo_hm3d_diagnostics.jsonl}
 
 habitat:
   environment:
