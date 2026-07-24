@@ -171,6 +171,51 @@ def test_gt_equivalence_helpers_cover_five_bounded_sequences() -> None:
     )
 
 
+def test_gt_equivalence_plan_supports_recorded_descent_with_looks() -> None:
+    actions = [TURN_LEFT] * 219 + [
+        MOVE_FORWARD,
+        LOOK_DOWN,
+        TURN_RIGHT,
+        MOVE_FORWARD,
+        LOOK_UP,
+    ] + [TURN_LEFT] * 57
+    plans = build_sequence_plan(
+        actions,
+        ordinary_end_step=60,
+        stair_setup_end_step=281,
+        stair_transition_start_step=220,
+        stair_transition_end_step=281,
+        recorded_transition_direction="descent",
+    )
+    measured = {
+        label: [
+            step.action
+            for plan in plans
+            for step in plan
+            if step.measured and step.sequence == label
+        ]
+        for label in (
+            "ordinary_same_floor",
+            "turn_heavy",
+            "stair_ascent",
+            "stair_descent",
+            "floor_revisit",
+        )
+    }
+    transition_motion = [
+        action
+        for action in actions[219:281]
+        if action not in (LOOK_UP, LOOK_DOWN)
+    ]
+    assert measured["stair_descent"] == transition_motion
+    assert measured["stair_ascent"] == inverse_native_actions(
+        transition_motion
+    )
+    assert LOOK_UP not in measured["floor_revisit"]
+    assert LOOK_DOWN not in measured["floor_revisit"]
+    assert max(map(len, plans)) < 1200
+
+
 def test_gt_local_delta_round_trips_through_production_composition() -> None:
     previous = np.array([1.2, -0.4, 0.7])
     current = np.array([1.6, 0.3, -2.8])

@@ -125,20 +125,75 @@ def inverse_native_actions(actions: Sequence[int]) -> list[int]:
 
 def build_sequence_plan(
     recorded_actions: Sequence[int],
+    *,
+    ordinary_end_step: int = 60,
+    stair_setup_end_step: int = 399,
+    stair_transition_start_step: int = 400,
+    stair_transition_end_step: int = 433,
+    recorded_transition_direction: str = "ascent",
 ) -> list[list[PlannedStep]]:
-    if len(recorded_actions) < 433:
+    if not (
+        1 <= ordinary_end_step <= len(recorded_actions)
+        and 1 <= stair_setup_end_step <= len(recorded_actions)
+        and 1 <= stair_transition_start_step
+        <= stair_transition_end_step
+        <= len(recorded_actions)
+    ):
         raise ValueError(
-            f"action trace has {len(recorded_actions)} steps, need >=433"
+            "invalid 1-indexed action windows for trace of "
+            f"{len(recorded_actions)} steps"
         )
-    required = list(recorded_actions[:433])
-    unsupported = sorted(set(required) - set((1, 2, 3)))
+    if recorded_transition_direction not in {"ascent", "descent"}:
+        raise ValueError(
+            "recorded_transition_direction must be ascent or descent"
+        )
+    setup_actions = list(recorded_actions[:stair_setup_end_step])
+    unsupported = sorted(set(setup_actions) - set((1, 2, 3, 4, 5)))
     if unsupported:
         raise ValueError(
-            f"stair replay prefix contains unsupported actions {unsupported}"
+            f"stair setup contains unsupported actions {unsupported}"
+        )
+    if setup_actions.count(LOOK_UP) != setup_actions.count(LOOK_DOWN):
+        raise ValueError(
+            "stair setup must finish at zero camera pitch"
+        )
+    recorded_transition = list(
+        recorded_actions[
+            stair_transition_start_step - 1 : stair_transition_end_step
+        ]
+    )
+    unsupported = sorted(
+        set(recorded_transition) - set((1, 2, 3, 4, 5))
+    )
+    if unsupported:
+        raise ValueError(
+            "recorded stair transition contains unsupported actions "
+            f"{unsupported}"
+        )
+    transition_motion = [
+        action
+        for action in recorded_transition
+        if action not in (LOOK_UP, LOOK_DOWN)
+    ]
+    if MOVE_FORWARD not in transition_motion:
+        raise ValueError(
+            "recorded stair transition has no forward motion"
+        )
+    ordinary_actions = list(recorded_actions[:ordinary_end_step])
+    unsupported = sorted(
+        set(ordinary_actions) - set((1, 2, 3, 4, 5))
+    )
+    if unsupported:
+        raise ValueError(
+            f"ordinary sequence contains unsupported actions {unsupported}"
+        )
+    if ordinary_actions.count(LOOK_UP) != ordinary_actions.count(LOOK_DOWN):
+        raise ValueError(
+            "ordinary sequence must finish at zero camera pitch"
         )
     ordinary = [
         PlannedStep("ordinary_same_floor", action)
-        for action in recorded_actions[:60]
+        for action in ordinary_actions
     ]
     turn_heavy = [
         *[
@@ -150,10 +205,14 @@ def build_sequence_plan(
     ]
     setup = [
         PlannedStep("stair_setup", action, measured=False)
-        for action in recorded_actions[:399]
+        for action in setup_actions
     ]
-    ascent_actions = list(recorded_actions[399:433])
-    descent_actions = inverse_native_actions(ascent_actions)
+    if recorded_transition_direction == "ascent":
+        ascent_actions = transition_motion
+        descent_actions = inverse_native_actions(transition_motion)
+    else:
+        ascent_actions = inverse_native_actions(transition_motion)
+        descent_actions = transition_motion
     stair_cycle = [
         *setup,
         *[
@@ -306,6 +365,7 @@ def _compose_config(
     config_name: str,
     dataset_path: Path,
     content_scene: str,
+    split: str,
     scenes_dir: Path,
     seed: int,
     max_episode_steps: int,
@@ -328,7 +388,7 @@ def _compose_config(
         config.habitat.seed = int(seed)
         config.habitat.dataset.data_path = str(dataset_path.resolve())
         config.habitat.dataset.content_scenes = [content_scene]
-        config.habitat.dataset.split = "train"
+        config.habitat.dataset.split = split
         config.habitat.dataset.scenes_dir = str(scenes_dir.resolve())
         config.habitat.environment.max_episode_steps = int(
             max_episode_steps
@@ -347,6 +407,7 @@ def _run_plan(
     *,
     role: str,
     config,
+    episode_id: str,
     plans: Sequence[Sequence[PlannedStep]],
     writer: JsonlWriter,
 ) -> list[dict[str, Any]]:
@@ -354,11 +415,18 @@ def _run_plan(
         id_dataset=config.habitat.dataset.type,
         config=config.habitat.dataset,
     )
-    if len(dataset.episodes) != 1:
+    matching_episodes = [
+        episode
+        for episode in dataset.episodes
+        if str(episode.episode_id) == str(episode_id)
+    ]
+    if len(matching_episodes) != 1:
         raise RuntimeError(
-            f"equivalence dataset must contain exactly one episode, got "
-            f"{len(dataset.episodes)}"
+            f"equivalence dataset must contain exactly one episode with "
+            f"id {episode_id}, got {len(matching_episodes)} matches among "
+            f"{len(dataset.episodes)} episodes"
         )
+    dataset.episodes = matching_episodes
     records: list[dict[str, Any]] = []
     with habitat.Env(config=config.habitat, dataset=dataset) as env:
         for reset_index, plan in enumerate(plans):
@@ -604,6 +672,8 @@ def _compare_runs(
 
 def _sequence_summaries(
     records: Sequence[Mapping[str, Any]],
+    *,
+    minimum_floor_height_change: float = 2.0,
 ) -> dict[str, dict[str, Any]]:
     summaries = {}
     for sequence in (
@@ -644,17 +714,20 @@ def _sequence_summaries(
             "ordinary sequence is not bounded to one floor"
         )
     ascent = summaries["stair_ascent"]
-    if ascent["height_delta"] < 2.0:
+    if ascent["height_delta"] < minimum_floor_height_change:
         raise RuntimeError(
             f"stair ascent gained only {ascent['height_delta']:.3f} m"
         )
     descent = summaries["stair_descent"]
-    if descent["height_delta"] > -2.0:
+    if descent["height_delta"] > -minimum_floor_height_change:
         raise RuntimeError(
             f"stair descent lost only {descent['height_delta']:.3f} m"
         )
     revisit = summaries["floor_revisit"]
-    if revisit["max_height"] - revisit["min_height"] < 2.0:
+    if (
+        revisit["max_height"] - revisit["min_height"]
+        < minimum_floor_height_change
+    ):
         raise RuntimeError(
             "floor revisit did not traverse two height levels"
         )
@@ -678,6 +751,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dataset-path", type=Path, required=True)
     parser.add_argument("--content-scene", default="hm3d_r0_006")
+    parser.add_argument("--episode-id", required=True)
+    parser.add_argument(
+        "--split", choices=("train", "val"), required=True
+    )
     parser.add_argument("--scenes-dir", type=Path, required=True)
     parser.add_argument("--action-trace", type=Path, required=True)
     parser.add_argument(
@@ -687,6 +764,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--gpu-device-id", type=int, default=0)
     parser.add_argument("--max-episode-steps", type=int, default=1200)
+    parser.add_argument("--ordinary-end-step", type=int, default=60)
+    parser.add_argument(
+        "--stair-setup-end-step", type=int, default=399
+    )
+    parser.add_argument(
+        "--stair-transition-start-step", type=int, default=400
+    )
+    parser.add_argument(
+        "--stair-transition-end-step", type=int, default=433
+    )
+    parser.add_argument(
+        "--recorded-transition-direction",
+        choices=("ascent", "descent"),
+        default="ascent",
+    )
+    parser.add_argument(
+        "--minimum-floor-height-change", type=float, default=2.0
+    )
     return parser.parse_args()
 
 
@@ -711,7 +806,22 @@ def main() -> int:
             for line in args.action_trace.read_text().splitlines()
             if line.strip()
         ]
-        plans = build_sequence_plan(recorded_actions)
+        if args.minimum_floor_height_change <= 0.0:
+            raise ValueError(
+                "minimum floor height change must be positive"
+            )
+        plans = build_sequence_plan(
+            recorded_actions,
+            ordinary_end_step=args.ordinary_end_step,
+            stair_setup_end_step=args.stair_setup_end_step,
+            stair_transition_start_step=(
+                args.stair_transition_start_step
+            ),
+            stair_transition_end_step=args.stair_transition_end_step,
+            recorded_transition_direction=(
+                args.recorded_transition_direction
+            ),
+        )
         required_steps = max(max(map(len, plans)), 1)
         if required_steps >= args.max_episode_steps:
             raise RuntimeError(
@@ -725,12 +835,28 @@ def main() -> int:
                 "config_name": args.config_name,
                 "dataset_path": str(args.dataset_path.resolve()),
                 "content_scene": args.content_scene,
+                "episode_id": str(args.episode_id),
+                "split": args.split,
                 "scenes_dir": str(args.scenes_dir.resolve()),
                 "action_trace": str(args.action_trace.resolve()),
                 "action_trace_sha256": action_sha,
                 "seed": args.seed,
                 "gpu_device_id": args.gpu_device_id,
                 "max_episode_steps": args.max_episode_steps,
+                "ordinary_end_step": args.ordinary_end_step,
+                "stair_setup_end_step": args.stair_setup_end_step,
+                "stair_transition_start_step": (
+                    args.stair_transition_start_step
+                ),
+                "stair_transition_end_step": (
+                    args.stair_transition_end_step
+                ),
+                "recorded_transition_direction": (
+                    args.recorded_transition_direction
+                ),
+                "minimum_floor_height_change": (
+                    args.minimum_floor_height_change
+                ),
                 "sequence_count": 5,
                 "scientific_role": "engineering_equivalence_only",
                 "not_vo_performance": True,
@@ -740,6 +866,7 @@ def main() -> int:
             config_name=args.config_name,
             dataset_path=args.dataset_path,
             content_scene=args.content_scene,
+            split=args.split,
             scenes_dir=args.scenes_dir,
             seed=args.seed,
             max_episode_steps=args.max_episode_steps,
@@ -748,17 +875,24 @@ def main() -> int:
         baseline = _run_plan(
             role="baseline",
             config=_compose_config(**common, vo_enabled=False),
+            episode_id=args.episode_id,
             plans=plans,
             writer=writer,
         )
         vo = _run_plan(
             role="vo",
             config=_compose_config(**common, vo_enabled=True),
+            episode_id=args.episode_id,
             plans=plans,
             writer=writer,
         )
         _compare_runs(baseline, vo)
-        summaries = _sequence_summaries(vo)
+        summaries = _sequence_summaries(
+            vo,
+            minimum_floor_height_change=(
+                args.minimum_floor_height_change
+            ),
+        )
         writer.write(
             {
                 "record_type": "gate_result",
