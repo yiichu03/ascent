@@ -397,6 +397,60 @@ def _sensor_rotations(env: habitat.Env) -> dict[str, list[float]]:
     }
 
 
+def _sensor_transforms(
+    env: habitat.Env,
+) -> dict[str, dict[str, list[float]]]:
+    transforms = {}
+    for name, wrapper in env.sim.agents[0]._sensors.items():
+        transform = wrapper.node.absolute_transformation()
+        rotation = mn.Quaternion.from_matrix(transform.rotation())
+        transforms[name] = {
+            "translation": [
+                float(transform.translation.x),
+                float(transform.translation.y),
+                float(transform.translation.z),
+            ],
+            "rotation": _sensor_rotation_coefficients(rotation),
+        }
+    return transforms
+
+
+def assert_fixed_look_transforms(
+    previous: Mapping[str, Mapping[str, Sequence[float]]],
+    current: Mapping[str, Mapping[str, Sequence[float]]],
+) -> None:
+    """Check the camera extrinsics that define a fixed-forward VO view.
+
+    Habitat advances simulation time and renders a fresh frame for a LOOK
+    action, so byte-identical RGB-D frames are not a valid camera-pose
+    invariant.  The auxiliary camera's absolute transform is the relevant
+    contract; the main camera must rotate while the auxiliary camera stays
+    fixed.
+    """
+
+    for auxiliary in (VO_RGB_KEY, VO_DEPTH_KEY):
+        if not np.allclose(
+            previous[auxiliary]["translation"],
+            current[auxiliary]["translation"],
+            rtol=0.0,
+            atol=1e-6,
+        ) or not _equivalent_quaternion(
+            previous[auxiliary]["rotation"],
+            current[auxiliary]["rotation"],
+        ):
+            raise RuntimeError(
+                f"fixed {auxiliary} transform changed during look action"
+            )
+    for main in ("rgb", "depth"):
+        if _equivalent_quaternion(
+            previous[main]["rotation"],
+            current[main]["rotation"],
+        ):
+            raise RuntimeError(
+                f"main {main} transform did not rotate during look action"
+            )
+
+
 def _compose_config(
     *,
     config_name: str,
@@ -525,11 +579,7 @@ def _run_plan(
             previous_pose = np.zeros(3, dtype=np.float64)
             reference_pose = np.zeros(3, dtype=np.float64)
             pitch_level = 0
-            previous_aux = {
-                key: _value_digest(observations[key])
-                for key in (VO_RGB_KEY, VO_DEPTH_KEY)
-                if key in observations
-            }
+            previous_sensor_transforms = _sensor_transforms(env)
             reset_record = {
                 "record_type": "reset",
                 "role": role,
@@ -544,6 +594,7 @@ def _run_plan(
                     observations
                 ),
                 "sensor_rotations": _sensor_rotations(env),
+                "sensor_transforms": previous_sensor_transforms,
             }
             writer.write(reset_record)
             records.append(reset_record)
@@ -601,6 +652,7 @@ def _run_plan(
                                 f"VO observation lost auxiliary key {key}"
                             )
                     sensor_rotations = _sensor_rotations(env)
+                    sensor_transforms = _sensor_transforms(env)
                     if pitch_level == 0:
                         if not np.array_equal(
                             observations["rgb"],
@@ -624,19 +676,15 @@ def _run_plan(
                                     f"{main}/{auxiliary} rotations diverged "
                                     "at zero pitch"
                                 )
-                    else:
-                        for key in (VO_RGB_KEY, VO_DEPTH_KEY):
-                            current_aux = _value_digest(observations[key])
-                            if current_aux != previous_aux[key]:
-                                raise RuntimeError(
-                                    f"fixed {key} changed during look action"
-                                )
-                    previous_aux = {
-                        key: _value_digest(observations[key])
-                        for key in (VO_RGB_KEY, VO_DEPTH_KEY)
-                    }
+                    if planned.action in (LOOK_UP, LOOK_DOWN):
+                        assert_fixed_look_transforms(
+                            previous_sensor_transforms,
+                            sensor_transforms,
+                        )
+                    previous_sensor_transforms = sensor_transforms
                 else:
                     sensor_rotations = _sensor_rotations(env)
+                    sensor_transforms = _sensor_transforms(env)
 
                 record = {
                     "record_type": "step",
@@ -665,6 +713,7 @@ def _run_plan(
                         observations
                     ),
                     "sensor_rotations": sensor_rotations,
+                    "sensor_transforms": sensor_transforms,
                     "camera_pitch_level": pitch_level,
                 }
                 writer.write(record)

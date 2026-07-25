@@ -39,6 +39,7 @@ from ascent.vo.zhao_model import (
     _load_checkpoint,
 )
 from scripts.run_vo_gt_equivalence import (
+    assert_fixed_look_transforms,
     build_sequence_plan,
     gt_local_zhao_delta,
     inverse_native_actions,
@@ -252,6 +253,38 @@ def test_gt_equivalence_selects_habitat_rewritten_runtime_identity() -> None:
             ),
             expected_target_category="chair",
         )
+
+
+def test_gt_equivalence_fixed_look_uses_camera_extrinsics() -> None:
+    def transform(
+        translation: tuple[float, float, float],
+        rotation: tuple[float, float, float, float],
+    ) -> dict[str, list[float]]:
+        return {
+            "translation": list(translation),
+            "rotation": list(rotation),
+        }
+
+    identity = (0.0, 0.0, 0.0, 1.0)
+    pitched = (-0.258819, 0.0, 0.0, 0.965926)
+    previous = {
+        key: transform((0.0, 1.25, 0.0), identity)
+        for key in ("rgb", "depth", "vo_rgb", "vo_depth")
+    }
+    current = {
+        "rgb": transform((0.0, 1.25, 0.0), pitched),
+        "depth": transform((0.0, 1.25, 0.0), pitched),
+        "vo_rgb": transform((0.0, 1.25, 0.0), identity),
+        "vo_depth": transform((0.0, 1.25, 0.0), identity),
+    }
+    assert_fixed_look_transforms(previous, current)
+
+    current["vo_rgb"] = transform((0.0, 1.25, 0.01), identity)
+    with pytest.raises(
+        RuntimeError,
+        match="fixed vo_rgb transform changed during look action",
+    ):
+        assert_fixed_look_transforms(previous, current)
 
 
 def test_gt_local_delta_round_trips_through_production_composition() -> None:
