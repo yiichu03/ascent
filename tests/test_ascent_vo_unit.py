@@ -39,8 +39,10 @@ from ascent.vo.zhao_model import (
     _load_checkpoint,
 )
 from scripts.run_vo_gt_equivalence import (
+    _sensor_local_transforms,
     _sensor_transforms,
     assert_fixed_look_transforms,
+    assert_forward_sensor_transforms,
     build_sequence_plan,
     gt_local_zhao_delta,
     inverse_native_actions,
@@ -288,10 +290,34 @@ def test_gt_equivalence_fixed_look_uses_camera_extrinsics() -> None:
         assert_fixed_look_transforms(previous, current)
 
 
+def test_gt_equivalence_forward_camera_gate_uses_extrinsics() -> None:
+    coincident = {
+        key: {
+            "translation": [0.0, 1.25, 0.0],
+            "rotation": [0.0, 0.0, 0.0, 1.0],
+        }
+        for key in ("rgb", "depth", "vo_rgb", "vo_depth")
+    }
+    assert_forward_sensor_transforms(coincident)
+
+    coincident["vo_depth"] = {
+        "translation": [0.0, 1.25, 0.01],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+    }
+    with pytest.raises(
+        RuntimeError,
+        match="depth/vo_depth transforms diverged at zero pitch",
+    ):
+        assert_forward_sensor_transforms(coincident)
+
+
 def test_gt_equivalence_reads_habitat_sensor_absolute_transforms() -> None:
     import magnum as mn
 
     class Node:
+        translation = mn.Vector3(0.0, 1.25, 0.0)
+        rotation = mn.Quaternion()
+
         @staticmethod
         def absolute_transformation():
             return mn.Matrix4.identity_init()
@@ -307,9 +333,13 @@ def test_gt_equivalence_reads_habitat_sensor_absolute_transforms() -> None:
         sim=types.SimpleNamespace(agents=[agent])
     )
     transforms = _sensor_transforms(env)
+    local_transforms = _sensor_local_transforms(env)
     assert set(transforms) == {"rgb", "depth", "vo_rgb", "vo_depth"}
     for transform in transforms.values():
         assert transform["translation"] == [0.0, 0.0, 0.0]
+        assert _quaternion_is_identity(transform["rotation"])
+    for transform in local_transforms.values():
+        assert transform["translation"] == [0.0, 1.25, 0.0]
         assert _quaternion_is_identity(transform["rotation"])
 
 

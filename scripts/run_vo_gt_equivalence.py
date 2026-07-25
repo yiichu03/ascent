@@ -416,17 +416,35 @@ def _sensor_transforms(
     return transforms
 
 
+def _sensor_local_transforms(
+    env: habitat.Env,
+) -> dict[str, dict[str, list[float]]]:
+    return {
+        name: {
+            "translation": [
+                float(wrapper.node.translation.x),
+                float(wrapper.node.translation.y),
+                float(wrapper.node.translation.z),
+            ],
+            "rotation": _sensor_rotation_coefficients(
+                wrapper.node.rotation
+            ),
+        }
+        for name, wrapper in env.sim.agents[0]._sensors.items()
+    }
+
+
 def assert_fixed_look_transforms(
     previous: Mapping[str, Mapping[str, Sequence[float]]],
     current: Mapping[str, Mapping[str, Sequence[float]]],
 ) -> None:
-    """Check the camera extrinsics that define a fixed-forward VO view.
+    """Check agent-relative extrinsics for a fixed-forward VO view.
 
     Habitat advances simulation time and renders a fresh frame for a LOOK
     action, so byte-identical RGB-D frames are not a valid camera-pose
-    invariant.  The auxiliary camera's absolute transform is the relevant
-    contract; the main camera must rotate while the auxiliary camera stays
-    fixed.
+    invariant.  The auxiliary camera's transform relative to the agent is the
+    relevant contract: it must remain fixed while the main camera rotates.
+    Its world transform may still follow incidental agent motion.
     """
 
     for auxiliary in (VO_RGB_KEY, VO_DEPTH_KEY):
@@ -449,6 +467,29 @@ def assert_fixed_look_transforms(
         ):
             raise RuntimeError(
                 f"main {main} transform did not rotate during look action"
+            )
+
+
+def assert_forward_sensor_transforms(
+    transforms: Mapping[str, Mapping[str, Sequence[float]]],
+) -> None:
+    """Verify that the main and VO cameras are physically coincident."""
+
+    for main, auxiliary in (
+        ("rgb", VO_RGB_KEY),
+        ("depth", VO_DEPTH_KEY),
+    ):
+        if not np.allclose(
+            transforms[main]["translation"],
+            transforms[auxiliary]["translation"],
+            rtol=0.0,
+            atol=1e-6,
+        ) or not _equivalent_quaternion(
+            transforms[main]["rotation"],
+            transforms[auxiliary]["rotation"],
+        ):
+            raise RuntimeError(
+                f"{main}/{auxiliary} transforms diverged at zero pitch"
             )
 
 
@@ -581,6 +622,13 @@ def _run_plan(
             reference_pose = np.zeros(3, dtype=np.float64)
             pitch_level = 0
             previous_sensor_transforms = _sensor_transforms(env)
+            previous_sensor_local_transforms = (
+                _sensor_local_transforms(env)
+            )
+            if role == "vo":
+                assert_forward_sensor_transforms(
+                    previous_sensor_transforms
+                )
             reset_record = {
                 "record_type": "reset",
                 "role": role,
@@ -596,6 +644,9 @@ def _run_plan(
                 ),
                 "sensor_rotations": _sensor_rotations(env),
                 "sensor_transforms": previous_sensor_transforms,
+                "sensor_local_transforms": (
+                    previous_sensor_local_transforms
+                ),
             }
             writer.write(reset_record)
             records.append(reset_record)
@@ -654,17 +705,13 @@ def _run_plan(
                             )
                     sensor_rotations = _sensor_rotations(env)
                     sensor_transforms = _sensor_transforms(env)
+                    sensor_local_transforms = _sensor_local_transforms(
+                        env
+                    )
                     if pitch_level == 0:
-                        if not np.array_equal(
-                            observations["rgb"],
-                            observations[VO_RGB_KEY],
-                        ) or not np.array_equal(
-                            observations["depth"],
-                            observations[VO_DEPTH_KEY],
-                        ):
-                            raise RuntimeError(
-                                "forward-facing main and VO sensors diverged"
-                            )
+                        assert_forward_sensor_transforms(
+                            sensor_transforms
+                        )
                         for main, auxiliary in (
                             ("rgb", VO_RGB_KEY),
                             ("depth", VO_DEPTH_KEY),
@@ -679,13 +726,19 @@ def _run_plan(
                                 )
                     if planned.action in (LOOK_UP, LOOK_DOWN):
                         assert_fixed_look_transforms(
-                            previous_sensor_transforms,
-                            sensor_transforms,
+                            previous_sensor_local_transforms,
+                            sensor_local_transforms,
                         )
                     previous_sensor_transforms = sensor_transforms
+                    previous_sensor_local_transforms = (
+                        sensor_local_transforms
+                    )
                 else:
                     sensor_rotations = _sensor_rotations(env)
                     sensor_transforms = _sensor_transforms(env)
+                    sensor_local_transforms = _sensor_local_transforms(
+                        env
+                    )
 
                 record = {
                     "record_type": "step",
@@ -715,6 +768,7 @@ def _run_plan(
                     ),
                     "sensor_rotations": sensor_rotations,
                     "sensor_transforms": sensor_transforms,
+                    "sensor_local_transforms": sensor_local_transforms,
                     "camera_pitch_level": pitch_level,
                 }
                 writer.write(record)
