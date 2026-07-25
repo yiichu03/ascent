@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import inspect
 import importlib
 import json
@@ -916,3 +917,19 @@ def test_policy_pose_source_has_no_direct_gt_observation_reads() -> None:
     )
     next_batch = trainer_source.index("batch = batch_obs", gt_pop)
     assert provider_update < gt_pop < policy_extra < next_batch
+
+    tree = ast.parse(trainer_source)
+    policy_act_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "act"
+        and isinstance(node.func.value, ast.Attribute)
+        and node.func.value.attr == "actor_critic"
+    ]
+    assert len(policy_act_calls) == 1
+    assert all(
+        keyword.arg != "current_episodes_info"
+        for keyword in policy_act_calls[0].keywords
+    )

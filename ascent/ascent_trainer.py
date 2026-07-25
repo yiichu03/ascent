@@ -282,7 +282,6 @@ class AscentTrainer(PPOTrainer):
                     prev_actions, # 上一步动作
                     not_done_masks, # 是否为 episode 第一帧
                     deterministic=False,
-                    current_episodes_info =current_episodes_info,
                 )
                 # 输出 action_data，主要包含：
                 # actions: policy 动作 tensor; env_actions:  转换后要交给 environment 的动作; policy_info: ASCENT 产生的目标、地图、frontier、LLM response 等辅助信息
