@@ -41,6 +41,7 @@ from scripts.run_vo_gt_equivalence import (
     build_sequence_plan,
     gt_local_zhao_delta,
     inverse_native_actions,
+    select_runtime_episode,
 )
 
 
@@ -214,6 +215,42 @@ def test_gt_equivalence_plan_supports_recorded_descent_with_looks() -> None:
     assert LOOK_UP not in measured["floor_revisit"]
     assert LOOK_DOWN not in measured["floor_revisit"]
     assert max(map(len, plans)) < 1200
+
+
+def test_gt_equivalence_selects_habitat_rewritten_runtime_identity() -> None:
+    episodes = [
+        types.SimpleNamespace(
+            episode_id=str(index),
+            scene_id=(
+                "/dataset/hm3d/val/00877-4ok3usBNeis/"
+                "4ok3usBNeis.basis.glb"
+            ),
+            object_category=(
+                "toilet" if index in {3, 5, 6} else "bed"
+            ),
+        )
+        for index in range(10)
+    ]
+    selected = select_runtime_episode(
+        episodes,
+        runtime_episode_id="6",
+        expected_scene_id=(
+            "hm3d/val/00877-4ok3usBNeis/"
+            "4ok3usBNeis.basis.glb"
+        ),
+        expected_target_category="toilet",
+    )
+    assert selected.episode_id == "6"
+    with pytest.raises(RuntimeError, match="runtime episode target"):
+        select_runtime_episode(
+            episodes,
+            runtime_episode_id="6",
+            expected_scene_id=(
+                "hm3d/val/00877-4ok3usBNeis/"
+                "4ok3usBNeis.basis.glb"
+            ),
+            expected_target_category="chair",
+        )
 
 
 def test_gt_local_delta_round_trips_through_production_composition() -> None:

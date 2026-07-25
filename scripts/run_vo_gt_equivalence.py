@@ -403,11 +403,50 @@ def _compose_config(
     return config
 
 
+def select_runtime_episode(
+    episodes: Sequence[Any],
+    *,
+    runtime_episode_id: str,
+    expected_scene_id: str,
+    expected_target_category: str,
+) -> Any:
+    matching = [
+        episode
+        for episode in episodes
+        if str(episode.episode_id) == str(runtime_episode_id)
+    ]
+    if len(matching) != 1:
+        raise RuntimeError(
+            f"equivalence dataset must contain exactly one runtime episode "
+            f"with id {runtime_episode_id}, got {len(matching)} matches "
+            f"among {len(episodes)} episodes"
+        )
+    episode = matching[0]
+    runtime_scene = str(episode.scene_id).replace("\\", "/")
+    expected_scene = str(expected_scene_id).replace("\\", "/")
+    if not (
+        runtime_scene == expected_scene
+        or runtime_scene.endswith("/" + expected_scene.lstrip("/"))
+    ):
+        raise RuntimeError(
+            f"runtime episode scene mismatch {runtime_scene} != "
+            f"{expected_scene}"
+        )
+    if str(episode.object_category) != str(expected_target_category):
+        raise RuntimeError(
+            f"runtime episode target mismatch "
+            f"{episode.object_category} != {expected_target_category}"
+        )
+    return episode
+
+
 def _run_plan(
     *,
     role: str,
     config,
-    episode_id: str,
+    runtime_episode_id: str,
+    expected_scene_id: str,
+    expected_target_category: str,
     plans: Sequence[Sequence[PlannedStep]],
     writer: JsonlWriter,
 ) -> list[dict[str, Any]]:
@@ -415,18 +454,14 @@ def _run_plan(
         id_dataset=config.habitat.dataset.type,
         config=config.habitat.dataset,
     )
-    matching_episodes = [
-        episode
-        for episode in dataset.episodes
-        if str(episode.episode_id) == str(episode_id)
-    ]
-    if len(matching_episodes) != 1:
-        raise RuntimeError(
-            f"equivalence dataset must contain exactly one episode with "
-            f"id {episode_id}, got {len(matching_episodes)} matches among "
-            f"{len(dataset.episodes)} episodes"
+    dataset.episodes = [
+        select_runtime_episode(
+            dataset.episodes,
+            runtime_episode_id=runtime_episode_id,
+            expected_scene_id=expected_scene_id,
+            expected_target_category=expected_target_category,
         )
-    dataset.episodes = matching_episodes
+    ]
     records: list[dict[str, Any]] = []
     with habitat.Env(config=config.habitat, dataset=dataset) as env:
         for reset_index, plan in enumerate(plans):
@@ -752,6 +787,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-path", type=Path, required=True)
     parser.add_argument("--content-scene", default="hm3d_r0_006")
     parser.add_argument("--episode-id", required=True)
+    parser.add_argument("--runtime-episode-id", required=True)
+    parser.add_argument("--expected-scene-id", required=True)
+    parser.add_argument("--expected-target-category", required=True)
     parser.add_argument(
         "--split", choices=("train", "val"), required=True
     )
@@ -836,6 +874,11 @@ def main() -> int:
                 "dataset_path": str(args.dataset_path.resolve()),
                 "content_scene": args.content_scene,
                 "episode_id": str(args.episode_id),
+                "runtime_episode_id": str(args.runtime_episode_id),
+                "expected_scene_id": args.expected_scene_id,
+                "expected_target_category": (
+                    args.expected_target_category
+                ),
                 "split": args.split,
                 "scenes_dir": str(args.scenes_dir.resolve()),
                 "action_trace": str(args.action_trace.resolve()),
@@ -875,14 +918,18 @@ def main() -> int:
         baseline = _run_plan(
             role="baseline",
             config=_compose_config(**common, vo_enabled=False),
-            episode_id=args.episode_id,
+            runtime_episode_id=args.runtime_episode_id,
+            expected_scene_id=args.expected_scene_id,
+            expected_target_category=args.expected_target_category,
             plans=plans,
             writer=writer,
         )
         vo = _run_plan(
             role="vo",
             config=_compose_config(**common, vo_enabled=True),
-            episode_id=args.episode_id,
+            runtime_episode_id=args.runtime_episode_id,
+            expected_scene_id=args.expected_scene_id,
+            expected_target_category=args.expected_target_category,
             plans=plans,
             writer=writer,
         )
