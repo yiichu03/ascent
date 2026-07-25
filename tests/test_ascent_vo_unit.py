@@ -39,6 +39,7 @@ from ascent.vo.zhao_model import (
     _load_checkpoint,
 )
 from scripts.run_vo_gt_equivalence import (
+    _sensor_transforms,
     assert_fixed_look_transforms,
     build_sequence_plan,
     gt_local_zhao_delta,
@@ -285,6 +286,38 @@ def test_gt_equivalence_fixed_look_uses_camera_extrinsics() -> None:
         match="fixed vo_rgb transform changed during look action",
     ):
         assert_fixed_look_transforms(previous, current)
+
+
+def test_gt_equivalence_reads_habitat_sensor_absolute_transforms() -> None:
+    import magnum as mn
+
+    class Node:
+        @staticmethod
+        def absolute_transformation():
+            return mn.Matrix4.identity_init()
+
+    wrapper = types.SimpleNamespace(node=Node())
+    agent = types.SimpleNamespace(
+        _sensors={
+            key: wrapper
+            for key in ("rgb", "depth", "vo_rgb", "vo_depth")
+        }
+    )
+    env = types.SimpleNamespace(
+        sim=types.SimpleNamespace(agents=[agent])
+    )
+    transforms = _sensor_transforms(env)
+    assert set(transforms) == {"rgb", "depth", "vo_rgb", "vo_depth"}
+    for transform in transforms.values():
+        assert transform["translation"] == [0.0, 0.0, 0.0]
+        assert _quaternion_is_identity(transform["rotation"])
+
+
+def _quaternion_is_identity(rotation: list[float]) -> bool:
+    return bool(
+        np.allclose(rotation, [0.0, 0.0, 0.0, 1.0])
+        or np.allclose(rotation, [0.0, 0.0, 0.0, -1.0])
+    )
 
 
 def test_gt_local_delta_round_trips_through_production_composition() -> None:

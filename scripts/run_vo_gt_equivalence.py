@@ -19,6 +19,7 @@ from typing import Any, Mapping, Sequence
 
 import habitat
 import hydra
+import magnum as mn
 import numpy as np
 from habitat.config import read_write
 from habitat.config.default import patch_config
