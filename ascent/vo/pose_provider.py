@@ -25,6 +25,18 @@ LOOK_DOWN = 5
 
 VO_RGB_KEY = "vo_rgb"
 VO_DEPTH_KEY = "vo_depth"
+FORBIDDEN_POLICY_OBSERVATION_KEYS = frozenset(
+    {
+        "gps",
+        "compass",
+        "heading",
+        "base_explorer",
+        "frontier_sensor",
+        "gt_start_aligned_pose",
+        VO_RGB_KEY,
+        VO_DEPTH_KEY,
+    }
+)
 
 
 class VOInferenceError(RuntimeError):
@@ -159,13 +171,9 @@ class ZhaoRGBDPoseProvider:
         if len(observations) != self.num_envs:
             raise VOInferenceError("pose injection batch length mismatch")
         for env, observation in enumerate(observations):
-            forbidden = {
-                "gps",
-                "compass",
-                "heading",
-                VO_RGB_KEY,
-                VO_DEPTH_KEY,
-            }.intersection(observation)
+            forbidden = FORBIDDEN_POLICY_OBSERVATION_KEYS.intersection(
+                observation
+            )
             if forbidden:
                 raise VOInferenceError(
                     f"policy observation still contains forbidden keys: {sorted(forbidden)}"

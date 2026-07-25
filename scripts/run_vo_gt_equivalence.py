@@ -33,7 +33,10 @@ from habitat_baselines.config.default_structured_configs import (
 from hydra.core.global_hydra import GlobalHydra
 
 import ascent.run  # noqa: F401 - register ASCENT config search paths
-from ascent.vo.habitat_extensions import configure_gt_isolated_vo
+from ascent.vo.habitat_extensions import (
+    POLICY_VISIBLE_RAW_OBSERVATION_KEYS,
+    configure_gt_isolated_vo,
+)
 from ascent.vo.pose_provider import (
     LOOK_DOWN,
     LOOK_UP,
@@ -60,6 +63,8 @@ FORBIDDEN_POLICY_KEYS = {
     "gps",
     "compass",
     "heading",
+    "base_explorer",
+    "frontier_sensor",
     "gt_start_aligned_pose",
 }
 IGNORED_COMPARISON_KEYS = FORBIDDEN_POLICY_KEYS | {
@@ -353,6 +358,38 @@ def _observation_digests(
     }
 
 
+def _assert_vo_policy_boundary(config, observations: Mapping[str, Any]) -> None:
+    configured = tuple(config.habitat.gym.obs_keys or ())
+    expected = tuple(POLICY_VISIBLE_RAW_OBSERVATION_KEYS)
+    if configured != expected:
+        raise RuntimeError(
+            "VO Gym observation boundary mismatch "
+            f"{configured} != {expected}"
+        )
+    missing = set(configured).difference(observations)
+    if missing:
+        raise RuntimeError(
+            f"VO raw observation is missing configured keys {sorted(missing)}"
+        )
+    exposed = FORBIDDEN_POLICY_KEYS.intersection(configured)
+    if exposed:
+        raise RuntimeError(
+            f"VO policy boundary exposes forbidden keys {sorted(exposed)}"
+        )
+    post_provider_keys = (
+        set(configured).difference((VO_RGB_KEY, VO_DEPTH_KEY))
+        | {"estimated_pose"}
+    )
+    exposed_after_provider = FORBIDDEN_POLICY_KEYS.intersection(
+        post_provider_keys
+    )
+    if exposed_after_provider:
+        raise RuntimeError(
+            "VO post-provider policy boundary exposes forbidden keys "
+            f"{sorted(exposed_after_provider)}"
+        )
+
+
 def _sensor_rotations(env: habitat.Env) -> dict[str, list[float]]:
     return {
         name: _sensor_rotation_coefficients(wrapper.node.rotation)
@@ -466,12 +503,8 @@ def _run_plan(
     with habitat.Env(config=config.habitat, dataset=dataset) as env:
         for reset_index, plan in enumerate(plans):
             observations = env.reset()
-            forbidden = FORBIDDEN_POLICY_KEYS.intersection(observations)
-            if role == "vo" and forbidden:
-                raise RuntimeError(
-                    f"{role} observation exposes forbidden keys "
-                    f"{sorted(forbidden)}"
-                )
+            if role == "vo":
+                _assert_vo_policy_boundary(config, observations)
             if role == "vo":
                 for key in (VO_RGB_KEY, VO_DEPTH_KEY):
                     if key not in observations:
@@ -529,12 +562,8 @@ def _run_plan(
                         f"{role} episode ended during bounded equivalence "
                         f"at reset={reset_index} step={plan_step}"
                     )
-                forbidden = FORBIDDEN_POLICY_KEYS.intersection(observations)
-                if role == "vo" and forbidden:
-                    raise RuntimeError(
-                        f"{role} observation exposes forbidden keys "
-                        f"{sorted(forbidden)}"
-                    )
+                if role == "vo":
+                    _assert_vo_policy_boundary(config, observations)
                 state = env.sim.get_agent_state()
                 gt_pose_4d = _start_aligned_pose(
                     origin=origin,

@@ -354,8 +354,13 @@ def test_provider_autoreset_never_infers_across_episodes(
     )
 
 
+@pytest.mark.parametrize(
+    "forbidden_key",
+    ("gps", "heading", "base_explorer", "frontier_sensor"),
+)
 def test_provider_rejects_missing_nonfinite_and_gt_visible_inputs(
     monkeypatch: pytest.MonkeyPatch,
+    forbidden_key: str,
 ) -> None:
     provider, _ = _fake_provider(monkeypatch)
     provider.reset_batch([_observation(1)])
@@ -371,9 +376,7 @@ def test_provider_rejects_missing_nonfinite_and_gt_visible_inputs(
     with pytest.raises(VOInferenceError, match="failed closed"):
         provider.update_batch([bad], [MOVE_FORWARD], [False])
 
-    visible_gt = _observation(
-        3, extra={"gps": np.array([123.0, 456.0], dtype=np.float32)}
-    )
+    visible_gt = _observation(3, extra={forbidden_key: np.array([123.0])})
     provider.reset_batch([visible_gt])
     with pytest.raises(VOInferenceError, match="forbidden keys"):
         provider.inject_estimated_pose([visible_gt])
@@ -589,7 +592,7 @@ def test_fixed_look_rotates_main_sensors_but_not_vo_sensors() -> None:
     assert after["depth"] != before["depth"]
 
 
-def test_config_keeps_native_30_degree_actions_and_removes_gt_sensors() -> None:
+def test_config_keeps_internal_heading_behind_policy_boundary() -> None:
     import hydra
     from hydra.core.global_hydra import GlobalHydra
 
@@ -632,15 +635,19 @@ def test_config_keeps_native_30_degree_actions_and_removes_gt_sensors() -> None:
     assert config.habitat.task.actions.turn_right.type == "TurnRightAction"
     assert config.habitat.task.actions.look_up.type == "VOFixedLookUpAction"
     assert config.habitat.task.actions.look_down.type == "VOFixedLookDownAction"
-    assert not {
-        "gps_sensor",
-        "compass_sensor",
+    assert not {"gps_sensor", "compass_sensor"}.intersection(
+        config.habitat.task.lab_sensors
+    )
+    assert {
         "heading_sensor",
-    }.intersection(config.habitat.task.lab_sensors)
+        "base_explorer",
+        "frontier_sensor",
+    }.issubset(config.habitat.task.lab_sensors)
     assert "gt_start_aligned_pose" in config.habitat.task.measurements
     assert config.habitat.gym.obs_keys == [
         "rgb",
         "depth",
+        "objectgoal",
         "vo_rgb",
         "vo_depth",
     ]

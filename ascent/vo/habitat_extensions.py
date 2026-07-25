@@ -31,6 +31,14 @@ from ascent.vo.pose_provider import (
     VO_RGB_KEY,
 )
 
+POLICY_VISIBLE_RAW_OBSERVATION_KEYS = (
+    "rgb",
+    "depth",
+    "objectgoal",
+    VO_RGB_KEY,
+    VO_DEPTH_KEY,
+)
+
 
 @registry.register_sensor
 class VOHabitatSimRGBSensor(HabitatSimRGBSensor):
@@ -155,11 +163,7 @@ def configure_gt_isolated_vo(config) -> None:
         )
 
         with open_dict(config.habitat.task.lab_sensors):
-            for sensor_name in (
-                "gps_sensor",
-                "compass_sensor",
-                "heading_sensor",
-            ):
+            for sensor_name in ("gps_sensor", "compass_sensor"):
                 config.habitat.task.lab_sensors.pop(sensor_name, None)
 
         with open_dict(config.habitat.task.measurements):
@@ -167,22 +171,31 @@ def configure_gt_isolated_vo(config) -> None:
                 GTStartAlignedPoseMeasurementConfig()
             )
 
-        if config.habitat.gym.obs_keys is not None:
-            config.habitat.gym.obs_keys = [
-                key
-                for key in config.habitat.gym.obs_keys
-                if key not in ("gps", "compass", "heading")
-            ]
-            for key in (VO_RGB_KEY, VO_DEPTH_KEY):
-                if key not in config.habitat.gym.obs_keys:
-                    config.habitat.gym.obs_keys.append(key)
+        # ASCENT's inherited FrontierSensor needs HeadingSensor during
+        # Habitat's internal sensor update, but ASCENT's policy does not
+        # consume either output.  HabGymWrapper is therefore the explicit
+        # boundary: only the camera, goal, and auxiliary VO frames leave the
+        # environment.  The VO provider consumes the auxiliary frames and
+        # injects estimated_pose before batch_obs reaches the policy.
+        config.habitat.gym.obs_keys = list(
+            POLICY_VISIBLE_RAW_OBSERVATION_KEYS
+        )
 
     remaining = {
         name
         for name in config.habitat.task.lab_sensors
-        if name in ("gps_sensor", "compass_sensor", "heading_sensor")
+        if name in ("gps_sensor", "compass_sensor")
     }
     if remaining:
         raise RuntimeError(
             f"GT pose lab sensors survived VO isolation: {sorted(remaining)}"
+        )
+    required_internal = {"heading_sensor", "base_explorer", "frontier_sensor"}
+    missing_internal = required_internal.difference(
+        config.habitat.task.lab_sensors
+    )
+    if missing_internal:
+        raise RuntimeError(
+            "missing internal ASCENT compatibility sensors: "
+            f"{sorted(missing_internal)}"
         )

@@ -3,6 +3,7 @@ defaults:
   - /benchmark/nav/objectnav: objectnav_mp3d
   - /habitat/task/lab_sensors:
       - base_explorer
+      - heading_sensor
       - frontier_sensor
   - /habitat/task/measurements:
     - multi_floor_map # frontier_exploration_map
