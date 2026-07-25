@@ -29,6 +29,9 @@ TURN_CHECKPOINT_SHA256 = (
     "c469643f9ab35c9e1058f31fbb672a5fa3adf582987a4388bdd020dd89faf1d9"
 )
 POINTNAV_VO_SOURCE_COMMIT = "dbff8719fe09cfb5a2dfbd730fd359b474fe3036"
+DEPTH_INVALID_POLICY = (
+    "nonfinite_to_checkpoint_zero_before_calibrated_area_resize"
+)
 
 
 class ZhaoCheckpointError(RuntimeError):
@@ -420,11 +423,45 @@ class NormalizedDepthTopDown:
 
 
 @dataclass(frozen=True)
+class DepthValidityStats:
+    total_pixels: int
+    finite_pixels: int
+    invalid_pixels: int
+    nan_pixels: int
+    positive_inf_pixels: int
+    negative_inf_pixels: int
+
+    @property
+    def invalid_fraction(self) -> float:
+        if self.total_pixels <= 0:
+            return 0.0
+        return float(self.invalid_pixels / self.total_pixels)
+
+    @property
+    def all_invalid(self) -> bool:
+        return self.total_pixels > 0 and self.invalid_pixels == self.total_pixels
+
+    def as_dict(self) -> Dict[str, object]:
+        return {
+            "policy": DEPTH_INVALID_POLICY,
+            "total_pixels": int(self.total_pixels),
+            "finite_pixels": int(self.finite_pixels),
+            "invalid_pixels": int(self.invalid_pixels),
+            "nan_pixels": int(self.nan_pixels),
+            "positive_inf_pixels": int(self.positive_inf_pixels),
+            "negative_inf_pixels": int(self.negative_inf_pixels),
+            "invalid_fraction": self.invalid_fraction,
+            "all_invalid": self.all_invalid,
+        }
+
+
+@dataclass(frozen=True)
 class PreparedZhaoFrame:
     rgb: torch.Tensor
     depth: torch.Tensor
     discretized_depth: torch.Tensor
     top_down_view: torch.Tensor
+    depth_validity: DepthValidityStats
 
 
 class ZhaoFramePreprocessor:
@@ -483,9 +520,25 @@ class ZhaoFramePreprocessor:
             raise ValueError(
                 f"bad VO depth shape {normalized_depth.shape} for RGB {rgb.shape}"
             )
-        if not np.isfinite(normalized_depth).all():
-            raise ValueError("VO depth contains NaN or Inf")
-        if normalized_depth.min() < -1e-5 or normalized_depth.max() > 1.00001:
+        finite_mask = np.isfinite(normalized_depth)
+        total_pixels = int(normalized_depth.size)
+        finite_pixels = int(np.count_nonzero(finite_mask))
+        depth_validity = DepthValidityStats(
+            total_pixels=total_pixels,
+            finite_pixels=finite_pixels,
+            invalid_pixels=total_pixels - finite_pixels,
+            nan_pixels=int(np.count_nonzero(np.isnan(normalized_depth))),
+            positive_inf_pixels=int(
+                np.count_nonzero(np.isposinf(normalized_depth))
+            ),
+            negative_inf_pixels=int(
+                np.count_nonzero(np.isneginf(normalized_depth))
+            ),
+        )
+        finite_depth = normalized_depth[finite_mask]
+        if finite_depth.size and (
+            finite_depth.min() < -1e-5 or finite_depth.max() > 1.00001
+        ):
             raise ValueError("VO normalized depth is outside [0,1]")
 
         rgb_tensor = torch.as_tensor(
@@ -493,8 +546,13 @@ class ZhaoFramePreprocessor:
             dtype=torch.float32,
             device=self.device,
         )
+        depth_for_tensor = (
+            normalized_depth
+            if depth_validity.invalid_pixels == 0
+            else np.where(finite_mask, normalized_depth, 0.0)
+        )
         source_depth = torch.as_tensor(
-            np.ascontiguousarray(normalized_depth),
+            np.ascontiguousarray(depth_for_tensor),
             dtype=torch.float32,
             device=self.device,
         )
@@ -507,6 +565,16 @@ class ZhaoFramePreprocessor:
             min=0.0,
             max=1.0,
         )
+        if depth_validity.invalid_pixels:
+            checkpoint_depth = torch.where(
+                torch.as_tensor(
+                    np.ascontiguousarray(finite_mask),
+                    dtype=torch.bool,
+                    device=self.device,
+                ),
+                checkpoint_depth,
+                torch.zeros_like(checkpoint_depth),
+            )
 
         joined = torch.cat([rgb_tensor, checkpoint_depth], dim=-1)
         joined = self._calibrated_center_crop_resize(joined)
@@ -525,6 +593,7 @@ class ZhaoFramePreprocessor:
             depth=depth_out,
             discretized_depth=discretized,
             top_down_view=top_down,
+            depth_validity=depth_validity,
         )
 
     def _calibrated_center_crop_resize(
