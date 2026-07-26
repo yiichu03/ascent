@@ -20,6 +20,7 @@ from constants import (
     MULTI_FLOOR_ASK_STEP_THRESHOLD,
     FLOOR_EXP_STEP_THRESHOLD,
 )
+from ascent.singleton_frontier_watchdog import SingletonFrontierWatchdog
 import networkx as nx
 
 class Ascent_LLM_Planner:
@@ -42,6 +43,13 @@ class Ascent_LLM_Planner:
         with open('statistic_priors/knowledge_graph.json', 'r') as f:
             self.knowledge_graph = nx.node_link_graph(json.load(f))
         self.floor_num = [1 for _ in range(self._num_envs)]
+        self._singleton_frontier_watchdogs = [
+            SingletonFrontierWatchdog.from_environment()
+            for _ in range(self._num_envs)
+        ]
+        self.last_singleton_watchdog_trace = [
+            {} for _ in range(self._num_envs)
+        ]
     def reset(self, env):
         # 防止来回走动
         self._force_frontier[env] = np.zeros(2)
@@ -53,6 +61,8 @@ class Ascent_LLM_Planner:
         self.multi_floor_ask_step[env] = 0
         self.frontier_rgb_list[env] = []
         self.floor_num[env] = 1
+        self._singleton_frontier_watchdogs[env].reset_tracking()
+        self.last_singleton_watchdog_trace[env] = {}
 
     def _get_best_frontier_with_llm(
             self,
@@ -78,9 +88,40 @@ class Ascent_LLM_Planner:
             Returns:
                 Tuple[np.ndarray, float]: The best frontier and its value.
             """
+            watchdog = self._singleton_frontier_watchdogs[env]
+
             # 🆕 0. 如果只有一个前沿点，直接导航到该点
             if len(frontiers) == 1:
+                robot_xy = observations_cache[env]["robot_xy"]
+                policy_step = num_steps[env] if len(num_steps) > env else 0
+                floor_index = (
+                    cur_floor_index[env]
+                    if len(cur_floor_index) > env
+                    else None
+                )
+                watchdog_trace = watchdog.observe(
+                    frontiers[0],
+                    robot_xy,
+                    policy_step=policy_step,
+                    floor_index=floor_index,
+                )
+                self.last_singleton_watchdog_trace[env] = watchdog_trace
+                if watchdog_trace["triggered"]:
+                    obstacle_map[env]._disabled_frontiers.add(
+                        tuple(frontiers[0])
+                    )
+                    print(
+                        "Singleton frontier watchdog disabled "
+                        f"{frontiers[0]} after "
+                        f"{watchdog_trace['no_progress_steps']} "
+                        "no-progress steps."
+                    )
                 return frontiers[0], 1.0
+
+            self.last_singleton_watchdog_trace[env] = watchdog.reset_trace(
+                "frontier_count_not_one",
+                frontier_count=len(frontiers),
+            )
             
             # 1. 初始化
             sorted_pts, sorted_values = self._sort_frontiers_by_value(obstacle_map, value_map, frontiers, env)
@@ -636,4 +677,3 @@ class Ascent_LLM_Planner:
 
         # 如果解析失败或异常，返回当前楼层
         return cur_floor_index[env] + 1  # 当前楼层（从1开始）
-

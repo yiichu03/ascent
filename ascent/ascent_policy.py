@@ -792,6 +792,15 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             self.cur_frontier[env] = best_frontier
             self._last_explore_trace[env]["selected_frontier"] = best_frontier
             self._last_explore_trace[env]["selected_value"] = best_value
+            watchdog_traces = getattr(
+                self.llm_planner,
+                "last_singleton_watchdog_trace",
+                None,
+            )
+            if isinstance(watchdog_traces, list) and env < len(watchdog_traces):
+                self._last_explore_trace[env]["singleton_watchdog"] = (
+                    watchdog_traces[env]
+                )
             pointnav_action = self._pointnav(observations, self.cur_frontier[env], stop=False, env=env, stop_radius=self._pointnav_stop_radius)
             
             # 如果点导航动作是停止（0），则强制前进（1），以避免卡死
