@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 
 from ascent.submaps import (
     FrontierStatus,
@@ -451,6 +452,27 @@ def test_policy_binding_guard_rejects_a_frozen_or_foreign_payload() -> None:
     )
     with pytest.raises(RuntimeError, match="not the active submap"):
         policy._assert_active_submap_binding(0)
+
+
+def test_disabled_policy_never_queries_remote_submap_semantics() -> None:
+    class _ForbiddenManager:
+        def __getattr__(self, name):
+            raise AssertionError(
+                f"disabled submap policy accessed manager method {name}"
+            )
+
+    policy = object.__new__(Ascent_Policy)
+    policy._submap_enabled = False
+    policy._submap_manager = _ForbiddenManager()
+
+    assert (
+        policy._submap_remote_semantic_action(
+            observations=None,
+            env=0,
+            masks=torch.zeros((1, 1), dtype=torch.bool),
+        )
+        is None
+    )
 
 
 def test_controller_frame_switch_clears_ephemeral_stair_coordinates() -> None:

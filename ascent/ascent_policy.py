@@ -1042,6 +1042,8 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         env: int,
         masks: Tensor,
     ) -> Optional[Tensor]:
+        if not self._submap_enabled:
+            return None
         plan = self._find_remote_object_plan(env)
         if plan is None:
             return None
@@ -1267,11 +1269,13 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     mode = "initialize"
                     pointnav_action = self._initialize(env, masks)
                 elif goal is None:
-                    remote_semantic_action = (
-                        self._submap_remote_semantic_action(
-                            observations, env, masks
+                    remote_semantic_action = None
+                    if self._submap_enabled:
+                        remote_semantic_action = (
+                            self._submap_remote_semantic_action(
+                                observations, env, masks
+                            )
                         )
-                    )
                     if remote_semantic_action is not None:
                         mode = "submap_remote_semantic"
                         pointnav_action = remote_semantic_action
