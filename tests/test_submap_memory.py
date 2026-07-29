@@ -20,6 +20,7 @@ from ascent.submaps import (
 )
 from ascent.mapping.obstacle_map import ObstacleMap
 from ascent.ascent_policy import Ascent_Policy
+from ascent.map_controller import Map_Controller
 
 
 def payload(tag: str) -> MapPayload:
@@ -450,3 +451,35 @@ def test_policy_binding_guard_rejects_a_frozen_or_foreign_payload() -> None:
     )
     with pytest.raises(RuntimeError, match="not the active submap"):
         policy._assert_active_submap_binding(0)
+
+
+def test_controller_frame_switch_clears_ephemeral_stair_coordinates() -> None:
+    controller = object.__new__(Map_Controller)
+    controller._carrot_goal_xy = [np.array([[1.0, 2.0]])]
+    controller._last_carrot_xy = [np.array([[1.0, 2.0]])]
+    controller._last_carrot_px = [np.array([[10, 20]])]
+    controller._stair_frontier = [np.array([[3.0, 4.0]])]
+    controller._temp_stair_map = [np.ones((4, 4), dtype=bool)]
+    controller._frontier_stick_step = [8]
+    controller._get_close_to_stair_step = [9]
+    controller._double_check_goal = [True]
+    controller.cur_dis_to_goal = [1.0]
+    controller._initialize_step = [7]
+    controller._done_initializing = [True]
+    controller._obstacle_map = [
+        SimpleNamespace(_done_initializing=True)
+    ]
+
+    controller.reset_submap_local_navigation_state(
+        0, initialize_new_floor=False
+    )
+
+    assert controller._carrot_goal_xy[0] == []
+    assert controller._last_carrot_xy[0] == []
+    assert controller._last_carrot_px[0] == []
+    assert controller._stair_frontier[0] is None
+    assert controller._temp_stair_map[0] == []
+    assert controller._frontier_stick_step[0] == 0
+    assert controller._get_close_to_stair_step[0] == 0
+    assert controller._double_check_goal[0] is False
+    assert np.isinf(controller.cur_dis_to_goal[0])

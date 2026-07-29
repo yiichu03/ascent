@@ -255,6 +255,8 @@ class Map_Controller:
         self._carrot_goal_xy[env] = []
         self._last_carrot_xy[env] = []
         self._last_carrot_px[env] = []
+        self._stair_frontier[env] = None
+        self._temp_stair_map[env] = []
         self._frontier_stick_step[env] = 0
         self._get_close_to_stair_step[env] = 0
         self._double_check_goal[env] = False
