@@ -1,9 +1,11 @@
 #!/bin/bash
-# Submit one hash-bound ASCENT-VO submap smoke or HM3D-150 screen.
+# Submit one hash-bound HM3D or MP3D ASCENT-VO submap screen.
 
 set -euo pipefail
 
-MODE=${1:?usage: submit_submap_screen.sh smoke|full [calibration_json] [auto|autox] [stamp]}
+DATASET=${1:?usage: submit_submap_screen.sh hm3d|mp3d smoke|full calibration_json_or_dash [auto|autox] [stamp]}
+MODE=${2:?usage: submit_submap_screen.sh hm3d|mp3d smoke|full calibration_json_or_dash [auto|autox] [stamp]}
+CALIBRATION_ARG=${3:--}
 NO_QSUB=${ASCENT_SUBMAP_NO_QSUB:-0}
 PROJECT=/scratch/e1538633/liuyi/drift-aware-submap-exploration
 SOURCE_ROOT=$PROJECT/external/ascent_vo_submap_v1
@@ -11,61 +13,88 @@ RESOURCE_ROOT=$PROJECT/external/ascent
 POINTNAV_VO_ROOT=$PROJECT/external/PointNav-VO
 CONTROLLER=$SOURCE_ROOT/pbs/run_submap_screen_3shared.pbs
 WORKER=$SOURCE_ROOT/pbs/run_submap_screen_lane.sh
-SMOKE_MANIFEST=/scratch/e1538633/liuyi/submap_v1_hm3d_smoke5_materialized_20260729_v3/chunk_manifest.json
-SMOKE_MANIFEST_SHA256=bd94492db0a3fb6ed542745e592cefdfb0e748025e8fd037764967c077521358
-FULL_MANIFEST=/scratch/e1538633/liuyi/submap_v1_hm3d150_materialized_20260729_v3/chunk_manifest.json
-FULL_MANIFEST_SHA256=cfbb66998ac56c4fb574e9573844828bc45ee8d25db139ea1af6a0c26ce3192d
 CALIBRATION_MANIFEST=/scratch/e1538633/liuyi/submap_v1_hm3d_calibration30_materialized_20260729_v3/chunk_manifest.json
 SCRATCH_ROOT=/scratch/e1538633/liuyi
 ASCENT_PYTHON=$SCRATCH_ROOT/micromamba/envs/ascent_nav/bin/python
+
+case "$DATASET" in
+  hm3d)
+    SMOKE_MANIFEST=/scratch/e1538633/liuyi/submap_v1_hm3d_smoke5_materialized_20260729_v3/chunk_manifest.json
+    SMOKE_MANIFEST_SHA256=bd94492db0a3fb6ed542745e592cefdfb0e748025e8fd037764967c077521358
+    FULL_MANIFEST=/scratch/e1538633/liuyi/submap_v1_hm3d150_materialized_20260729_v3/chunk_manifest.json
+    FULL_MANIFEST_SHA256=cfbb66998ac56c4fb574e9573844828bc45ee8d25db139ea1af6a0c26ce3192d
+    ;;
+  mp3d)
+    SMOKE_MANIFEST=/scratch/e1538633/liuyi/submap_v1_mp3d_smoke5_materialized_20260729_v1/chunk_manifest.json
+    SMOKE_MANIFEST_SHA256=9610288409103a5590408313586530622b95fe0cdff9491fa80ea6c2a84bff52
+    FULL_MANIFEST=/scratch/e1538633/liuyi/submap_v1_mp3d150_materialized_20260729_v1/chunk_manifest.json
+    FULL_MANIFEST_SHA256=61bc1ee4478fbaf66ee681e5ec091993856ac3de324b833a3a73ee24f522865a
+    ;;
+  *) echo "invalid_dataset=$DATASET"; exit 20 ;;
+esac
 LOG_ROOT=$SCRATCH_ROOT/submap_v1_pbs_logs
 SUBMISSION_ROOT=$SCRATCH_ROOT/submap_v1_submissions
+CALIBRATION_JSON=""
+CALIBRATION_JSON_SHA256=""
+CALIBRATION_MANIFEST_SHA256=""
 
 case "$MODE" in
   smoke)
-    CALIBRATION_JSON=""
-    QUEUE=${2:-auto}
-    STAMP=${3:-20260729_submap_v1_smoke_first_attempt}
+    QUEUE=${4:-autox}
+    STAMP=${5:-20260729_submap_v1_${DATASET}_unified_smoke_first_attempt}
     MANIFEST=$SMOKE_MANIFEST
     MANIFEST_SHA256=$SMOKE_MANIFEST_SHA256
     EXPECTED_CHUNKS=1
     EXPECTED_EPISODES=5
     WALLTIME=36:00:00
-    [ -f "$CALIBRATION_MANIFEST" ] || {
-      echo "missing_calibration_manifest=$CALIBRATION_MANIFEST"
-      exit 21
-    }
-    CALIBRATION_MANIFEST_SHA256=$(
-      sha256sum "$CALIBRATION_MANIFEST" | awk '{print $1}'
-    )
-    CALIBRATION_JSON_SHA256=""
+    if [ "$DATASET" = hm3d ]; then
+      [ "$CALIBRATION_ARG" = - ] || {
+        echo hm3d_smoke_calibration_argument_must_be_dash
+        exit 20
+      }
+      [ -f "$CALIBRATION_MANIFEST" ] || {
+        echo "missing_calibration_manifest=$CALIBRATION_MANIFEST"
+        exit 21
+      }
+      CALIBRATION_MANIFEST_SHA256=$(
+        sha256sum "$CALIBRATION_MANIFEST" | awk '{print $1}'
+      )
+    else
+      CALIBRATION_JSON=$CALIBRATION_ARG
+      CALIBRATION_MANIFEST=""
+    fi
     ;;
   full)
-    CALIBRATION_JSON=${2:?full mode requires calibration_json}
-    QUEUE=${3:-auto}
-    STAMP=${4:-20260729_submap_v1_hm3d150_first_attempt}
+    QUEUE=${4:-autox}
+    STAMP=${5:-20260729_submap_v1_${DATASET}150_first_attempt}
     MANIFEST=$FULL_MANIFEST
     MANIFEST_SHA256=$FULL_MANIFEST_SHA256
     EXPECTED_CHUNKS=5
     EXPECTED_EPISODES=150
     WALLTIME=96:00:00
+    CALIBRATION_JSON=$CALIBRATION_ARG
     CALIBRATION_MANIFEST=""
-    CALIBRATION_MANIFEST_SHA256=""
-    [ -f "$CALIBRATION_JSON" ] || {
-      echo "missing_calibration_json=$CALIBRATION_JSON"
-      exit 21
-    }
-    [ "$("$ASCENT_PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$CALIBRATION_JSON")" = PASS ] || {
-      echo calibration_status_not_pass
-      exit 25
-    }
-    CALIBRATION_JSON_SHA256=$(
-      sha256sum "$CALIBRATION_JSON" | awk '{print $1}'
-    )
     ;;
   *) echo "invalid_mode=$MODE"; exit 20 ;;
 esac
 case "$QUEUE" in auto|autox) ;; *) echo "queue_must_be_auto_or_autox"; exit 20 ;; esac
+if [ -n "$CALIBRATION_JSON" ]; then
+  [ -f "$CALIBRATION_JSON" ] || {
+    echo "missing_calibration_json=$CALIBRATION_JSON"
+    exit 21
+  }
+  "$ASCENT_PYTHON" - "$CALIBRATION_JSON" <<'PY'
+import json
+import sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "PASS"
+assert value["navigation_metrics_used"] is False
+assert value["config"]["provisional_thresholds"] is False
+PY
+  CALIBRATION_JSON_SHA256=$(
+    sha256sum "$CALIBRATION_JSON" | awk '{print $1}'
+  )
+fi
 
 for path in "$CONTROLLER" "$WORKER" "$MANIFEST"; do
   [ -f "$path" ] || { echo "missing_file=$path"; exit 21; }
@@ -91,14 +120,16 @@ POINTNAV_VO_COMMIT=$(git -C "$POINTNAV_VO_ROOT" rev-parse HEAD)
 CONTROLLER_SHA256=$(sha256sum "$CONTROLLER" | awk '{print $1}')
 WORKER_SHA256=$(sha256sum "$WORKER" | awk '{print $1}')
 
-"$ASCENT_PYTHON" - "$MANIFEST" "$EXPECTED_CHUNKS" "$EXPECTED_EPISODES" <<'PY'
+"$ASCENT_PYTHON" - "$MANIFEST" "$EXPECTED_CHUNKS" "$EXPECTED_EPISODES" "$DATASET" <<'PY'
 import hashlib
 import json
 import sys
 from pathlib import Path
 value = json.load(open(sys.argv[1], encoding="utf-8"))
 expected_chunks, expected_episodes = int(sys.argv[2]), int(sys.argv[3])
+expected_dataset = sys.argv[4]
 assert value["schema"] == "ascent_vo_submap_screen_materialized_v1"
+assert value["dataset"] == expected_dataset
 assert len(value["chunks"]) == expected_chunks
 assert value["episode_count"] == expected_episodes
 assert sum(chunk["episode_count"] for chunk in value["chunks"]) == expected_episodes
@@ -113,6 +144,7 @@ if [ "$NO_QSUB" = 1 ]; then
 import json
 print(json.dumps({
     "status": "PASS",
+    "dataset": "$DATASET",
     "mode": "$MODE",
     "queue_request": "$QUEUE",
     "walltime": "$WALLTIME",
@@ -137,8 +169,8 @@ PY
 fi
 
 mkdir -p "$LOG_ROOT" "$SUBMISSION_ROOT"
-PBS_LOG=$LOG_ROOT/submap_${MODE}_${STAMP}.pbs.log
-SUBMISSION_JSON=$SUBMISSION_ROOT/submap_${MODE}_${STAMP}.json
+PBS_LOG=$LOG_ROOT/submap_${DATASET}_${MODE}_${STAMP}.pbs.log
+SUBMISSION_JSON=$SUBMISSION_ROOT/submap_${DATASET}_${MODE}_${STAMP}.json
 [ ! -e "$PBS_LOG" ] || { echo "pbs_log_exists=$PBS_LOG"; exit 24; }
 [ ! -e "$SUBMISSION_JSON" ] || {
   echo "submission_record_exists=$SUBMISSION_JSON"
@@ -146,7 +178,8 @@ SUBMISSION_JSON=$SUBMISSION_ROOT/submap_${MODE}_${STAMP}.json
 }
 
 ENVIRONMENT=$(IFS=,; echo \
-"ASCENT_SUBMAP_MODE=$MODE,\
+"ASCENT_SUBMAP_DATASET=$DATASET,\
+ASCENT_SUBMAP_MODE=$MODE,\
 ASCENT_SUBMAP_MANIFEST=$MANIFEST,\
 ASCENT_SUBMAP_MANIFEST_SHA256=$MANIFEST_SHA256,\
 ASCENT_SUBMAP_EXPECTED_CHUNKS=$EXPECTED_CHUNKS,\
@@ -173,6 +206,7 @@ from pathlib import Path
 output = {
     "schema": "ascent_vo_submap_submission_v1",
     "job_id": "$JOB_ID",
+    "dataset": "$DATASET",
     "mode": "$MODE",
     "queue_request": "$QUEUE",
     "walltime": "$WALLTIME",

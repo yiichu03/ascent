@@ -407,7 +407,11 @@ class ObstacleMap(BaseMap):
             dict: A dictionary containing the visualized RGB images with frontiers marked for each new frontier.
         """
         # Step 1: Convert frontiers from pixel coordinates to world coordinates
-        if len(self.frontiers) == 0 or self._floor_num_steps == 0:
+        # A freshly activated submap starts its local step counter at zero.
+        # Frontiers produced by that first local update are already valid and
+        # may be consumed by the LLM planner in the same policy step, so zero
+        # must remain a valid visualization-cache key.
+        if len(self.frontiers) == 0:
             return {}  # No frontiers to project
 
         # Step 2: Identify new frontiers

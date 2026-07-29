@@ -8,10 +8,12 @@ SOURCE_ROOT=$PROJECT/external/ascent_vo_submap_v1
 RESOURCE_ROOT=$PROJECT/external/ascent
 POINTNAV_VO_ROOT=$PROJECT/external/PointNav-VO
 CHECKPOINT_DIR=$POINTNAV_VO_ROOT/pretrained_ckpts/vo
-HM3D_SCENES_ROOT=/scratch/Projects/CFP-04/CFP04-SF-109/shared/HM3D/versioned_data/hm3d-0.1
 HEALTH_CHECK=$SOURCE_ROOT/scripts/check_submap_services.py
 
+DATASET=${ASCENT_SUBMAP_DATASET:?ASCENT_SUBMAP_DATASET is required}
 MODE=${ASCENT_SUBMAP_MODE:?ASCENT_SUBMAP_MODE is required}
+SCENES_ROOT=${ASCENT_SUBMAP_SCENES_ROOT:?ASCENT_SUBMAP_SCENES_ROOT is required}
+RUN_CALIBRATION=${ASCENT_SUBMAP_RUN_CALIBRATION:?ASCENT_SUBMAP_RUN_CALIBRATION is required}
 MANIFEST=${ASCENT_SUBMAP_MANIFEST:?ASCENT_SUBMAP_MANIFEST is required}
 EXPECTED_MANIFEST_SHA256=${ASCENT_SUBMAP_MANIFEST_SHA256:?ASCENT_SUBMAP_MANIFEST_SHA256 is required}
 SOURCE_COMMIT=${ASCENT_SUBMAP_SOURCE_COMMIT:?ASCENT_SUBMAP_SOURCE_COMMIT is required}
@@ -38,6 +40,13 @@ RUN_ROOT=$STAGE_ROOT/lane_$LANE_ID
 MAX_CONSECUTIVE_PROCESS_FAILURES=3
 
 case "$MODE" in smoke|full) ;; *) echo "invalid_mode=$MODE"; exit 20 ;; esac
+case "$DATASET" in hm3d|mp3d) ;; *) echo "invalid_dataset=$DATASET"; exit 20 ;; esac
+case "$RUN_CALIBRATION" in true|false) ;; *) echo "invalid_run_calibration=$RUN_CALIBRATION"; exit 20 ;; esac
+if [ "$RUN_CALIBRATION" = true ] \
+  && { [ "$DATASET" != hm3d ] || [ "$MODE" != smoke ]; }; then
+  echo invalid_calibration_mode
+  exit 20
+fi
 for value in "$LANE_ID" "$LANE_COUNT" "$EXPECTED_CHUNKS" \
   "$EXPECTED_EPISODES" "$BASE_PORT" "$DEADLINE_EPOCH"; do
   [[ "$value" =~ ^[0-9]+$ ]] || {
@@ -65,7 +74,7 @@ for path in \
   "$SOURCE_ROOT/third_party/vlfm/data/pointnav_weights.pth" \
   "$CHECKPOINT_DIR/act_forward.pth" \
   "$CHECKPOINT_DIR/act_left_right_inv_joint.pth" \
-  "$HM3D_SCENES_ROOT/hm3d"; do
+  "$SCENES_ROOT/$DATASET"; do
   [ -e "$path" ] || { echo "missing_required_resource=$path"; exit 21; }
 done
 command -v timeout >/dev/null || { echo missing_timeout; exit 21; }
@@ -120,6 +129,13 @@ PY
 
 if [ "$MODE" = smoke ]; then
   [ "$LANE_COUNT" = 1 ] || { echo smoke_lane_count_contract; exit 20; }
+  SCREEN_MAX_ACTIONS=80
+  SUBRUN_TIMEOUT_SECONDS=10800
+else
+  SCREEN_MAX_ACTIONS=500
+  SUBRUN_TIMEOUT_SECONDS=72000
+fi
+if [ "$RUN_CALIBRATION" = true ]; then
   [ -f "$CALIBRATION_MANIFEST" ] || {
     echo missing_calibration_manifest
     exit 21
@@ -128,8 +144,6 @@ if [ "$MODE" = smoke ]; then
     echo calibration_manifest_hash_mismatch
     exit 22
   }
-  SCREEN_MAX_ACTIONS=80
-  SUBRUN_TIMEOUT_SECONDS=10800
 else
   [ -f "$CALIBRATION_JSON" ] || { echo missing_calibration_json; exit 21; }
   [ "$(sha256sum "$CALIBRATION_JSON" | awk '{print $1}')" = "$CALIBRATION_JSON_SHA256" ] || {
@@ -140,8 +154,6 @@ else
     echo calibration_gate_not_pass
     exit 25
   }
-  SCREEN_MAX_ACTIONS=500
-  SUBRUN_TIMEOUT_SECONDS=72000
 fi
 
 export CUDA_HOME=$ASCENT_ENV
@@ -202,7 +214,7 @@ done
 }
 
 CALIBRATION_ROW=""
-if [ "$MODE" = smoke ]; then
+if [ "$RUN_CALIBRATION" = true ]; then
   CALIBRATION_ROW=$(
     "$ASCENT_PYTHON" - "$CALIBRATION_MANIFEST" <<'PY'
 import json
@@ -217,9 +229,7 @@ print("\t".join(str(value) for value in (
 )))
 PY
   )
-fi
-
-if [ "$MODE" = full ]; then
+else
   mapfile -t CALIBRATION_VALUES < <(
     "$ASCENT_PYTHON" - "$CALIBRATION_JSON" <<'PY'
 import json
@@ -248,6 +258,8 @@ fi
   echo pbs_jobid=${PBS_JOBID:-manual}
   echo host=$(hostname)
   echo mode=$MODE
+  echo dataset=$DATASET
+  echo run_calibration=$RUN_CALIBRATION
   echo lane_id=$LANE_ID
   echo lane_count=$LANE_COUNT
   echo source_commit=$SOURCE_COMMIT
@@ -257,6 +269,8 @@ fi
   echo manifest_sha256=$EXPECTED_MANIFEST_SHA256
   echo scene_dataset_config=$SCENE_DATASET_CONFIG
   echo scene_dataset_config_sha256=$SCENE_DATASET_CONFIG_SHA256
+  echo calibration_json=$CALIBRATION_JSON
+  echo calibration_json_sha256=$CALIBRATION_JSON_SHA256
   echo expected_chunks=$EXPECTED_CHUNKS
   echo expected_episodes=$EXPECTED_EPISODES
   echo screen_max_actions=$SCREEN_MAX_ACTIONS
@@ -412,7 +426,7 @@ run_unit() {
       ;;
     B2)
       submap_enabled=true
-      if [ "$MODE" = smoke ]; then
+      if [ "$RUN_CALIBRATION" = true ]; then
         submap_allow=true
         overrides+=(
           "ascent_submaps.provisional_thresholds=true"
@@ -442,11 +456,11 @@ run_unit() {
 
   local cmd=(
     "$ASCENT_PYTHON" -u -m ascent.run
-    "--config-name=eval_ascent_hm3d.yaml"
+    "--config-name=eval_ascent_${DATASET}.yaml"
     "habitat.dataset.data_path=$data_path"
     "habitat.dataset.content_scenes=[*]"
     "habitat.dataset.split=train"
-    "habitat.dataset.scenes_dir=$HM3D_SCENES_ROOT"
+    "habitat.dataset.scenes_dir=$SCENES_ROOT"
     "habitat.seed=100"
     "habitat_baselines.eval.split=train"
     "habitat_baselines.test_episode_count=-1"
@@ -476,7 +490,7 @@ run_unit() {
     echo expected_episodes=$expected
     echo submap_enabled=$submap_enabled
     echo submap_allow_provisional=$submap_allow
-    if [ "$MODE" = full ]; then
+    if [ "$RUN_CALIBRATION" = false ]; then
       echo calibration_json=$CALIBRATION_JSON
       echo calibration_json_sha256=$CALIBRATION_JSON_SHA256
     fi
@@ -549,7 +563,7 @@ run_unit() {
   esac
 }
 
-if [ "$MODE" = smoke ]; then
+if [ "$RUN_CALIBRATION" = true ]; then
   set +e
   run_unit 0 calibration CAL "$CALIBRATION_ROW"
   calibration_result=$?
@@ -557,8 +571,7 @@ if [ "$MODE" = smoke ]; then
   case "$calibration_result" in
     0) ;;
     42|44)
-      # One fixed, technical-only retry is allowed because the 30-episode
-      # calibration process is longer than the five-case engineering smoke.
+      # One fixed technical retry is retained for the longer calibration run.
       run_unit 1 calibration CAL "$CALIBRATION_ROW" || exit $?
       ;;
     *) exit "$calibration_result" ;;
@@ -567,7 +580,11 @@ fi
 
 for encoded in "${CHUNK_ROWS[@]}"; do
   IFS=$'\t' read -r chunk_index _ <<< "$encoded"
-  if [ "$((chunk_index % 2))" = 0 ]; then
+  if [ "$MODE" = smoke ]; then
+    # Exercise the changed method first so an integration error fails fast
+    # before spending time on the already-validated default-off condition.
+    conditions=(B2 B1)
+  elif [ "$((chunk_index % 2))" = 0 ]; then
     conditions=(B1 B2)
   else
     conditions=(B2 B1)

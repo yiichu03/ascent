@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fail-closed check of the real ASCENT ObjectNav task-reset path.
 
-Dataset deserialization alone does not instantiate Habitat-Sim, load HM3D
+Dataset deserialization alone does not instantiate Habitat-Sim, load scene
 semantic annotations, or reset ASCENT's MultiFloorMap measurement.  This
 check deliberately uses a synchronous ``habitat.Env`` so Python exceptions
 surface to the controller instead of being stranded in a VectorEnv worker.
@@ -45,6 +45,7 @@ def sha256(path: Path) -> str:
 
 def compose_config(
     *,
+    dataset: str,
     config_dir: Path,
     data_path: str,
     scene_root: Path,
@@ -56,7 +57,7 @@ def compose_config(
         version_base=None, config_dir=str(config_dir)
     ):
         config = patch_config(
-            hydra.compose(config_name="eval_ascent_hm3d.yaml")
+            hydra.compose(config_name=f"eval_ascent_{dataset}.yaml")
         )
     with read_write(config):
         config.habitat.dataset.data_path = data_path
@@ -77,6 +78,7 @@ def compose_config(
 
 def check_chunk(
     *,
+    dataset_name: str,
     chunk: Dict[str, Any],
     config_dir: Path,
     scene_root: Path,
@@ -84,6 +86,7 @@ def check_chunk(
     gpu_device_id: int,
 ) -> Dict[str, Any]:
     config = compose_config(
+        dataset=dataset_name,
         config_dir=config_dir,
         data_path=chunk["data_path"],
         scene_root=scene_root,
@@ -171,6 +174,9 @@ def main() -> None:
     if manifest.get("schema") != "ascent_vo_submap_screen_materialized_v1":
         raise ValueError("unexpected materialized manifest schema")
     scene_root = args.scene_root.resolve()
+    dataset_name = str(manifest.get("dataset"))
+    if dataset_name not in {"hm3d", "mp3d"}:
+        raise ValueError(f"unsupported dataset {dataset_name!r}")
     scene_dataset_config = Path(
         manifest["scene_dataset_config"]
     ).resolve()
@@ -188,6 +194,7 @@ def main() -> None:
         try:
             results.append(
                 check_chunk(
+                    dataset_name=dataset_name,
                     chunk=chunk,
                     config_dir=args.config_dir.resolve(),
                     scene_root=scene_root,
@@ -213,6 +220,7 @@ def main() -> None:
         "schema": "ascent_vo_submap_task_reset_check_v1",
         "manifest": str(manifest_path),
         "manifest_sha256": sha256(manifest_path),
+        "dataset": dataset_name,
         "scene_dataset_config": str(scene_dataset_config),
         "scene_dataset_config_sha256": expected_config_hash,
         "expected_episode_count": int(manifest["episode_count"]),

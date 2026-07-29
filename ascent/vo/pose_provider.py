@@ -10,6 +10,8 @@ import numpy as np
 import torch
 
 from ascent.vo.zhao_model import (
+    DEPTH_INVALID_POLICY,
+    DepthValidityStats,
     PreparedZhaoFrame,
     ZhaoActionModels,
     ZhaoFramePreprocessor,
@@ -84,6 +86,9 @@ class PoseUpdate:
     local_deltas: tuple[tuple[float, float, float], ...]
     vo_inferences: int
     next_episode_reset: bool = False
+    previous_depth_validity: DepthValidityStats | None = None
+    current_depth_validity: DepthValidityStats | None = None
+    current_frame_role: str = "unspecified"
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -95,6 +100,18 @@ class PoseUpdate:
             "local_deltas": [list(delta) for delta in self.local_deltas],
             "vo_inferences": self.vo_inferences,
             "next_episode_reset": self.next_episode_reset,
+            "depth_invalid_policy": DEPTH_INVALID_POLICY,
+            "previous_depth_validity": (
+                None
+                if self.previous_depth_validity is None
+                else self.previous_depth_validity.as_dict()
+            ),
+            "current_depth_validity": (
+                None
+                if self.current_depth_validity is None
+                else self.current_depth_validity.as_dict()
+            ),
+            "current_frame_role": self.current_frame_role,
             "finite": True,
         }
 
@@ -199,6 +216,8 @@ class ZhaoRGBDPoseProvider:
             local_deltas=(),
             vo_inferences=0,
             next_episode_reset=True,
+            current_depth_validity=_frame_depth_validity(prepared),
+            current_frame_role="episode_reset",
         )
 
     def _update_env(
@@ -218,7 +237,10 @@ class ZhaoRGBDPoseProvider:
                 if action == STOP
                 else "terminal_no_policy_successor_then_autoreset"
             )
-            self._reset_env(observation, env)
+            previous_depth_validity = _frame_depth_validity(
+                self._previous_frames[env]
+            )
+            reset_update = self._reset_env(observation, env)
             return PoseUpdate(
                 env=env,
                 action=action,
@@ -228,6 +250,9 @@ class ZhaoRGBDPoseProvider:
                 local_deltas=(),
                 vo_inferences=0,
                 next_episode_reset=True,
+                previous_depth_validity=previous_depth_validity,
+                current_depth_validity=reset_update.current_depth_validity,
+                current_frame_role="next_episode_reset",
             )
 
         previous = self._previous_frames[env]
@@ -236,7 +261,8 @@ class ZhaoRGBDPoseProvider:
 
         if action in (LOOK_UP, LOOK_DOWN, STOP):
             rgb, depth = self._pop_single_frame(observation)
-            self._previous_frames[env] = self.preprocessor.prepare(rgb, depth)
+            current = self.preprocessor.prepare(rgb, depth)
+            self._previous_frames[env] = current
             return PoseUpdate(
                 env=env,
                 action=action,
@@ -245,6 +271,9 @@ class ZhaoRGBDPoseProvider:
                 pose_after=tuple(map(float, pose_before)),
                 local_deltas=(),
                 vo_inferences=0,
+                previous_depth_validity=_frame_depth_validity(previous),
+                current_depth_validity=_frame_depth_validity(current),
+                current_frame_role="identity_refresh",
             )
 
         if action not in (MOVE_FORWARD, TURN_LEFT, TURN_RIGHT):
@@ -273,6 +302,9 @@ class ZhaoRGBDPoseProvider:
             pose_after=tuple(map(float, pose)),
             local_deltas=(tuple(map(float, delta)),),
             vo_inferences=1,
+            previous_depth_validity=_frame_depth_validity(previous),
+            current_depth_validity=_frame_depth_validity(current),
+            current_frame_role="action_successor",
         )
 
     @staticmethod
@@ -287,3 +319,16 @@ class ZhaoRGBDPoseProvider:
                 f"missing auxiliary VO sensor {exc.args[0]}"
             ) from exc
         return rgb, depth
+
+
+def _frame_depth_validity(
+    frame: PreparedZhaoFrame | Any | None,
+) -> DepthValidityStats | None:
+    if frame is None:
+        return None
+    validity = getattr(frame, "depth_validity", None)
+    if validity is not None and not isinstance(validity, DepthValidityStats):
+        raise VOInferenceError(
+            f"bad prepared-frame depth validity type {type(validity).__name__}"
+        )
+    return validity

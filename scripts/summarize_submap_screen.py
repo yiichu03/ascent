@@ -70,10 +70,11 @@ def read_jsonl(path: Path) -> tuple[list[Dict[str, Any]], list[str]]:
 
 def normalized_scene(value: Any) -> str:
     text = str(value or "").replace("\\", "/")
-    for marker in ("/hm3d/", "hm3d/"):
-        if marker in text:
-            suffix = text.split(marker, 1)[1]
-            return "hm3d/" + suffix
+    for dataset in ("hm3d", "mp3d"):
+        for marker in (f"/{dataset}/", f"{dataset}/"):
+            if marker in text:
+                suffix = text.split(marker, 1)[1]
+                return f"{dataset}/" + suffix
     return text.lstrip("/")
 
 
@@ -91,13 +92,16 @@ def mean(values: Iterable[float]) -> Optional[float]:
 
 
 def load_manifest(
-    path: Path, expected_episodes: int
+    path: Path, expected_episodes: int, expected_dataset: str
 ) -> tuple[Dict[str, Dict[str, Any]], list[str], list[str]]:
     manifest = read_json(path)
     errors = []
     if manifest.get("schema") != "ascent_vo_submap_screen_materialized_v1":
         errors.append("manifest_schema")
-    if manifest.get("dataset") != "hm3d" or manifest.get("split") != "train":
+    if (
+        manifest.get("dataset") != expected_dataset
+        or manifest.get("split") != "train"
+    ):
         errors.append("manifest_dataset_split")
     if int(manifest.get("episode_count", -1)) != expected_episodes:
         errors.append("manifest_episode_count")
@@ -184,7 +188,7 @@ def validate_submap_metadata(
     if not isinstance(config, Mapping) or config.get("enabled") is not True:
         errors.append("submap_metadata:enabled")
         return errors
-    if mode == "smoke":
+    if calibration is None and mode == "smoke":
         if config.get("provisional_thresholds") is not True:
             errors.append("submap_metadata:smoke_not_provisional")
         expected_smoke = {
@@ -202,7 +206,7 @@ def validate_submap_metadata(
                 )
     else:
         if config.get("provisional_thresholds") is not False:
-            errors.append("submap_metadata:full_still_provisional")
+            errors.append("submap_metadata:calibrated_still_provisional")
         if calibration is None:
             errors.append("submap_metadata:missing_calibration")
         else:
@@ -439,6 +443,11 @@ def main() -> int:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--registry", type=Path, required=True)
     parser.add_argument("--mode", choices=("smoke", "full"), required=True)
+    parser.add_argument(
+        "--expected-dataset",
+        choices=("hm3d", "mp3d"),
+        default="hm3d",
+    )
     parser.add_argument("--expected-episodes", type=int, required=True)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--forward-checkpoint-sha256", required=True)
@@ -447,10 +456,10 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     chunks, logical_order, strict_errors = load_manifest(
-        args.manifest, args.expected_episodes
+        args.manifest, args.expected_episodes, args.expected_dataset
     )
     calibration = None
-    if args.mode == "full":
+    if args.mode == "full" or args.calibration_json is not None:
         if args.calibration_json is None:
             strict_errors.append("missing_calibration_json")
         else:
@@ -600,6 +609,7 @@ def main() -> int:
     )
     summary = {
         "schema": "ascent_vo_submap_paired_screen_v1",
+        "dataset": args.expected_dataset,
         "mode": args.mode,
         "technical_status": technical_status,
         "exposure_status": exposure_status,

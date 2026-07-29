@@ -276,7 +276,112 @@ def test_materializer_preserves_selection_order_across_source_files(
     assert [episode["episode_id"] for episode in episodes] == expected
 
 
-def test_controller_requires_synchronous_task_reset_preflight() -> None:
+def test_mp3d_materialized_assets_pass_dataset_specific_preflight(
+    tmp_path: Path,
+) -> None:
+    scene_root = tmp_path / "scenes"
+    scene_dir = scene_root / "mp3d" / "scene"
+    scene_dir.mkdir(parents=True)
+    for name in (
+        "scene.glb",
+        "scene.navmesh",
+        "scene_semantic.ply",
+        "scene.house",
+    ):
+        (scene_dir / name).write_text(name, encoding="utf-8")
+    scene_config = (
+        scene_root / "mp3d" / "mp3d.scene_dataset_config.json"
+    )
+    scene_config.write_text('{"stages": {}}\n', encoding="utf-8")
+    source_root = tmp_path / "source" / "train.json.gz"
+    source_content = tmp_path / "source" / "content" / "scene.json.gz"
+    root_payload = {
+        "episodes": [],
+        "goals_by_category": {},
+        "category_to_task_category_id": {"chair": 0},
+    }
+    episode = {
+        "episode_id": "17",
+        "scene_id": "mp3d/scene/scene.glb",
+        "object_category": "chair",
+        "start_position": [0.0, 0.0, 0.0],
+        "start_rotation": [0.0, 0.0, 0.0, 1.0],
+        "goals": [],
+        "info": {"geodesic_distance": 4.0},
+    }
+    write_gzip_json(source_root, root_payload)
+    write_gzip_json(
+        source_content,
+        {**root_payload, "episodes": [episode]},
+    )
+    selection = tmp_path / "selection.csv"
+    row = {
+        "logical_case_id": "mp3d_case_0",
+        "dataset": "mp3d",
+        "dataset_case_index": "0",
+        "episode_seed": "100",
+        "source_root_file": str(source_root),
+        "source_content_file": str(source_content),
+        "source_content_sha256": sha256(source_content),
+        "source_episode_index": "0",
+        "source_episode_id": "17",
+        "scene_id": episode["scene_id"],
+        "target_category": "chair",
+        "geodesic_distance": "4.0",
+    }
+    write_csv(selection, [row], list(row))
+    output_root = tmp_path / "materialized"
+    subprocess.run(
+        [
+            sys.executable,
+            str(MATERIALIZER),
+            "--selection",
+            str(selection),
+            "--output-root",
+            str(output_root),
+            "--scene-dataset-config",
+            str(scene_config),
+            "--dataset",
+            "mp3d",
+            "--episodes",
+            "1",
+            "--chunk-size",
+            "1",
+            "--label",
+            "mp3d_fixture",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    output_json = tmp_path / "preflight.json"
+    subprocess.run(
+        [
+            sys.executable,
+            str(PREFLIGHT),
+            "--manifest",
+            str(output_root / "chunk_manifest.json"),
+            "--scene-root",
+            str(scene_root),
+            "--expected-dataset",
+            "mp3d",
+            "--expected-episodes",
+            "1",
+            "--expected-chunks",
+            "1",
+            "--output-json",
+            str(output_json),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(output_json.read_text())
+    assert result["dataset"] == "mp3d"
+    assert result["status"] == "PASS"
+
+
+def test_unified_controller_binds_dataset_and_real_reset_contracts() -> None:
     checker = (
         ROOT / "scripts" / "check_submap_task_reset.py"
     ).read_text(encoding="utf-8")
@@ -284,20 +389,29 @@ def test_controller_requires_synchronous_task_reset_preflight() -> None:
         ROOT / "pbs" / "run_submap_screen_3shared.pbs"
     ).read_text(encoding="utf-8")
     assert "with habitat.Env(" in checker
+    assert 'config_name=f"eval_ascent_{dataset}.yaml"' in checker
     assert "config.habitat.environment.iterator_options.cycle = False" in checker
     assert 'screen_task_reset.json' in controller
     assert 'calibration_task_reset.json' in controller
+    assert '--expected-dataset "$DATASET"' in controller
+    assert "CALIBRATION_CONTRACT=hm3d_train30_native_calibration" in controller
+    assert (
+        "CALIBRATION_CONTRACT=hm3d_train30_frozen_no_mp3d_retuning"
+    ) in controller
+    assert "echo calibration_contract=$CALIBRATION_CONTRACT" in controller
+    assert 'SUMMARY_ARGS+=(--calibration-json "$CALIBRATION_OUTPUT")' in controller
     assert '"$TASK_RESET_CHECK"' in controller
+    assert "external/ascent_vo_submap_v1_mp3d" not in controller
 
 
-def test_lane_run_unit_preserves_caller_errexit_for_fixed_retry() -> None:
+def test_unified_lane_runs_changed_condition_first_in_smoke() -> None:
     worker = (
         ROOT / "pbs" / "run_submap_screen_lane.sh"
     ).read_text(encoding="utf-8")
     run_unit_start = worker.index("run_unit() {")
     run_unit = worker[
         run_unit_start : worker.index(
-            '\n}\n\nif [ "$MODE" = smoke ]', run_unit_start
+            '\n}\n\nif [ "$RUN_CALIBRATION" = true ]', run_unit_start
         )
     ]
     assert "set +e" not in run_unit
@@ -305,6 +419,15 @@ def test_lane_run_unit_preserves_caller_errexit_for_fixed_retry() -> None:
     assert "  ); then\n    status=0\n  else\n    status=$?\n  fi" in run_unit
     assert "42|44)" in worker
     assert "run_unit 1 calibration CAL" in worker
+    assert "--config-name=eval_ascent_${DATASET}.yaml" in worker
+    assert 'if [ "$MODE" = smoke ]; then\n    # Exercise' in worker
+    assert "conditions=(B2 B1)" in worker
+    assert "ascent_submaps.provisional_thresholds=false" in worker
+    assert (
+        "ascent_submaps.max_motion_budget_m="
+        "${CALIBRATED[max_motion_budget_m]}"
+    ) in worker
+    assert "external/ascent_vo_submap_v1_mp3d" not in worker
 
 
 def vo_metadata() -> dict[str, Any]:

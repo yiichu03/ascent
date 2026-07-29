@@ -42,6 +42,7 @@ from ascent.vo.diagnostics import VODiagnosticsWriter
 from ascent.vo.habitat_extensions import configure_gt_isolated_vo
 from ascent.vo.pose_provider import VOInferenceError, ZhaoRGBDPoseProvider
 from ascent.vo.zhao_model import (
+    DEPTH_INVALID_POLICY,
     FORWARD_CHECKPOINT_SHA256,
     POINTNAV_VO_SOURCE_COMMIT,
     TURN_CHECKPOINT_SHA256,
@@ -176,6 +177,9 @@ class AscentTrainer(PPOTrainer):
                 "action_contract": "native_0.25m_or_30deg_single_pair",
                 "pose_initialization": "episode_local_zero_se2",
                 "gt_policy_isolation": True,
+                "depth_invalid_policy": DEPTH_INVALID_POLICY,
+                "checkpoint_invalid_depth_value": 0.0,
+                "depth_validity_schema": "depth_validity_v1",
             },
         )
         # 环境 reset：取得第一帧 observation 这是 episode 真正开始的位置。 1. Habitat 原始 observation

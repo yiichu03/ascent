@@ -32,6 +32,32 @@ def payload(tag: str) -> MapPayload:
     )
 
 
+def test_fresh_submap_frontier_has_step_zero_visualization_record() -> None:
+    obstacle_map = ObstacleMap(
+        min_height=0.1,
+        max_height=1.5,
+        area_thresh=1.0,
+        agent_radius=0.18,
+        hole_area_thresh=0.1,
+        size=64,
+    )
+    frontier = np.array([0.8, -0.75], dtype=np.float64)
+    rgb = np.zeros((12, 16, 3), dtype=np.uint8)
+    obstacle_map.frontiers = frontier.reshape(1, 2)
+
+    assert obstacle_map._floor_num_steps == 0
+    obstacle_map.project_frontiers_to_rgb_hush(rgb)
+
+    assert obstacle_map.frontier_visualization_info[tuple(frontier)] == {
+        "floor_num_steps": 0
+    }
+    floor_step, cached_rgb = obstacle_map.extract_frontiers_with_image(
+        frontier
+    )
+    assert floor_step == 0
+    np.testing.assert_array_equal(cached_rgb, rgb)
+
+
 def test_relative_pose_and_point_transform_round_trip() -> None:
     anchor_a = np.array([4.0, -2.0, np.deg2rad(35.0)])
     anchor_b = np.array([-1.0, 3.0, np.deg2rad(-20.0)])

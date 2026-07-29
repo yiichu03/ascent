@@ -29,6 +29,9 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--scene-root", type=Path, required=True)
+    parser.add_argument(
+        "--expected-dataset", choices=("hm3d", "mp3d")
+    )
     parser.add_argument("--expected-episodes", type=int, required=True)
     parser.add_argument("--expected-chunks", type=int, required=True)
     parser.add_argument("--output-json", type=Path, required=True)
@@ -39,8 +42,14 @@ def main() -> None:
     errors = []
     if manifest.get("schema") != "ascent_vo_submap_screen_materialized_v1":
         errors.append("schema")
-    if manifest.get("dataset") != "hm3d":
+    dataset = manifest.get("dataset")
+    if dataset not in {"hm3d", "mp3d"}:
         errors.append("dataset")
+    elif (
+        args.expected_dataset is not None
+        and dataset != args.expected_dataset
+    ):
+        errors.append("expected_dataset")
     if manifest.get("split") != "train":
         errors.append("split")
     if int(manifest.get("episode_count", -1)) != args.expected_episodes:
@@ -72,7 +81,9 @@ def main() -> None:
         != manifest.get("scene_dataset_config_sha256")
     ):
         errors.append("scene_dataset_config_hash")
-    elif scene_dataset_config.parent != scene_root / "hm3d":
+    elif scene_dataset_config.parent != (
+        scene_root / str(dataset)
+    ).resolve():
         errors.append("scene_dataset_config_root")
     validated = []
     total = 0
@@ -126,17 +137,27 @@ def main() -> None:
         ]
         if any(not path.is_file() for path in scene_paths):
             errors.append(f"{chunk['chunk_id']}:scene_assets")
-        if any(
-            not path.with_name(
-                path.name.replace(".basis.glb", suffix)
-            ).is_file()
-            for path in scene_paths
-            for suffix in (
-                ".basis.navmesh",
-                ".semantic.glb",
-                ".semantic.txt",
-            )
-        ):
+        if dataset == "hm3d":
+            companion_paths = [
+                path.with_name(path.name.replace(".basis.glb", suffix))
+                for path in scene_paths
+                for suffix in (
+                    ".basis.navmesh",
+                    ".semantic.glb",
+                    ".semantic.txt",
+                )
+            ]
+        else:
+            companion_paths = [
+                companion
+                for path in scene_paths
+                for companion in (
+                    path.with_suffix(".navmesh"),
+                    path.with_name(f"{path.stem}_semantic.ply"),
+                    path.with_suffix(".house"),
+                )
+            ]
+        if any(not path.is_file() for path in companion_paths):
             errors.append(f"{chunk['chunk_id']}:companion_assets")
         total += expected
         validated.append(
@@ -155,6 +176,7 @@ def main() -> None:
         "schema": "ascent_vo_submap_screen_preflight_v1",
         "manifest": str(manifest_path),
         "manifest_sha256": sha256(manifest_path),
+        "dataset": dataset,
         "scene_dataset_config": (
             str(scene_dataset_config)
             if scene_dataset_config is not None
