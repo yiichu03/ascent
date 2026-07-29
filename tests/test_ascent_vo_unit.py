@@ -1029,3 +1029,19 @@ def test_policy_pose_source_has_no_direct_gt_observation_reads() -> None:
         keyword.arg != "current_episodes_info"
         for keyword in policy_act_calls[0].keywords
     )
+
+
+def test_submap_policy_diagnostics_are_not_habitat_episode_scalars() -> None:
+    from ascent.ascent_trainer import extract_scalars_from_info
+
+    scalars = extract_scalars_from_info(
+        {
+            "success": 1.0,
+            "spl": 0.5,
+            "submap_overlap_before_update": None,
+            "submap_split_reason": None,
+            "submap_count": 3,
+            "visual_payload": [],
+        }
+    )
+    assert scalars == {"success": 1.0, "spl": 0.5}

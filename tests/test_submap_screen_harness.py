@@ -197,6 +197,23 @@ def test_controller_requires_synchronous_task_reset_preflight() -> None:
     assert '"$TASK_RESET_CHECK"' in controller
 
 
+def test_lane_run_unit_preserves_caller_errexit_for_fixed_retry() -> None:
+    worker = (
+        ROOT / "pbs" / "run_submap_screen_lane.sh"
+    ).read_text(encoding="utf-8")
+    run_unit_start = worker.index("run_unit() {")
+    run_unit = worker[
+        run_unit_start : worker.index(
+            '\n}\n\nif [ "$MODE" = smoke ]', run_unit_start
+        )
+    ]
+    assert "set +e" not in run_unit
+    assert 'if (\n    export ASCENT_SUBMAP_ENABLED=' in run_unit
+    assert "  ); then\n    status=0\n  else\n    status=$?\n  fi" in run_unit
+    assert "42|44)" in worker
+    assert "run_unit 1 calibration CAL" in worker
+
+
 def vo_metadata() -> dict[str, Any]:
     return {
         "record_type": "run_metadata",

@@ -485,8 +485,7 @@ run_unit() {
   echo "unit_start priority=$priority stage=$stage condition=$condition chunk=$chunk_id time=$(date -Is)" \
     | tee -a "$RUN_ROOT/driver.log"
   local status
-  set +e
-  (
+  if (
     export ASCENT_SUBMAP_ENABLED=$submap_enabled
     export ASCENT_SUBMAP_ALLOW_PROVISIONAL=$submap_allow
     export ASCENT_VO_DIAGNOSTICS_PATH=$vo_diagnostics
@@ -500,9 +499,11 @@ run_unit() {
     cd "$SOURCE_ROOT"
     timeout --signal=TERM --kill-after=120s "${timeout_seconds}s" \
       "${cmd[@]}" > "$unit_dir/run.log" 2>&1 < /dev/null
-  )
-  status=$?
-  set -e
+  ); then
+    status=0
+  else
+    status=$?
+  fi
   echo "$status" > "$unit_dir/exit_status.txt"
 
   local post_health=0

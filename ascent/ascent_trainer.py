@@ -48,7 +48,15 @@ from ascent.vo.zhao_model import (
 )
 
 def extract_scalars_from_info(info: Dict[str, Any]) -> Dict[str, float]:
-    info_filtered = {k: v for k, v in info.items() if not isinstance(v, list)}
+    # Submap policy diagnostics are written to their own append-only JSONL.
+    # Some fields are deliberately None when no split/revisit occurred, so
+    # passing them to Habitat's scalar flattener would call float(None) at an
+    # episode boundary.  They are not native evaluation metrics.
+    info_filtered = {
+        k: v
+        for k, v in info.items()
+        if not isinstance(v, list) and not k.startswith("submap_")
+    }
     return extract_scalars_from_info_habitat(info_filtered)
 
 
