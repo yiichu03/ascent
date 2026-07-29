@@ -5,10 +5,12 @@ from typing import Dict, Tuple, Any, Union, List, Optional
 from vlfm.policy.base_objectnav_policy import BaseObjectNavPolicy
 from habitat_baselines.common.tensor_dict import TensorDict
 from depth_camera_filtering import filter_depth
+import hashlib
 import numpy as np
 import torch
 import cv2
 import os
+from pathlib import Path
 from constants import MPCAT40_RGB_COLORS
 from torch import Tensor
 from habitat_baselines.rl.ppo.policy import PolicyActionData
@@ -31,6 +33,15 @@ from constants import (
 )
 from ascent.llm_planner import Ascent_LLM_Planner
 from ascent.map_controller import Map_Controller
+from ascent.submaps import (
+    SubmapDiagnosticsWriter,
+    SubmapLifecycleConfig,
+    SubmapManager,
+    ViewOverlapConfig,
+    estimate_view_overlap,
+    transfer_stair_topology,
+)
+from ascent.submaps.types import SubmapState
 from ascent.utils import (
     xyz_yaw_pitch_roll_to_tf_matrix,
     check_stairs_in_upper_50_percent,
@@ -40,7 +51,29 @@ from ascent.utils import (
     get_action_tensor,
     load_rednet_model,
 )
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
+
+
+def _submap_config_value(config: DictConfig, key: str, default: Any) -> Any:
+    if config is None:
+        return default
+    return OmegaConf.select(
+        config, f"ascent_submaps.{key}", default=default
+    )
+
+
+def _as_config_bool(value: Any, key: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off", ""}:
+            return False
+    if isinstance(value, (int, np.integer)) and value in (0, 1):
+        return bool(value)
+    raise ValueError(f"ascent_submaps.{key} must be boolean, got {value!r}")
 
 @baseline_registry.register_policy
 class Ascent_Policy(HabitatMixin, ITMPolicyV2):
@@ -161,6 +194,140 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                                               use_max_confidence = kwargs["use_max_confidence"],
                                               coco_threshold = kwargs["coco_threshold"],
                                               non_coco_threshold = kwargs["non_coco_threshold"] )
+
+        self._submap_config = SubmapLifecycleConfig(
+            enabled=_as_config_bool(
+                _submap_config_value(config, "enabled", False), "enabled"
+            ),
+            min_action_endpoints=int(
+                _submap_config_value(config, "min_action_endpoints", 20)
+            ),
+            min_path_length_m=float(
+                _submap_config_value(config, "min_path_length_m", 1.5)
+            ),
+            overlap_threshold=float(
+                _submap_config_value(config, "overlap_threshold", 0.25)
+            ),
+            low_overlap_consecutive=int(
+                _submap_config_value(config, "low_overlap_consecutive", 3)
+            ),
+            max_motion_budget_m=float(
+                _submap_config_value(config, "max_motion_budget_m", 8.0)
+            ),
+            rotation_weight_m_per_rad=float(
+                _submap_config_value(
+                    config, "rotation_weight_m_per_rad", 0.10
+                )
+            ),
+            gateway_frontier_resolution_radius_m=float(
+                _submap_config_value(
+                    config,
+                    "gateway_frontier_resolution_radius_m",
+                    1.0,
+                )
+            ),
+            gateway_reached_radius_m=float(
+                _submap_config_value(
+                    config, "gateway_reached_radius_m", 0.9
+                )
+            ),
+            provisional_thresholds=_as_config_bool(
+                _submap_config_value(
+                    config, "provisional_thresholds", True
+                ),
+                "provisional_thresholds",
+            ),
+        )
+        self._submap_enabled = self._submap_config.enabled
+        allow_provisional = _as_config_bool(
+            _submap_config_value(
+                config, "allow_provisional_thresholds", False
+            ),
+            "allow_provisional_thresholds",
+        )
+        if (
+            self._submap_enabled
+            and self._submap_config.provisional_thresholds
+            and not allow_provisional
+        ):
+            raise RuntimeError(
+                "ASCENT submap thresholds are provisional; enable only for an "
+                "explicit engineering smoke or provide calibrated thresholds"
+            )
+        self._submap_overlap_config = ViewOverlapConfig(
+            sample_stride=int(
+                _submap_config_value(config, "overlap_sample_stride", 16)
+            ),
+            ray_samples=int(
+                _submap_config_value(config, "overlap_ray_samples", 4)
+            ),
+            explored_dilation_cells=int(
+                _submap_config_value(
+                    config, "overlap_explored_dilation_cells", 3
+                )
+            ),
+            min_valid_samples=int(
+                _submap_config_value(
+                    config, "overlap_min_valid_samples", 32
+                )
+            ),
+            min_explored_cells=int(
+                _submap_config_value(
+                    config, "overlap_min_explored_cells", 400
+                )
+            ),
+        )
+        self._submap_manager = SubmapManager(
+            self._num_envs, self._submap_config
+        )
+        self._map_controller.set_submap_isolation_enabled(
+            self._submap_enabled
+        )
+        self._submap_episode_sequence = [-1] * self._num_envs
+        self._submap_event_cursor = [0] * self._num_envs
+        self._submap_pending_revisit: List[Optional[str]] = [
+            None
+        ] * self._num_envs
+        self._submap_remote_frontier_id: List[Optional[str]] = [
+            None
+        ] * self._num_envs
+        self._submap_boundary_frames: List[List[Dict[str, object]]] = [
+            [] for _ in range(self._num_envs)
+        ]
+        self._submap_diagnostics: Optional[
+            SubmapDiagnosticsWriter
+        ] = None
+        if self._submap_enabled:
+            diagnostics_path = Path(
+                str(
+                    _submap_config_value(
+                        config,
+                        "diagnostics_path",
+                        "debug/ascent_submap_diagnostics.jsonl",
+                    )
+                )
+            )
+            self._submap_diagnostics = SubmapDiagnosticsWriter(
+                diagnostics_path,
+                metadata={
+                    "run_id": os.environ.get(
+                        "ASCENT_SUBMAP_RUN_ID", "unrecorded"
+                    ),
+                    "ascent_source_commit": os.environ.get(
+                        "ASCENT_SUBMAP_SOURCE_COMMIT", "unrecorded"
+                    ),
+                    "pose_source": "zhao_rgbd_2021",
+                    "policy_gt_isolation": True,
+                    "config": {
+                        key: getattr(self._submap_config, key)
+                        for key in self._submap_config.__dataclass_fields__
+                    },
+                    "overlap_config": {
+                        key: getattr(self._submap_overlap_config, key)
+                        for key in self._submap_overlap_config.__dataclass_fields__
+                    },
+                },
+            )
         
         self._pitch_angle: List[int] = [0] * self._num_envs
 
@@ -196,6 +363,19 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
 
         ## 地图和楼层管理重置
         self._map_controller.reset(env)
+        if self._submap_enabled:
+            self._submap_manager.reset(env)
+            self._submap_episode_sequence[env] += 1
+            self._submap_event_cursor[env] = 0
+            self._submap_pending_revisit[env] = None
+            self._submap_remote_frontier_id[env] = None
+            self._submap_boundary_frames[env] = []
+            self.llm_planner.reset_submap_local_state(env)
+            if self._submap_diagnostics is not None:
+                self._submap_diagnostics.record_episode_reset(
+                    env=env,
+                    episode_sequence=self._submap_episode_sequence[env],
+                )
 
         ## 导航和探索状态重置
         self._try_to_navigate_step[env] = 0
@@ -237,7 +417,24 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             raise RuntimeError(
                 f"Invalid policy-visible estimated pose: {estimated_pose}"
             )
-        x, y, camera_yaw = map(float, estimated_pose)
+        world_pose_vo = np.asarray(estimated_pose, dtype=np.float64)
+        if self._submap_enabled:
+            if not self._submap_manager.has_active(env):
+                self._submap_manager.start(
+                    env=env,
+                    world_pose=world_pose_vo,
+                    floor_id=self._map_controller._policy_floor_id[env],
+                    payload=self._map_controller.current_map_payload(env),
+                    step=self._num_steps[env],
+                )
+            policy_pose = self._submap_manager.local_pose(
+                env, world_pose_vo
+            )
+            submap_id = self._submap_manager.active_bundle(env).submap_id
+        else:
+            policy_pose = world_pose_vo
+            submap_id = None
+        x, y, camera_yaw = map(float, policy_pose)
         depth = filter_depth(depth.reshape(depth.shape[:2]), blur_type=None)
         camera_position = np.array([x, y, self._camera_height])
         robot_xy = camera_position[:2]
@@ -260,7 +457,9 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             # never aligned to Habitat's world/start heading.
             "habitat_start_yaw": 0.0,
             "pose_source": "zhao_rgbd_2021",
-            
+            "world_pose_vo": world_pose_vo.copy(),
+            "submap_id": submap_id,
+            "policy_floor_id": self._map_controller._policy_floor_id[env],
         }
 
         self._observations_cache[env]["nav_rgb"]=torch.unsqueeze(observations["rgb"][env], dim=0)
@@ -292,6 +491,22 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             "pose_source": self._observations_cache[env]["pose_source"],
             # "floor_num_steps": self._map_controller._obstacle_map[env]._floor_num_steps,
         }
+        if self._submap_enabled:
+            policy_info.update(
+                {
+                    "submap_id": self._observations_cache[env][
+                        "submap_id"
+                    ],
+                    "submap_floor_id": self._observations_cache[env][
+                        "policy_floor_id"
+                    ],
+                    "submap_overlap_before_update": (
+                        self._observations_cache[env].get(
+                            "submap_overlap_before_update"
+                        )
+                    ),
+                }
+            )
 
         # 若不需要可视化,直接返回
         if not self._visualize:
@@ -394,6 +609,425 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         else:
             return None
 
+    def _assert_active_submap_binding(self, env: int) -> None:
+        bundle = self._submap_manager.active_bundle(env)
+        if bundle.state is not SubmapState.ACTIVE:
+            raise RuntimeError(
+                f"policy attempted to update frozen submap {bundle.submap_id}"
+            )
+        current = self._map_controller.current_map_payload(env)
+        if current.identity != bundle.payload.identity:
+            raise RuntimeError(
+                "Map_Controller writable payload is not the active submap: "
+                f"env={env} active={bundle.submap_id} "
+                f"expected={bundle.payload.identity} actual={current.identity}"
+            )
+
+    def _prepare_submap_observations(self) -> None:
+        """Compute pre-write overlap and audit references once per action."""
+
+        for env in range(self._num_envs):
+            self._assert_active_submap_binding(env)
+            cache = self._observations_cache[env]
+            bundle = self._submap_manager.active_bundle(env)
+            overlap = estimate_view_overlap(
+                normalized_depth=cache["depth"],
+                tf_camera_to_local=cache["tf_camera_to_episodic"],
+                min_depth=cache["min_depth"],
+                max_depth=cache["max_depth"],
+                fx=cache["fx"],
+                fy=cache["fy"],
+                obstacle_map=bundle.payload.obstacle_map,
+                config=self._submap_overlap_config,
+            )
+            cache["submap_overlap_before_update"] = overlap
+            rgb = np.ascontiguousarray(cache["rgb"])
+            depth = np.asarray(cache["depth"], dtype=np.float32)
+            valid_depth = depth[(depth > 0.0) & np.isfinite(depth)]
+            reference = {
+                "action_step": int(self._num_steps[env]),
+                "rgb_sha1": hashlib.sha1(rgb.tobytes()).hexdigest(),
+                "depth_valid_fraction": float(
+                    np.mean((depth > 0.0) & np.isfinite(depth))
+                ),
+                "depth_mean_normalized": (
+                    float(np.mean(valid_depth))
+                    if len(valid_depth) > 0
+                    else None
+                ),
+            }
+            self._submap_boundary_frames[env].append(reference)
+            self._submap_boundary_frames[env] = (
+                self._submap_boundary_frames[env][-4:]
+            )
+
+    def _reset_submap_coordinate_state(
+        self, env: int, *, initialize_new_floor: bool
+    ) -> None:
+        self._pointnav_policy[env].reset()
+        self._last_goal[env] = np.zeros(2)
+        self._try_to_navigate_step[env] = 0
+        self._try_to_navigate[env] = False
+        self._last_frontier_distance[env] = 0.0
+        self.min_distance_xy[env] = np.inf
+        self.cur_frontier[env] = np.array([])
+        self._submap_remote_frontier_id[env] = None
+        self.llm_planner.reset_submap_local_state(env)
+        self._map_controller.reset_submap_local_navigation_state(
+            env, initialize_new_floor=initialize_new_floor
+        )
+
+    def _flush_submap_events(self, env: int) -> None:
+        events = self._submap_manager.events(env)
+        cursor = self._submap_event_cursor[env]
+        if self._submap_diagnostics is not None:
+            for event in events[cursor:]:
+                self._submap_diagnostics.record_event(
+                    env=env,
+                    episode_sequence=self._submap_episode_sequence[env],
+                    event=event,
+                )
+        self._submap_event_cursor[env] = len(events)
+
+    @staticmethod
+    def _frontier_array(payload: object) -> np.ndarray:
+        frontiers = np.asarray(
+            payload.obstacle_map.frontiers, dtype=np.float64
+        )
+        if frontiers.size == 0:
+            return np.empty((0, 2), dtype=np.float64)
+        return frontiers.reshape(-1, 2)
+
+    def _frontier_scores(
+        self, payload: object, frontiers: np.ndarray
+    ) -> List[float]:
+        if len(frontiers) == 0:
+            return []
+        sorted_points, sorted_values = payload.value_map.sort_waypoints(
+            frontiers, 0.5, reduce_fn=self._vis_reduce_fn
+        )
+        value_by_point = {
+            tuple(np.asarray(point, dtype=np.float64)): float(value)
+            for point, value in zip(sorted_points, sorted_values)
+        }
+        return [
+            value_by_point.get(tuple(point), 0.0) for point in frontiers
+        ]
+
+    def _snapshot_submap_policy_state(self, env: int, bundle: object) -> None:
+        """Bind remaining coordinate-bearing policy state to the old bundle."""
+
+        bundle.metadata.update(
+            {
+                "last_goal_local": np.asarray(
+                    self._last_goal[env], dtype=np.float64
+                ).copy(),
+                "current_frontier_local": np.asarray(
+                    self.cur_frontier[env], dtype=np.float64
+                ).copy(),
+                "llm_last_frontier_local": np.asarray(
+                    self.llm_planner._last_frontier[env],
+                    dtype=np.float64,
+                ).copy(),
+                "try_to_navigate": bool(self._try_to_navigate[env]),
+                "try_to_navigate_step": int(
+                    self._try_to_navigate_step[env]
+                ),
+                "last_frontier_distance": float(
+                    self._last_frontier_distance[env]
+                ),
+                "policy_floor_id": int(
+                    self._map_controller._policy_floor_id[env]
+                ),
+                "floor_list_index": int(
+                    self._map_controller._cur_floor_index[env]
+                ),
+            }
+        )
+
+    def _finish_submap_action(self, *, env: int, action_step: int) -> None:
+        """Advance lifecycle after policy logging but before cache release."""
+
+        cache = self._observations_cache[env]
+        old_bundle = self._submap_manager.active_bundle(env)
+        controller_payload_before_lifecycle = (
+            self._map_controller.current_map_payload(env)
+        )
+        world_pose = np.asarray(cache["world_pose_vo"], dtype=np.float64)
+        local_pose = np.array(
+            [
+                cache["robot_xy"][0],
+                cache["robot_xy"][1],
+                cache["robot_heading"],
+            ],
+            dtype=np.float64,
+        )
+        floor_id = int(self._map_controller._policy_floor_id[env])
+        overlap = cache.get("submap_overlap_before_update")
+        decision = self._submap_manager.observe_action_endpoint(
+            env=env,
+            world_pose=world_pose,
+            floor_id=floor_id,
+            overlap=overlap,
+            allow_nonfloor_split=bool(
+                self._map_controller._climb_stair_over[env]
+            ),
+        )
+        decision_record = {
+            "should_split": bool(decision.should_split),
+            "reason": decision.reason,
+            "mature": bool(decision.mature),
+            "motion_budget_m": float(decision.motion_budget_m),
+            "low_overlap_streak": int(decision.low_overlap_streak),
+            "floor_changed": bool(decision.floor_changed),
+            "pending_revisit_edge_id": self._submap_pending_revisit[env],
+        }
+        if self._submap_diagnostics is not None:
+            self._submap_diagnostics.record_action_endpoint(
+                env=env,
+                episode_sequence=self._submap_episode_sequence[env],
+                action_step=action_step,
+                submap_id=old_bundle.submap_id,
+                floor_id=floor_id,
+                world_pose_vo=world_pose,
+                local_pose=local_pose,
+                overlap=overlap,
+                decision=decision_record,
+            )
+
+        new_bundle = None
+        split_reason = None
+        pending_revisit = self._submap_pending_revisit[env]
+        frontiers = self._frontier_array(old_bundle.payload)
+        frontier_scores = self._frontier_scores(
+            old_bundle.payload, frontiers
+        )
+        if pending_revisit is not None:
+            self._snapshot_submap_policy_state(env, old_bundle)
+            new_payload = self._map_controller.create_empty_map_payload()
+            new_bundle, _, _ = self._submap_manager.commit_revisit(
+                env=env,
+                world_pose=world_pose,
+                floor_id=floor_id,
+                new_payload=new_payload,
+                step=action_step,
+                gateway_edge_id=pending_revisit,
+                frontiers_local=frontiers,
+                frontier_scores=frontier_scores,
+                boundary_frames=self._submap_boundary_frames[env],
+            )
+            split_reason = "gateway_revisit"
+            self._submap_pending_revisit[env] = None
+        elif decision.should_split:
+            self._snapshot_submap_policy_state(env, old_bundle)
+            new_payload = self._map_controller.create_empty_map_payload()
+            new_bundle, _, _ = self._submap_manager.commit_split(
+                env=env,
+                world_pose=world_pose,
+                floor_id=floor_id,
+                new_payload=new_payload,
+                step=action_step,
+                frontiers_local=frontiers,
+                frontier_scores=frontier_scores,
+                boundary_frames=self._submap_boundary_frames[env],
+            )
+            split_reason = decision.reason
+
+        if new_bundle is not None:
+            topology_source = (
+                controller_payload_before_lifecycle
+                if decision.floor_changed
+                else old_bundle.payload
+            )
+            transfer_stair_topology(
+                source_obstacle_map=topology_source.obstacle_map,
+                destination_obstacle_map=new_bundle.payload.obstacle_map,
+                source_anchor_world=old_bundle.anchor_pose_world,
+                destination_anchor_world=new_bundle.anchor_pose_world,
+            )
+            self._map_controller.install_map_payload(env, new_bundle.payload)
+            self._reset_submap_coordinate_state(
+                env,
+                initialize_new_floor=bool(decision.floor_changed),
+            )
+            self._submap_boundary_frames[env] = []
+
+        active = self._submap_manager.active_bundle(env)
+        graph = self._submap_manager.graph(env)
+        registry = self._submap_manager.registry(env)
+        self._policy_info[env].update(
+            {
+                "submap_id_after_action": active.submap_id,
+                "submap_split_reason": split_reason,
+                "submap_count": len(graph.nodes),
+                "submap_gateway_count": len(graph.edges),
+                "submap_registry_size": len(registry.records),
+            }
+        )
+        self._flush_submap_events(env)
+
+    def _find_remote_object_plan(
+        self, env: int
+    ) -> Optional[Tuple[str, np.ndarray]]:
+        target = self._map_controller._target_object[env]
+        if not target:
+            return None
+        graph = self._submap_manager.graph(env)
+        view = self._submap_manager.query_view(env)
+        active = self._submap_manager.active_bundle(env)
+        candidates = []
+        for submap_id, bundle in graph.nodes.items():
+            if submap_id == active.submap_id:
+                continue
+            object_map = bundle.payload.object_map
+            if not object_map.has_object(target):
+                continue
+            cloud = object_map.get_target_cloud(target)
+            if len(cloud) == 0:
+                continue
+            if active.reference_submap_id == submap_id:
+                hops = 0
+            else:
+                path = graph.shortest_path(active.submap_id, submap_id)
+                if len(path) < 2:
+                    continue
+                hops = len(path) - 1
+            source_xy = np.median(
+                np.asarray(cloud[:, :2], dtype=np.float64), axis=0
+            )
+            candidates.append(
+                (hops, bundle.creation_step, submap_id, source_xy)
+            )
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[0], item[1], item[2]))
+        _, _, source_submap_id, source_xy = candidates[0]
+        # Validate the transform now so an invalid historical hypothesis fails
+        # before an action is emitted.
+        view.project_points_to_active(
+            source_submap_id, source_xy.reshape(1, 2)
+        )
+        return source_submap_id, source_xy
+
+    def _submap_remote_destination_action(
+        self,
+        observations: Union[Dict[str, Tensor], "TensorDict"],
+        env: int,
+        masks: Tensor,
+        *,
+        destination_submap_id: str,
+        destination_local_xy: np.ndarray,
+        frontier_id: Optional[str],
+    ) -> Optional[Tensor]:
+        graph = self._submap_manager.graph(env)
+        active = self._submap_manager.active_bundle(env)
+        view = self._submap_manager.query_view(env)
+        robot_xy = self._observations_cache[env]["robot_xy"]
+
+        if active.reference_submap_id == destination_submap_id:
+            local_goal = view.project_points_to_active(
+                destination_submap_id,
+                np.asarray(destination_local_xy).reshape(1, 2),
+            )[0]
+            distance = float(np.linalg.norm(local_goal - robot_xy))
+            if frontier_id is not None:
+                registry = self._submap_manager.registry(env)
+                if self._submap_remote_frontier_id[env] != frontier_id:
+                    registry.mark_selected(frontier_id, self._num_steps[env])
+                    self._submap_remote_frontier_id[env] = frontier_id
+                if (
+                    distance
+                    <= self._submap_config.gateway_reached_radius_m
+                ):
+                    registry.mark_attempted(
+                        frontier_id, self._num_steps[env]
+                    )
+                    return get_action_tensor(
+                        MOVE_FORWARD, device=masks.device
+                    )
+            action = self._pointnav(
+                observations,
+                local_goal,
+                stop=False,
+                env=env,
+                stop_radius=self._pointnav_stop_radius,
+            )
+            if action.item() == STOP:
+                action.fill_(MOVE_FORWARD)
+            return action
+
+        path = graph.shortest_path(
+            active.submap_id, destination_submap_id
+        )
+        if len(path) < 2:
+            return None
+        edge = graph.edge_between(path[0], path[1])
+        gateway_goal = edge.endpoint_for(active.submap_id)[:2]
+        if frontier_id is not None:
+            registry = self._submap_manager.registry(env)
+            if self._submap_remote_frontier_id[env] != frontier_id:
+                registry.mark_selected(frontier_id, self._num_steps[env])
+                self._submap_remote_frontier_id[env] = frontier_id
+        if (
+            np.linalg.norm(gateway_goal - robot_xy)
+            <= self._submap_config.gateway_reached_radius_m
+        ):
+            self._submap_pending_revisit[env] = edge.edge_id
+            return get_action_tensor(MOVE_FORWARD, device=masks.device)
+        action = self._pointnav(
+            observations,
+            gateway_goal,
+            stop=False,
+            env=env,
+            stop_radius=self._pointnav_stop_radius,
+        )
+        if action.item() == STOP:
+            action.fill_(MOVE_FORWARD)
+        return action
+
+    def _submap_remote_semantic_action(
+        self,
+        observations: Union[Dict[str, Tensor], "TensorDict"],
+        env: int,
+        masks: Tensor,
+    ) -> Optional[Tensor]:
+        plan = self._find_remote_object_plan(env)
+        if plan is None:
+            return None
+        source_submap_id, source_xy = plan
+        return self._submap_remote_destination_action(
+            observations,
+            env,
+            masks,
+            destination_submap_id=source_submap_id,
+            destination_local_xy=source_xy,
+            frontier_id=None,
+        )
+
+    def _submap_remote_frontier_action(
+        self,
+        observations: Union[Dict[str, Tensor], "TensorDict"],
+        env: int,
+        masks: Tensor,
+    ) -> Optional[Tensor]:
+        plan = (
+            self._submap_manager.query_view(env)
+            .best_remote_frontier_plan()
+        )
+        if plan is None:
+            return None
+        frontier = self._submap_manager.registry(env).get(
+            plan.frontier_id
+        )
+        return self._submap_remote_destination_action(
+            observations,
+            env,
+            masks,
+            destination_submap_id=frontier.source_submap_id,
+            destination_local_xy=frontier.local_xy,
+            frontier_id=frontier.frontier_id,
+        )
+
     def act(
         self,
         observations: Dict,
@@ -420,6 +1054,8 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             raise ValueError(f"Dataset type {self._dataset_type} not recognized")
 
         self._pre_step(obs_dict, masks)
+        if self._submap_enabled:
+            self._prepare_submap_observations()
         img_height, img_width = observations["rgb"].shape[1:3]
         self._map_controller._update_object_map_with_stair_and_person(img_height, img_width, self._observations_cache,
                                                                        self._non_coco_caption, self._num_steps, self._try_to_navigate)
@@ -580,7 +1216,15 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     mode = "initialize"
                     pointnav_action = self._initialize(env, masks)
                 elif goal is None:
-                    if self._map_controller._obstacle_map[env]._look_for_downstair_flag:
+                    remote_semantic_action = (
+                        self._submap_remote_semantic_action(
+                            observations, env, masks
+                        )
+                    )
+                    if remote_semantic_action is not None:
+                        mode = "submap_remote_semantic"
+                        pointnav_action = remote_semantic_action
+                    elif self._map_controller._obstacle_map[env]._look_for_downstair_flag:
                         mode = "look_for_downstair"
                         pointnav_action = self._look_for_downstair(observations, env, masks)
                     else:
@@ -635,6 +1279,11 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             self._num_steps[env] += 1
             self._map_controller._obstacle_map[env]._floor_num_steps += 1
             self._policy_info[env].update(self._get_policy_info(self.all_detection_list[env], env))
+            if self._submap_enabled:
+                self._finish_submap_action(
+                    env=env,
+                    action_step=self._num_steps[env] - 1,
+                )
 
             self._observations_cache[env] = {}
             self._did_reset[env] = False
@@ -666,6 +1315,12 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
 
         # 场景一：当前楼层没有有效 Frontier (包括初始为全零或列表为空的情况)
         if np.array_equal(frontiers, np.zeros((1, 2))) or len(frontiers) == 0:
+            if self._submap_enabled:
+                remote_action = self._submap_remote_frontier_action(
+                    observations, env, masks
+                )
+                if remote_action is not None:
+                    return remote_action
             # 如果还没有初始化过，并且在该楼层步数很短，并且有没探索过的高层或者低层并且没有找到对应的楼梯，如果在楼梯间且未探索完（防止卡在楼梯间），尝试重置并初始化.
             if not self._map_controller._obstacle_map[env]._reinitialize_flag and \
                self._map_controller._obstacle_map[env]._floor_num_steps < 50 and \

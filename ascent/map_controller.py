@@ -6,6 +6,7 @@ import os
 from ascent.mapping.object_point_cloud_map import ObjectPointCloudMap
 from ascent.mapping.obstacle_map import ObstacleMap
 from ascent.mapping.value_map import ValueMap
+from ascent.submaps.types import MapPayload
 from constants import (
     PROMPT_SEPARATOR,
 )
@@ -83,6 +84,11 @@ class Map_Controller:
             ))
         
         self.floor_num: List[int] = [len(self._obstacle_map_list[env]) for env in range(self._num_envs)]
+        # This token changes only after a confirmed stair traversal.  Unlike
+        # _cur_floor_index it is unaffected by inserting a placeholder below
+        # the current floor, so it is safe as a policy-visible topology label.
+        self._policy_floor_id: List[int] = [0] * self._num_envs
+        self._submap_isolation_enabled = False
 
         # 当前活跃地图的引用
         self._cur_floor_index: List[int] = [0] * self._num_envs
@@ -132,6 +138,7 @@ class Map_Controller:
         self.PASSIVE_STAIR_DETECTION_THRESHOLD = 3  # 连续3步在楼梯区域内即触发
     def reset(self, env: int) -> None:
         self._cur_floor_index[env] = 0
+        self._policy_floor_id[env] = 0
         # 确保只保留第一层的地图实例并重置它们
         # 如果需要删除多余楼层，则执行以下操作：
         del self._object_map_list[env][1:]
@@ -178,6 +185,101 @@ class Map_Controller:
         self.cur_dis_to_goal[env] = np.inf
         self._passive_up_stair_steps[env] = 0
         self._passive_down_stair_steps[env] = 0
+
+    def set_submap_isolation_enabled(self, enabled: bool) -> None:
+        self._submap_isolation_enabled = bool(enabled)
+
+    def current_map_payload(self, env: int) -> MapPayload:
+        return MapPayload(
+            obstacle_map=self._obstacle_map[env],
+            value_map=self._value_map[env],
+            object_map=self._object_map[env],
+        )
+
+    def create_empty_map_payload(self) -> MapPayload:
+        object_map = ObjectPointCloudMap(
+            erosion_size=self._object_map_erosion_size,
+            size=self.MAP_SIZE,
+        )
+        obstacle_map = ObstacleMap(
+            min_height=self.min_obstacle_height,
+            max_height=self.max_obstacle_height,
+            area_thresh=self.obstacle_map_area_threshold,
+            agent_radius=self.agent_radius,
+            hole_area_thresh=self.hole_area_thresh,
+            size=self.MAP_SIZE,
+        )
+        value_map = ValueMap(
+            value_channels=len(self._text_prompt.split(PROMPT_SEPARATOR)),
+            use_max_confidence=self.use_max_confidence,
+            obstacle_map=None,
+            size=self.MAP_SIZE,
+        )
+        return MapPayload(
+            obstacle_map=obstacle_map,
+            value_map=value_map,
+            object_map=object_map,
+        )
+
+    def install_map_payload(
+        self,
+        env: int,
+        payload: MapPayload,
+        floor_index: Optional[int] = None,
+    ) -> None:
+        """Install exactly one writable map triplet in the floor-list facade."""
+
+        index = (
+            self._cur_floor_index[env]
+            if floor_index is None
+            else int(floor_index)
+        )
+        if index < 0 or index >= len(self._obstacle_map_list[env]):
+            raise IndexError(
+                f"invalid floor index {index} for env {env} "
+                f"with {len(self._obstacle_map_list[env])} slots"
+            )
+        self._obstacle_map_list[env][index] = payload.obstacle_map
+        self._value_map_list[env][index] = payload.value_map
+        self._object_map_list[env][index] = payload.object_map
+        if index == self._cur_floor_index[env]:
+            self._obstacle_map[env] = payload.obstacle_map
+            self._value_map[env] = payload.value_map
+            self._object_map[env] = payload.object_map
+
+    def reset_submap_local_navigation_state(
+        self, env: int, *, initialize_new_floor: bool
+    ) -> None:
+        """Clear coordinate-bearing controller state after changing frames."""
+
+        self._carrot_goal_xy[env] = []
+        self._last_carrot_xy[env] = []
+        self._last_carrot_px[env] = []
+        self._frontier_stick_step[env] = 0
+        self._get_close_to_stair_step[env] = 0
+        self._double_check_goal[env] = False
+        self.cur_dis_to_goal[env] = np.inf
+        self._initialize_step[env] = 0
+        self._done_initializing[env] = not initialize_new_floor
+        self._obstacle_map[env]._done_initializing = (
+            not initialize_new_floor
+        )
+
+    def _install_fresh_floor_transition_payload(
+        self, env: int, destination_index: int
+    ) -> None:
+        """Prevent a returning traversal from writing a frozen floor payload."""
+
+        if not self._submap_isolation_enabled:
+            self._cur_floor_index[env] = destination_index
+            self._update_current_maps(env)
+            return
+        self._cur_floor_index[env] = destination_index
+        self.install_map_payload(
+            env,
+            self.create_empty_map_payload(),
+            floor_index=destination_index,
+        )
     def is_robot_in_stair_map_fast(self, env: int, robot_px:np.ndarray, stair_map: np.ndarray):
         """
         高效判断以机器人质心为圆心、指定半径的圆是否覆盖 stair_map 中值为 1 的点。
@@ -300,19 +402,23 @@ class Map_Controller:
                 self._reset_stair_climb_state(env)
                 self._climb_stair_over[env] = True
                 if climb_direction == 1:
+                    self._policy_floor_id[env] += 1
                     self._obstacle_map[env]._up_stair_end = robot_px[0].copy()
                     if not self._obstacle_map_list[env][self._cur_floor_index[env]+1]._done_initializing:
                         self._handle_new_floor_initialization(env, climb_direction)
                     else:
-                        self._cur_floor_index[env] += 1
-                        self._update_current_maps(env)
+                        self._install_fresh_floor_transition_payload(
+                            env, self._cur_floor_index[env] + 1
+                        )
                 else: # climb_direction == 2
+                    self._policy_floor_id[env] -= 1
                     self._obstacle_map[env]._down_stair_end = robot_px[0].copy()
                     if not self._obstacle_map_list[env][self._cur_floor_index[env]-1]._done_initializing:
                         self._handle_new_floor_initialization(env, climb_direction)
                     else:
-                        self._cur_floor_index[env] -= 1
-                        self._update_current_maps(env)
+                        self._install_fresh_floor_transition_payload(
+                            env, self._cur_floor_index[env] - 1
+                        )
                 print("climb stair success!!!!")
 
     def _reset_stair_climb_state(self, env: int):
@@ -576,8 +682,9 @@ class Map_Controller:
             stair_frontiers = self._obstacle_map[env]._up_stair_frontiers
             
             # 切换到新楼层
-            self._cur_floor_index[env] += 1
-            self._update_current_maps(env)
+            self._install_fresh_floor_transition_payload(
+                env, self._cur_floor_index[env] + 1
+            )
             
             # 将当前楼层的上楼梯信息保存到新楼层的下楼梯属性
             self._update_linked_stair_map(
@@ -593,6 +700,7 @@ class Map_Controller:
             
             # 标记新楼层已有下楼梯
             self._obstacle_map[env]._has_down_stair = True
+            self._obstacle_map[env]._explored_down_stair = True
 
         else: # climb_direction == 2 (下楼)
             # 标记当前楼层的下楼梯已探索
@@ -605,8 +713,9 @@ class Map_Controller:
             stair_frontiers = self._obstacle_map[env]._down_stair_frontiers
 
             # 切换到新楼层
-            self._cur_floor_index[env] -= 1
-            self._update_current_maps(env)
+            self._install_fresh_floor_transition_payload(
+                env, self._cur_floor_index[env] - 1
+            )
             
             # 将当前楼层的下楼梯信息保存到新楼层的上楼梯属性
             self._update_linked_stair_map(
@@ -622,6 +731,7 @@ class Map_Controller:
             
             # 标记新楼层已有上楼梯
             self._obstacle_map[env]._has_up_stair = True
+            self._obstacle_map[env]._explored_up_stair = True
 
     def _detect_passive_stair_entry(self, env: int, robot_px: np.ndarray):
         """

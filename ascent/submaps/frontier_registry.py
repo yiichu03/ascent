@@ -133,6 +133,9 @@ class FrontierRegistry:
         resolved = []
         for record in self.eligible(source_submap_id):
             if np.linalg.norm(record.local_xy - gateway) <= float(radius_m):
+                record.lineage = (
+                    f"gateway:{source_submap_id}->{destination_submap_id}"
+                )
                 self.mark_resolved(record.frontier_id, destination_submap_id, step)
                 resolved.append(record.frontier_id)
         return resolved

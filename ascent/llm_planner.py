@@ -54,6 +54,16 @@ class Ascent_LLM_Planner:
         self.frontier_rgb_list[env] = []
         self.floor_num[env] = 1
 
+    def reset_submap_local_state(self, env: int) -> None:
+        """Clear coordinate-bearing frontier state without losing the goal."""
+
+        self._force_frontier[env] = np.zeros(2)
+        self.frontier_step_list[env] = []
+        self.vlm_response[env] = ""
+        self._last_value[env] = float("-inf")
+        self._last_frontier[env] = np.zeros(2)
+        self.frontier_rgb_list[env] = []
+
     def _get_best_frontier_with_llm(
             self,
             observations_cache: List[dict], 
@@ -636,4 +646,3 @@ class Ascent_LLM_Planner:
 
         # 如果解析失败或异常，返回当前楼层
         return cur_floor_index[env] + 1  # 当前楼层（从1开始）
-

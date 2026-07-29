@@ -9,6 +9,7 @@ import numpy as np
 
 from ascent.submaps.frontier_registry import FrontierRegistry
 from ascent.submaps.geometry import as_pose, pose_to_matrix, relative_pose, wrap_angle
+from ascent.submaps.query_view import SubmapQueryView
 from ascent.submaps.types import (
     GatewayEdge,
     MapPayload,
@@ -133,6 +134,9 @@ class SubmapManager:
             raise RuntimeError(f"Environment {env} has no active submap")
         return memory.graph.get_node(memory.active_submap_id)
 
+    def has_active(self, env: int) -> bool:
+        return self._environments[env].active_submap_id is not None
+
     def graph(self, env: int) -> SubmapGraph:
         return self._environments[env].graph
 
@@ -141,6 +145,14 @@ class SubmapManager:
 
     def events(self, env: int) -> Tuple[Dict[str, object], ...]:
         return tuple(self._environments[env].events)
+
+    def query_view(self, env: int) -> SubmapQueryView:
+        memory = self._environments[env]
+        if memory.active_submap_id is None:
+            raise RuntimeError(f"Environment {env} has no active submap")
+        return SubmapQueryView(
+            memory.graph, memory.registry, memory.active_submap_id
+        )
 
     def local_pose(self, env: int, world_pose: Sequence[float]) -> np.ndarray:
         return relative_pose(self.active_bundle(env).anchor_pose_world, world_pose)
@@ -151,6 +163,7 @@ class SubmapManager:
         world_pose: Sequence[float],
         floor_id: int,
         overlap: Optional[float],
+        allow_nonfloor_split: bool = True,
     ) -> SplitDecision:
         bundle = self.active_bundle(env)
         bundle.require_active()
@@ -188,11 +201,15 @@ class SubmapManager:
         if self.config.enabled:
             if floor_changed:
                 reason = "floor_change"
-            elif mature and (
+            elif allow_nonfloor_split and mature and (
                 bundle.low_overlap_streak >= self.config.low_overlap_consecutive
             ):
                 reason = "low_overlap"
-            elif mature and motion_budget >= self.config.max_motion_budget_m:
+            elif (
+                allow_nonfloor_split
+                and mature
+                and motion_budget >= self.config.max_motion_budget_m
+            ):
                 reason = "motion_budget"
 
         decision = SplitDecision(
@@ -286,3 +303,101 @@ class SubmapManager:
             }
         )
         return new_bundle, edge, resolved
+
+    def commit_revisit(
+        self,
+        env: int,
+        world_pose: Sequence[float],
+        floor_id: int,
+        new_payload: MapPayload,
+        step: int,
+        gateway_edge_id: str,
+        frontiers_local: np.ndarray,
+        frontier_scores: Optional[Sequence[float]] = None,
+        boundary_frames: Sequence[Dict[str, object]] = (),
+    ) -> Tuple[SubmapBundle, GatewayEdge, List[str]]:
+        """Freeze the current writer and create a fresh revisit writer.
+
+        The historical destination remains frozen. The new active bundle is
+        associated with it through a read-only reference/revisit edge.
+        """
+
+        memory = self._environments[env]
+        old_bundle = self.active_bundle(env)
+        old_bundle.require_active()
+        existing_edge = memory.graph.edges[gateway_edge_id]
+        if (
+            existing_edge.source_submap_id != old_bundle.submap_id
+            and existing_edge.destination_submap_id != old_bundle.submap_id
+        ):
+            raise ValueError(
+                f"gateway {gateway_edge_id} is not incident to active submap"
+            )
+        reference_submap_id = existing_edge.other(old_bundle.submap_id)
+        reference_bundle = memory.graph.get_node(reference_submap_id)
+        pose_world = as_pose(world_pose)
+        source_local_pose = relative_pose(old_bundle.anchor_pose_world, pose_world)
+
+        old_bundle.freeze(step, frontiers_local)
+        memory.registry.register_submap_frontiers(
+            old_bundle.submap_id,
+            old_bundle.frozen_frontiers_local,
+            creation_step=int(step),
+            scores=frontier_scores,
+        )
+        new_bundle = SubmapBundle(
+            submap_id=self._new_submap_id(env),
+            floor_id=int(floor_id),
+            anchor_pose_world=pose_world,
+            creation_step=int(step),
+            payload=new_payload,
+            last_world_pose=pose_world,
+            parent_submap_id=old_bundle.submap_id,
+            reference_submap_id=reference_submap_id,
+        )
+        memory.graph.add_node(new_bundle)
+
+        reference_endpoint = existing_edge.endpoint_for(reference_submap_id)
+        relative_transform = (
+            np.linalg.inv(pose_to_matrix(reference_bundle.anchor_pose_world))
+            @ pose_to_matrix(new_bundle.anchor_pose_world)
+        )
+        revisit_edge = GatewayEdge(
+            edge_id=self._new_edge_id(env),
+            source_submap_id=reference_submap_id,
+            destination_submap_id=new_bundle.submap_id,
+            source_local_pose=reference_endpoint,
+            destination_local_pose=np.zeros(3, dtype=np.float64),
+            creation_step=int(step),
+            source_floor_id=reference_bundle.floor_id,
+            destination_floor_id=int(floor_id),
+            relative_transform=relative_transform,
+            confidence=float(existing_edge.confidence),
+            kind="revisit",
+            boundary_frames=tuple(dict(frame) for frame in boundary_frames[-4:]),
+        )
+        memory.graph.add_edge(revisit_edge)
+        existing_edge.traversal_count += 1
+        existing_edge.last_outcome = "gateway_reached"
+        memory.active_submap_id = new_bundle.submap_id
+        resolved = memory.registry.resolve_near_gateway(
+            old_bundle.submap_id,
+            source_local_pose[:2],
+            new_bundle.submap_id,
+            self.config.gateway_frontier_resolution_radius_m,
+            int(step),
+        )
+        memory.pending_decision = None
+        memory.events.append(
+            {
+                "event": "submap_revisit",
+                "step": int(step),
+                "source_submap_id": old_bundle.submap_id,
+                "destination_submap_id": new_bundle.submap_id,
+                "reference_submap_id": reference_submap_id,
+                "traversed_edge_id": gateway_edge_id,
+                "revisit_edge_id": revisit_edge.edge_id,
+                "resolved_gateway_frontiers": len(resolved),
+            }
+        )
+        return new_bundle, revisit_edge, resolved

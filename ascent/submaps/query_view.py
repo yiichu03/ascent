@@ -16,9 +16,29 @@ from ascent.submaps.types import FrontierRecord, GatewayEdge, SubmapGraph
 class RemoteFrontierPlan:
     frontier_id: str
     source_submap_id: str
-    next_gateway_edge_id: str
-    next_gateway_local_xy: np.ndarray
+    next_gateway_edge_id: Optional[str]
+    next_gateway_local_xy: Optional[np.ndarray]
     graph_hops: int
+    direct_frontier_local_xy: Optional[np.ndarray] = None
+
+    @property
+    def execution_local_xy(self) -> np.ndarray:
+        point = (
+            self.direct_frontier_local_xy
+            if self.direct_frontier_local_xy is not None
+            else self.next_gateway_local_xy
+        )
+        if point is None:
+            raise RuntimeError("remote frontier plan has no executable local goal")
+        return np.asarray(point, dtype=np.float64).copy()
+
+    @property
+    def execution_kind(self) -> str:
+        return (
+            "direct_frontier"
+            if self.direct_frontier_local_xy is not None
+            else "gateway"
+        )
 
 
 class SubmapQueryView:
@@ -47,9 +67,15 @@ class SubmapQueryView:
         )
 
     def remote_frontier_plans(self) -> List[RemoteFrontierPlan]:
-        candidates: List[Tuple[int, float, FrontierRecord, GatewayEdge]] = []
+        candidates: List[
+            Tuple[int, float, FrontierRecord, Optional[GatewayEdge]]
+        ] = []
+        active = self._graph.get_node(self.active_submap_id)
         for frontier in self._registry.eligible():
             if frontier.source_submap_id == self.active_submap_id:
+                continue
+            if active.reference_submap_id == frontier.source_submap_id:
+                candidates.append((0, -frontier.score, frontier, None))
                 continue
             path = self._graph.shortest_path(
                 self.active_submap_id, frontier.source_submap_id
@@ -73,11 +99,21 @@ class SubmapQueryView:
             RemoteFrontierPlan(
                 frontier_id=frontier.frontier_id,
                 source_submap_id=frontier.source_submap_id,
-                next_gateway_edge_id=edge.edge_id,
-                next_gateway_local_xy=edge.endpoint_for(
-                    self.active_submap_id
-                )[:2],
+                next_gateway_edge_id=None if edge is None else edge.edge_id,
+                next_gateway_local_xy=(
+                    None
+                    if edge is None
+                    else edge.endpoint_for(self.active_submap_id)[:2]
+                ),
                 graph_hops=hops,
+                direct_frontier_local_xy=(
+                    self.project_points_to_active(
+                        frontier.source_submap_id,
+                        frontier.local_xy.reshape(1, 2),
+                    )[0]
+                    if edge is None
+                    else None
+                ),
             )
             for hops, _, frontier, edge in candidates
         ]

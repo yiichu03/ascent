@@ -157,6 +157,9 @@ class SubmapBundle:
         self.frozen_frontiers_local = frontiers.copy()
         self.frozen_frontiers_local.setflags(write=False)
         self.anchor_pose_world.setflags(write=False)
+        for value in self.metadata.values():
+            if isinstance(value, np.ndarray):
+                value.setflags(write=False)
         self.state = SubmapState.FROZEN
         self.freeze_step = int(step)
 

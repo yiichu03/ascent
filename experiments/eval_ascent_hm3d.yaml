@@ -17,6 +17,25 @@ ascent_vo:
   checkpoint_dir: ${oc.env:ASCENT_VO_CHECKPOINT_DIR,../PointNav-VO/pretrained_ckpts/vo}
   diagnostics_path: ${oc.env:ASCENT_VO_DIAGNOSTICS_PATH,debug/ascent_vo_hm3d_diagnostics.jsonl}
 
+ascent_submaps:
+  enabled: ${oc.env:ASCENT_SUBMAP_ENABLED,false}
+  min_action_endpoints: 20
+  min_path_length_m: 1.5
+  overlap_threshold: 0.25
+  low_overlap_consecutive: 3
+  max_motion_budget_m: 8.0
+  rotation_weight_m_per_rad: 0.10
+  gateway_frontier_resolution_radius_m: 1.0
+  gateway_reached_radius_m: 0.9
+  overlap_sample_stride: 16
+  overlap_ray_samples: 4
+  overlap_explored_dilation_cells: 3
+  overlap_min_valid_samples: 32
+  overlap_min_explored_cells: 400
+  provisional_thresholds: true
+  allow_provisional_thresholds: ${oc.env:ASCENT_SUBMAP_ALLOW_PROVISIONAL,false}
+  diagnostics_path: ${oc.env:ASCENT_SUBMAP_DIAGNOSTICS_PATH,debug/ascent_submap_hm3d_diagnostics.jsonl}
+
 habitat:
   environment:
     iterator_options:
