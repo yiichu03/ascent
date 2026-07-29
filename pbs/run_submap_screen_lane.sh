@@ -73,6 +73,25 @@ command -v timeout >/dev/null || { echo missing_timeout; exit 21; }
   echo manifest_hash_mismatch
   exit 22
 }
+read -r SCENE_DATASET_CONFIG SCENE_DATASET_CONFIG_SHA256 < <(
+  "$ASCENT_PYTHON" - "$MANIFEST" <<'PY'
+import json
+import sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+print(
+    value["scene_dataset_config"],
+    value["scene_dataset_config_sha256"],
+)
+PY
+)
+[ -f "$SCENE_DATASET_CONFIG" ] || {
+  echo scene_dataset_config_missing
+  exit 21
+}
+[ "$(sha256sum "$SCENE_DATASET_CONFIG" | awk '{print $1}')" = "$SCENE_DATASET_CONFIG_SHA256" ] || {
+  echo scene_dataset_config_hash_mismatch
+  exit 22
+}
 [ "$(sha256sum "$CHECKPOINT_DIR/act_forward.pth" | awk '{print $1}')" = "$FORWARD_SHA256" ] || {
   echo forward_checkpoint_hash_mismatch
   exit 22
@@ -236,6 +255,8 @@ fi
   echo pointnav_vo_commit=$POINTNAV_VO_COMMIT
   echo manifest=$MANIFEST
   echo manifest_sha256=$EXPECTED_MANIFEST_SHA256
+  echo scene_dataset_config=$SCENE_DATASET_CONFIG
+  echo scene_dataset_config_sha256=$SCENE_DATASET_CONFIG_SHA256
   echo expected_chunks=$EXPECTED_CHUNKS
   echo expected_episodes=$EXPECTED_EPISODES
   echo screen_max_actions=$SCREEN_MAX_ACTIONS

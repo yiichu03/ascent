@@ -11,11 +11,11 @@ RESOURCE_ROOT=$PROJECT/external/ascent
 POINTNAV_VO_ROOT=$PROJECT/external/PointNav-VO
 CONTROLLER=$SOURCE_ROOT/pbs/run_submap_screen_3shared.pbs
 WORKER=$SOURCE_ROOT/pbs/run_submap_screen_lane.sh
-SMOKE_MANIFEST=/scratch/e1538633/liuyi/submap_v1_hm3d_smoke5_materialized_20260729_v1/chunk_manifest.json
-SMOKE_MANIFEST_SHA256=88584effa4d35881e03d34526c9b84cc7c7318164d352701de86474d981d10c3
-FULL_MANIFEST=/scratch/e1538633/liuyi/submap_v1_hm3d150_materialized_20260729_v1/chunk_manifest.json
-FULL_MANIFEST_SHA256=10836f27ca989650171b6bc251848e61894cb70904a9c8058ff4ced10f0c4dcd
-CALIBRATION_MANIFEST=/scratch/e1538633/liuyi/submap_v1_hm3d_calibration30_materialized_20260729_v1/chunk_manifest.json
+SMOKE_MANIFEST=/scratch/e1538633/liuyi/submap_v1_hm3d_smoke5_materialized_20260729_v2/chunk_manifest.json
+SMOKE_MANIFEST_SHA256=940be98d65939322d0fc72769e1c137a31175ad7983d1bcbacc8a6e52a09d611
+FULL_MANIFEST=/scratch/e1538633/liuyi/submap_v1_hm3d150_materialized_20260729_v2/chunk_manifest.json
+FULL_MANIFEST_SHA256=28880315e39639e9ab29e028be9a6a2ebf8c3b50881587acbf7e18cb7cb7e4e9
+CALIBRATION_MANIFEST=/scratch/e1538633/liuyi/submap_v1_hm3d_calibration30_materialized_20260729_v2/chunk_manifest.json
 SCRATCH_ROOT=/scratch/e1538633/liuyi
 ASCENT_PYTHON=$SCRATCH_ROOT/micromamba/envs/ascent_nav/bin/python
 LOG_ROOT=$SCRATCH_ROOT/submap_v1_pbs_logs
@@ -92,14 +92,20 @@ CONTROLLER_SHA256=$(sha256sum "$CONTROLLER" | awk '{print $1}')
 WORKER_SHA256=$(sha256sum "$WORKER" | awk '{print $1}')
 
 "$ASCENT_PYTHON" - "$MANIFEST" "$EXPECTED_CHUNKS" "$EXPECTED_EPISODES" <<'PY'
+import hashlib
 import json
 import sys
+from pathlib import Path
 value = json.load(open(sys.argv[1], encoding="utf-8"))
 expected_chunks, expected_episodes = int(sys.argv[2]), int(sys.argv[3])
 assert value["schema"] == "ascent_vo_submap_screen_materialized_v1"
 assert len(value["chunks"]) == expected_chunks
 assert value["episode_count"] == expected_episodes
 assert sum(chunk["episode_count"] for chunk in value["chunks"]) == expected_episodes
+scene_config = Path(value["scene_dataset_config"])
+assert scene_config.is_absolute() and scene_config.is_file()
+digest = hashlib.sha256(scene_config.read_bytes()).hexdigest()
+assert digest == value["scene_dataset_config_sha256"]
 PY
 
 if [ "$NO_QSUB" = 1 ]; then

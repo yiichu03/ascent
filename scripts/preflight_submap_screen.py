@@ -55,6 +55,25 @@ def main() -> None:
     ):
         errors.append("logical_identity")
     scene_root = args.scene_root.resolve()
+    scene_dataset_raw = manifest.get("scene_dataset_config")
+    scene_dataset_config = (
+        Path(scene_dataset_raw).resolve()
+        if isinstance(scene_dataset_raw, str) and scene_dataset_raw
+        else None
+    )
+    if (
+        scene_dataset_config is None
+        or not Path(scene_dataset_raw).is_absolute()
+        or not scene_dataset_config.is_file()
+    ):
+        errors.append("scene_dataset_config")
+    elif (
+        sha256(scene_dataset_config)
+        != manifest.get("scene_dataset_config_sha256")
+    ):
+        errors.append("scene_dataset_config_hash")
+    elif scene_dataset_config.parent != scene_root / "hm3d":
+        errors.append("scene_dataset_config_root")
     validated = []
     total = 0
     for chunk in chunks:
@@ -93,13 +112,32 @@ def main() -> None:
             row["logical_case_id"] for row in identities
         ]:
             errors.append(f"{chunk['chunk_id']}:declared_identity")
-        missing_scenes = [
-            str((scene_root / episode["scene_id"]).resolve())
+        if scene_dataset_config is not None and any(
+            Path(str(episode.get("scene_dataset_config", ""))).resolve()
+            != scene_dataset_config
             for episode in episodes
-            if not (scene_root / episode["scene_id"]).is_file()
+        ):
+            errors.append(
+                f"{chunk['chunk_id']}:episode_scene_dataset_config"
+            )
+        scene_paths = [
+            (scene_root / episode["scene_id"]).resolve()
+            for episode in episodes
         ]
-        if missing_scenes:
+        if any(not path.is_file() for path in scene_paths):
             errors.append(f"{chunk['chunk_id']}:scene_assets")
+        if any(
+            not path.with_name(
+                path.name.replace(".basis.glb", suffix)
+            ).is_file()
+            for path in scene_paths
+            for suffix in (
+                ".basis.navmesh",
+                ".semantic.glb",
+                ".semantic.txt",
+            )
+        ):
+            errors.append(f"{chunk['chunk_id']}:companion_assets")
         total += expected
         validated.append(
             {
@@ -117,6 +155,14 @@ def main() -> None:
         "schema": "ascent_vo_submap_screen_preflight_v1",
         "manifest": str(manifest_path),
         "manifest_sha256": sha256(manifest_path),
+        "scene_dataset_config": (
+            str(scene_dataset_config)
+            if scene_dataset_config is not None
+            else None
+        ),
+        "scene_dataset_config_sha256": manifest.get(
+            "scene_dataset_config_sha256"
+        ),
         "expected_episodes": args.expected_episodes,
         "expected_chunks": args.expected_chunks,
         "validated_episode_count": total,

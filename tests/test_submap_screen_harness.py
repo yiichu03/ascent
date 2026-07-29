@@ -13,6 +13,8 @@ from typing import Any, Iterable, Mapping
 ROOT = Path(__file__).resolve().parents[1]
 CALIBRATOR = ROOT / "scripts" / "calibrate_submap_thresholds.py"
 SUMMARIZER = ROOT / "scripts" / "summarize_submap_screen.py"
+MATERIALIZER = ROOT / "scripts" / "materialize_submap_screen.py"
+PREFLIGHT = ROOT / "scripts" / "preflight_submap_screen.py"
 FORWARD = "6b571bb717366f7d80f61e919b33a45ac2f45925201c4e3011b3239a2c42e586"
 TURN = "c469643f9ab35c9e1058f31fbb672a5fa3adf582987a4388bdd020dd89faf1d9"
 SOURCE = "f" * 40
@@ -37,6 +39,162 @@ def write_csv(
 
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def write_gzip_json(path: Path, value: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw = json.dumps(
+        value, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    with path.open("xb") as stream:
+        with gzip.GzipFile(
+            filename="", mode="wb", fileobj=stream, mtime=0
+        ) as handle:
+            handle.write(raw)
+
+
+def make_materializer_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
+    scene_root = tmp_path / "scenes"
+    scene_dir = scene_root / "hm3d" / "train" / "00000-scene"
+    scene_dir.mkdir(parents=True)
+    for name in (
+        "scene.basis.glb",
+        "scene.basis.navmesh",
+        "scene.semantic.glb",
+        "scene.semantic.txt",
+    ):
+        (scene_dir / name).write_text(name, encoding="utf-8")
+    scene_config = (
+        scene_root
+        / "hm3d"
+        / "hm3d_annotated_basis.scene_dataset_config.json"
+    )
+    scene_config.write_text('{"stages": {}}\n', encoding="utf-8")
+
+    source_root = tmp_path / "source" / "train.json.gz"
+    source_content = tmp_path / "source" / "content" / "scene.json.gz"
+    root_payload = {
+        "episodes": [],
+        "goals_by_category": {},
+        "category_to_task_category_id": {"chair": 0},
+    }
+    episode = {
+        "episode_id": "7",
+        "scene_id": "hm3d/train/00000-scene/scene.basis.glb",
+        "scene_dataset_config": "./data/wrong_relative_config.json",
+        "object_category": "chair",
+        "start_position": [0.0, 0.0, 0.0],
+        "start_rotation": [0.0, 0.0, 0.0, 1.0],
+        "goals": [],
+        "info": {"geodesic_distance": 4.0},
+    }
+    write_gzip_json(source_root, root_payload)
+    write_gzip_json(
+        source_content,
+        {
+            **root_payload,
+            "episodes": [episode],
+            "goals_by_category": {},
+        },
+    )
+    selection = tmp_path / "selection.csv"
+    row = {
+        "logical_case_id": "case_0",
+        "dataset": "hm3d",
+        "dataset_case_index": "0",
+        "episode_seed": "100",
+        "source_root_file": str(source_root),
+        "source_content_file": str(source_content),
+        "source_content_sha256": sha256(source_content),
+        "source_episode_index": "0",
+        "source_episode_id": "7",
+        "scene_id": episode["scene_id"],
+        "target_category": "chair",
+        "geodesic_distance": "4.0",
+    }
+    write_csv(selection, [row], list(row))
+    return selection, scene_root, scene_config
+
+
+def test_materialized_episode_binds_hashed_absolute_scene_config(
+    tmp_path: Path,
+) -> None:
+    selection, scene_root, scene_config = make_materializer_fixture(
+        tmp_path
+    )
+    output_root = tmp_path / "materialized"
+    subprocess.run(
+        [
+            sys.executable,
+            str(MATERIALIZER),
+            "--selection",
+            str(selection),
+            "--output-root",
+            str(output_root),
+            "--scene-dataset-config",
+            str(scene_config),
+            "--dataset",
+            "hm3d",
+            "--episodes",
+            "1",
+            "--chunk-size",
+            "1",
+            "--label",
+            "fixture",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    manifest_path = output_root / "chunk_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["scene_dataset_config"] == str(
+        scene_config.resolve()
+    )
+    assert manifest["scene_dataset_config_sha256"] == sha256(
+        scene_config
+    )
+    with gzip.open(
+        manifest["chunks"][0]["content_file"], "rt", encoding="utf-8"
+    ) as handle:
+        episode = json.load(handle)["episodes"][0]
+    assert episode["scene_dataset_config"] == str(scene_config.resolve())
+
+    preflight_output = tmp_path / "preflight.json"
+    subprocess.run(
+        [
+            sys.executable,
+            str(PREFLIGHT),
+            "--manifest",
+            str(manifest_path),
+            "--scene-root",
+            str(scene_root),
+            "--expected-episodes",
+            "1",
+            "--expected-chunks",
+            "1",
+            "--output-json",
+            str(preflight_output),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert json.loads(preflight_output.read_text())["status"] == "PASS"
+
+
+def test_controller_requires_synchronous_task_reset_preflight() -> None:
+    checker = (
+        ROOT / "scripts" / "check_submap_task_reset.py"
+    ).read_text(encoding="utf-8")
+    controller = (
+        ROOT / "pbs" / "run_submap_screen_3shared.pbs"
+    ).read_text(encoding="utf-8")
+    assert "with habitat.Env(" in checker
+    assert "config.habitat.environment.iterator_options.cycle = False" in checker
+    assert 'screen_task_reset.json' in controller
+    assert 'calibration_task_reset.json' in controller
+    assert '"$TASK_RESET_CHECK"' in controller
 
 
 def vo_metadata() -> dict[str, Any]:

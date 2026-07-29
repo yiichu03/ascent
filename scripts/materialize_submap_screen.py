@@ -130,6 +130,7 @@ def materialize_chunk(
     *,
     output_root: Path,
     chunk_id: str,
+    scene_dataset_config: Path,
     verified_hashes: Dict[str, str],
 ) -> Dict[str, Any]:
     dataset = rows[0]["dataset"]
@@ -182,6 +183,13 @@ def materialize_chunk(
                 verified_episode(row, source, verified_hashes)
             )
             episode["episode_id"] = row["logical_case_id"]
+            # Habitat Env intentionally replaces simulator.scene_dataset with
+            # this per-episode value.  The upstream HM3D JSON stores a path
+            # relative to the checkout's ./data directory, which is not a
+            # portable invariant for sibling worktrees.  Bind the episode to
+            # the exact, hash-checked scene-dataset config instead of relying
+            # on an untracked local symlink or Habitat's silent fallback.
+            episode["scene_dataset_config"] = str(scene_dataset_config)
             combined_episodes.append(episode)
             identity_rows.append(
                 {
@@ -225,6 +233,11 @@ def materialize(args: argparse.Namespace) -> Dict[str, Any]:
         start_index=args.start_index,
         episodes=args.episodes,
     )
+    scene_dataset_config = args.scene_dataset_config.resolve()
+    if not scene_dataset_config.is_file():
+        raise ValueError(
+            f"missing scene-dataset config: {scene_dataset_config}"
+        )
     output_root = args.output_root.resolve()
     output_root.mkdir(parents=True, exist_ok=False)
     verified_hashes: Dict[str, str] = {}
@@ -239,6 +252,7 @@ def materialize(args: argparse.Namespace) -> Dict[str, Any]:
                 chunk_rows,
                 output_root=output_root,
                 chunk_id=chunk_id,
+                scene_dataset_config=scene_dataset_config,
                 verified_hashes=verified_hashes,
             )
         )
@@ -250,6 +264,8 @@ def materialize(args: argparse.Namespace) -> Dict[str, Any]:
         "selection_path": str(selection),
         "selection_sha256": sha256(selection),
         "selection_start_index": args.start_index,
+        "scene_dataset_config": str(scene_dataset_config),
+        "scene_dataset_config_sha256": sha256(scene_dataset_config),
         "episode_count": len(rows),
         "chunk_size": args.chunk_size,
         "chunk_count": len(chunks),
@@ -267,6 +283,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--selection", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument(
+        "--scene-dataset-config", type=Path, required=True
+    )
     parser.add_argument("--dataset", choices=("hm3d", "mp3d"), required=True)
     parser.add_argument("--episodes", type=int, required=True)
     parser.add_argument("--start-index", type=int, default=0)

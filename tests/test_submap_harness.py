@@ -19,6 +19,10 @@ def test_materializer_is_one_copy_deterministic_and_identity_bound(
 ) -> None:
     source_root = tmp_path / "source_root.json.gz"
     source_content = tmp_path / "source_content.json.gz"
+    scene_dataset_config = tmp_path / "hm3d.scene_dataset_config.json"
+    scene_dataset_config.write_text(
+        '{"stages": {}}\n', encoding="utf-8"
+    )
     base = {"episodes": [], "goals_by_category": {}, "config": "synthetic"}
     episode = {
         "episode_id": "7",
@@ -75,6 +79,7 @@ def test_materializer_is_one_copy_deterministic_and_identity_bound(
         SimpleNamespace(
             selection=selection,
             output_root=output,
+            scene_dataset_config=scene_dataset_config,
             dataset="hm3d",
             start_index=0,
             episodes=1,
@@ -88,6 +93,12 @@ def test_materializer_is_one_copy_deterministic_and_identity_bound(
     content = read_gzip_json(chunk["content_file"])
     assert len(content["episodes"]) == 1
     assert content["episodes"][0]["episode_id"] == "hm3d_train_0000"
+    assert content["episodes"][0]["scene_dataset_config"] == str(
+        scene_dataset_config.resolve()
+    )
+    assert result["scene_dataset_config_sha256"] == sha256(
+        scene_dataset_config
+    )
     assert content["goals_by_category"]
     with open(chunk["identity_path"], newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))

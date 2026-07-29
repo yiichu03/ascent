@@ -15,6 +15,7 @@ POINTNAV_VO_ROOT=$PROJECT/external/PointNav-VO
 WORKER=$SOURCE_ROOT/pbs/run_submap_screen_lane.sh
 PREFLIGHT=$SOURCE_ROOT/scripts/preflight_submap_screen.py
 LOADING_CHECK=$SOURCE_ROOT/scripts/check_submap_habitat_loading.py
+TASK_RESET_CHECK=$SOURCE_ROOT/scripts/check_submap_task_reset.py
 SUMMARIZER=$SOURCE_ROOT/scripts/summarize_submap_screen.py
 CALIBRATOR=$SOURCE_ROOT/scripts/calibrate_submap_thresholds.py
 PORT_SELECTOR=$SOURCE_ROOT/scripts/select_submap_port_block.py
@@ -50,6 +51,7 @@ case "$MODE" in
     [ "$EXPECTED_EPISODES" = 5 ] || { echo smoke_episode_contract; exit 20; }
     LANE_COUNT=1
     DEADLINE_EPOCH=$((JOB_START_EPOCH + 34 * 3600))
+    TASK_RESET_TIMEOUT_SECONDS=1800
     [ -f "$CALIBRATION_MANIFEST" ] || {
       echo smoke_calibration_manifest_missing
       exit 21
@@ -64,6 +66,7 @@ case "$MODE" in
     [ "$EXPECTED_EPISODES" = 150 ] || { echo full_episode_contract; exit 20; }
     LANE_COUNT=3
     DEADLINE_EPOCH=$((JOB_START_EPOCH + 88 * 3600))
+    TASK_RESET_TIMEOUT_SECONDS=3600
     [ -f "$CALIBRATION_JSON" ] || {
       echo full_calibration_json_missing
       exit 21
@@ -77,9 +80,11 @@ case "$MODE" in
 esac
 
 for path in "$MANIFEST" "$WORKER" "$PREFLIGHT" "$LOADING_CHECK" \
+  "$TASK_RESET_CHECK" \
   "$SUMMARIZER" "$CALIBRATOR" "$PORT_SELECTOR"; do
   [ -f "$path" ] || { echo "missing_file=$path"; exit 21; }
 done
+command -v timeout >/dev/null || { echo missing_timeout; exit 21; }
 [ "$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')" = "$CONTROLLER_SHA256" ] || {
   echo controller_hash_mismatch
   exit 22
@@ -131,6 +136,15 @@ export MPLCONFIGDIR=$RUN_ROOT/mpl_config
   --scene-root "$HM3D_SCENES_ROOT" \
   --output-json "$RUN_ROOT/checks/screen_habitat_loading.json" \
   > "$RUN_ROOT/checks/screen_habitat_loading.log"
+timeout --signal=TERM --kill-after=30s \
+  "${TASK_RESET_TIMEOUT_SECONDS}s" \
+  "$ASCENT_PYTHON" "$TASK_RESET_CHECK" \
+    --manifest "$MANIFEST" \
+    --config-dir "$SOURCE_ROOT/experiments" \
+    --scene-root "$HM3D_SCENES_ROOT" \
+    --gpu-device-id 0 \
+    --output-json "$RUN_ROOT/checks/screen_task_reset.json" \
+    > "$RUN_ROOT/checks/screen_task_reset.log" 2>&1
 if [ "$MODE" = smoke ]; then
   "$ASCENT_PYTHON" "$PREFLIGHT" \
     --manifest "$CALIBRATION_MANIFEST" \
@@ -145,6 +159,15 @@ if [ "$MODE" = smoke ]; then
     --scene-root "$HM3D_SCENES_ROOT" \
     --output-json "$RUN_ROOT/checks/calibration_habitat_loading.json" \
     > "$RUN_ROOT/checks/calibration_habitat_loading.log"
+  timeout --signal=TERM --kill-after=30s \
+    "${TASK_RESET_TIMEOUT_SECONDS}s" \
+    "$ASCENT_PYTHON" "$TASK_RESET_CHECK" \
+      --manifest "$CALIBRATION_MANIFEST" \
+      --config-dir "$SOURCE_ROOT/experiments" \
+      --scene-root "$HM3D_SCENES_ROOT" \
+      --gpu-device-id 0 \
+      --output-json "$RUN_ROOT/checks/calibration_task_reset.json" \
+      > "$RUN_ROOT/checks/calibration_task_reset.log" 2>&1
 fi
 
 BASE_PORT_ROOT=$(
@@ -167,6 +190,8 @@ BASE_PORT_ROOT=$(
   echo manifest_sha256=$MANIFEST_SHA256
   echo expected_chunks=$EXPECTED_CHUNKS
   echo expected_episodes=$EXPECTED_EPISODES
+  echo task_reset_preflight=real_synchronous_objectnav_reset
+  echo task_reset_timeout_seconds=$TASK_RESET_TIMEOUT_SECONDS
   echo lane_count=$LANE_COUNT
   echo resource_contract=one_H200_up_to_three_independent_service_lanes
   echo pose_source=zhao_rgbd_2021

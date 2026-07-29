@@ -40,6 +40,9 @@ def main() -> None:
     if manifest.get("schema") != "ascent_vo_submap_screen_materialized_v1":
         raise ValueError("unexpected materialized manifest schema")
     scene_root = args.scene_root.resolve()
+    scene_dataset_config = Path(
+        manifest["scene_dataset_config"]
+    ).resolve()
     register_hydra_plugin(HabitatBaselinesConfigPlugin)
     results = []
     for chunk in manifest["chunks"]:
@@ -73,6 +76,14 @@ def main() -> None:
         if runtime_ids != [str(index) for index in range(expected_count)]:
             raise ValueError(
                 f"{chunk['chunk_id']} runtime ID rewrite changed"
+            )
+        if any(
+            Path(episode.scene_dataset_config).resolve()
+            != scene_dataset_config
+            for episode in loaded.episodes
+        ):
+            raise ValueError(
+                f"{chunk['chunk_id']} scene-dataset config changed"
             )
         with Path(chunk["identity_path"]).open(
             newline="", encoding="utf-8"
@@ -113,6 +124,7 @@ def main() -> None:
         "schema": "ascent_vo_submap_habitat_loading_v1",
         "chunk_count": len(results),
         "episode_count": sum(row["episode_count"] for row in results),
+        "scene_dataset_config": str(scene_dataset_config),
         "chunks": results,
         "status": "PASS",
     }
