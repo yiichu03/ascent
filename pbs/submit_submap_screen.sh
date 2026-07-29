@@ -3,43 +3,53 @@
 
 set -euo pipefail
 
-DATASET=${1:?usage: submit_submap_screen.sh hm3d|mp3d smoke|full calibration_json_or_dash [auto|autox] [stamp]}
-MODE=${2:?usage: submit_submap_screen.sh hm3d|mp3d smoke|full calibration_json_or_dash [auto|autox] [stamp]}
+USAGE='submit_submap_screen.sh hm3d|mp3d smoke|full calibration_json_or_dash [auto|autox] [stamp] [shard_index] [shard_count]'
+DATASET=${1:?usage: $USAGE}
+MODE=${2:?usage: $USAGE}
 CALIBRATION_ARG=${3:--}
+SHARD_INDEX=${6:-}
+SHARD_COUNT=${7:-}
 NO_QSUB=${ASCENT_SUBMAP_NO_QSUB:-0}
 PROJECT=/scratch/e1538633/liuyi/drift-aware-submap-exploration
 SOURCE_ROOT=$PROJECT/external/ascent_vo_submap_v1
 RESOURCE_ROOT=$PROJECT/external/ascent
 POINTNAV_VO_ROOT=$PROJECT/external/PointNav-VO
+ARTIFACT_ROOT=${ASCENT_SUBMAP_ARTIFACT_ROOT:-$PROJECT/artifacts/objectnav/submap_v1}
+MANIFEST_ROOT=$ARTIFACT_ROOT/manifests
 CONTROLLER=$SOURCE_ROOT/pbs/run_submap_screen_3shared.pbs
 WORKER=$SOURCE_ROOT/pbs/run_submap_screen_lane.sh
-CALIBRATION_MANIFEST=/scratch/e1538633/liuyi/submap_v1_hm3d_calibration30_materialized_20260729_v3/chunk_manifest.json
+CALIBRATION_MANIFEST=$MANIFEST_ROOT/hm3d_calibration30_relocated.json
+CALIBRATION_MANIFEST_EXPECTED_SHA256=54c51cf8632aaffe25deb9a41e0b42594a1dc6b8204a8b56afd87fcf38561c10
 SCRATCH_ROOT=/scratch/e1538633/liuyi
 ASCENT_PYTHON=$SCRATCH_ROOT/micromamba/envs/ascent_nav/bin/python
 
 case "$DATASET" in
   hm3d)
-    SMOKE_MANIFEST=/scratch/e1538633/liuyi/submap_v1_hm3d_smoke5_materialized_20260729_v3/chunk_manifest.json
-    SMOKE_MANIFEST_SHA256=bd94492db0a3fb6ed542745e592cefdfb0e748025e8fd037764967c077521358
-    FULL_MANIFEST=/scratch/e1538633/liuyi/submap_v1_hm3d150_materialized_20260729_v3/chunk_manifest.json
-    FULL_MANIFEST_SHA256=cfbb66998ac56c4fb574e9573844828bc45ee8d25db139ea1af6a0c26ce3192d
+    SMOKE_MANIFEST=$MANIFEST_ROOT/hm3d_smoke5_relocated.json
+    SMOKE_MANIFEST_SHA256=5166c2ab2000799a05c30aaa56e11ccf828b20c66ae2f4fc8a01065f53d49538
+    FULL_MANIFEST=$MANIFEST_ROOT/hm3d150_relocated.json
+    FULL_MANIFEST_SHA256=23297001bb08e22c48e073d4438918b74973712e5cbe99b06a9e62b4cd3ccc02
     ;;
   mp3d)
-    SMOKE_MANIFEST=/scratch/e1538633/liuyi/submap_v1_mp3d_smoke5_materialized_20260729_v1/chunk_manifest.json
-    SMOKE_MANIFEST_SHA256=9610288409103a5590408313586530622b95fe0cdff9491fa80ea6c2a84bff52
-    FULL_MANIFEST=/scratch/e1538633/liuyi/submap_v1_mp3d150_materialized_20260729_v1/chunk_manifest.json
-    FULL_MANIFEST_SHA256=61bc1ee4478fbaf66ee681e5ec091993856ac3de324b833a3a73ee24f522865a
+    SMOKE_MANIFEST=$MANIFEST_ROOT/mp3d_smoke5_relocated.json
+    SMOKE_MANIFEST_SHA256=7b31e958a74641c986d373b4693bc691c2698b2ca186012f918d56f57f3f015a
+    FULL_MANIFEST=$MANIFEST_ROOT/mp3d150_relocated.json
+    FULL_MANIFEST_SHA256=12632eee47c8274a6df8088f4423ca321789ebc495098fba8839460c5f98cc79
     ;;
   *) echo "invalid_dataset=$DATASET"; exit 20 ;;
 esac
-LOG_ROOT=$SCRATCH_ROOT/submap_v1_pbs_logs
-SUBMISSION_ROOT=$SCRATCH_ROOT/submap_v1_submissions
+LOG_ROOT=$ARTIFACT_ROOT/pbs_logs
+SUBMISSION_ROOT=$ARTIFACT_ROOT/submissions
 CALIBRATION_JSON=""
 CALIBRATION_JSON_SHA256=""
 CALIBRATION_MANIFEST_SHA256=""
 
 case "$MODE" in
   smoke)
+    [ -z "$SHARD_INDEX" ] && [ -z "$SHARD_COUNT" ] || {
+      echo smoke_does_not_accept_shard_arguments
+      exit 20
+    }
     QUEUE=${4:-autox}
     STAMP=${5:-20260729_submap_v1_${DATASET}_unified_smoke_first_attempt}
     MANIFEST=$SMOKE_MANIFEST
@@ -59,6 +69,11 @@ case "$MODE" in
       CALIBRATION_MANIFEST_SHA256=$(
         sha256sum "$CALIBRATION_MANIFEST" | awk '{print $1}'
       )
+      [ "$CALIBRATION_MANIFEST_SHA256" = \
+        "$CALIBRATION_MANIFEST_EXPECTED_SHA256" ] || {
+        echo calibration_manifest_hash_mismatch
+        exit 22
+      }
     else
       CALIBRATION_JSON=$CALIBRATION_ARG
       CALIBRATION_MANIFEST=""
@@ -71,6 +86,57 @@ case "$MODE" in
     MANIFEST_SHA256=$FULL_MANIFEST_SHA256
     EXPECTED_CHUNKS=5
     EXPECTED_EPISODES=150
+    if [ -n "$SHARD_INDEX" ] || [ -n "$SHARD_COUNT" ]; then
+      [ "$SHARD_COUNT" = 4 ] || {
+        echo shard_count_must_be_4
+        exit 20
+      }
+      case "$DATASET:$SHARD_INDEX" in
+        hm3d:0)
+          MANIFEST=$MANIFEST_ROOT/hm3d150_shard0of4.json
+          MANIFEST_SHA256=b6e8a4ac3c006358fb2dd04b90726f32e5bfe771319350443d7668446f0f41d6
+          ;;
+        hm3d:1)
+          MANIFEST=$MANIFEST_ROOT/hm3d150_shard1of4.json
+          MANIFEST_SHA256=d0b0b9145e8195d071085e9470f136d7420871d552d7ce8f71a2df3c67dca56c
+          ;;
+        hm3d:2)
+          MANIFEST=$MANIFEST_ROOT/hm3d150_shard2of4.json
+          MANIFEST_SHA256=9cb69163e4b77e942b8c47ae4e491c2fe0ce805024d27861dc9626299c102f17
+          ;;
+        hm3d:3)
+          MANIFEST=$MANIFEST_ROOT/hm3d150_shard3of4.json
+          MANIFEST_SHA256=17186739f6dfa865614b0565cabdb4ad3d7aded4ca3320b0a6c210e61cdc9bb2
+          ;;
+        mp3d:0)
+          MANIFEST=$MANIFEST_ROOT/mp3d150_shard0of4.json
+          MANIFEST_SHA256=4c3c549be9515d486fe9f17317ce34915559f411703f44256bd116f414caa7b4
+          ;;
+        mp3d:1)
+          MANIFEST=$MANIFEST_ROOT/mp3d150_shard1of4.json
+          MANIFEST_SHA256=4f2c9c60aaa8b35f92e7fb33b77a6405d1beaab4555c7f109ccc8632a0ea53bc
+          ;;
+        mp3d:2)
+          MANIFEST=$MANIFEST_ROOT/mp3d150_shard2of4.json
+          MANIFEST_SHA256=29ab581d29c141ad70b40660494fdd76e6065bf7f5ff2ccc3c2785996810ed80
+          ;;
+        mp3d:3)
+          MANIFEST=$MANIFEST_ROOT/mp3d150_shard3of4.json
+          MANIFEST_SHA256=b02dfc71d26c3046a38be0472a72fdb90774a42d080e6c33ba7015d3684ab156
+          ;;
+        *) echo shard_index_must_be_0_to_3; exit 20 ;;
+      esac
+      if [ "$SHARD_INDEX" = 0 ]; then
+        EXPECTED_CHUNKS=2
+        EXPECTED_EPISODES=60
+      else
+        EXPECTED_CHUNKS=1
+        EXPECTED_EPISODES=30
+      fi
+    else
+      SHARD_INDEX=""
+      SHARD_COUNT=""
+    fi
     WALLTIME=96:00:00
     CALIBRATION_JSON=$CALIBRATION_ARG
     CALIBRATION_MANIFEST=""
@@ -146,12 +212,15 @@ print(json.dumps({
     "status": "PASS",
     "dataset": "$DATASET",
     "mode": "$MODE",
+    "shard_index": "$SHARD_INDEX" or None,
+    "shard_count": "$SHARD_COUNT" or None,
     "queue_request": "$QUEUE",
     "walltime": "$WALLTIME",
     "stamp": "$STAMP",
     "source_commit": "$SOURCE_COMMIT",
     "resource_commit": "$RESOURCE_COMMIT",
     "pointnav_vo_commit": "$POINTNAV_VO_COMMIT",
+    "artifact_root": "$ARTIFACT_ROOT",
     "manifest": "$MANIFEST",
     "manifest_sha256": "$MANIFEST_SHA256",
     "expected_chunks": $EXPECTED_CHUNKS,
@@ -180,6 +249,9 @@ SUBMISSION_JSON=$SUBMISSION_ROOT/submap_${DATASET}_${MODE}_${STAMP}.json
 ENVIRONMENT=$(IFS=,; echo \
 "ASCENT_SUBMAP_DATASET=$DATASET,\
 ASCENT_SUBMAP_MODE=$MODE,\
+ASCENT_SUBMAP_ARTIFACT_ROOT=$ARTIFACT_ROOT,\
+ASCENT_SUBMAP_SHARD_INDEX=$SHARD_INDEX,\
+ASCENT_SUBMAP_SHARD_COUNT=$SHARD_COUNT,\
 ASCENT_SUBMAP_MANIFEST=$MANIFEST,\
 ASCENT_SUBMAP_MANIFEST_SHA256=$MANIFEST_SHA256,\
 ASCENT_SUBMAP_EXPECTED_CHUNKS=$EXPECTED_CHUNKS,\
@@ -208,12 +280,15 @@ output = {
     "job_id": "$JOB_ID",
     "dataset": "$DATASET",
     "mode": "$MODE",
+    "shard_index": "$SHARD_INDEX" or None,
+    "shard_count": "$SHARD_COUNT" or None,
     "queue_request": "$QUEUE",
     "walltime": "$WALLTIME",
     "stamp": "$STAMP",
     "source_commit": "$SOURCE_COMMIT",
     "resource_commit": "$RESOURCE_COMMIT",
     "pointnav_vo_commit": "$POINTNAV_VO_COMMIT",
+    "artifact_root": "$ARTIFACT_ROOT",
     "manifest": "$MANIFEST",
     "manifest_sha256": "$MANIFEST_SHA256",
     "expected_chunks": $EXPECTED_CHUNKS,

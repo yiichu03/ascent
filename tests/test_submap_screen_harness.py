@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CALIBRATOR = ROOT / "scripts" / "calibrate_submap_thresholds.py"
 SUMMARIZER = ROOT / "scripts" / "summarize_submap_screen.py"
 MATERIALIZER = ROOT / "scripts" / "materialize_submap_screen.py"
+MANIFEST_DERIVER = ROOT / "scripts" / "derive_submap_manifest.py"
 PREFLIGHT = ROOT / "scripts" / "preflight_submap_screen.py"
 FORWARD = "6b571bb717366f7d80f61e919b33a45ac2f45925201c4e3011b3239a2c42e586"
 TURN = "c469643f9ab35c9e1058f31fbb672a5fa3adf582987a4388bdd020dd89faf1d9"
@@ -381,12 +382,107 @@ def test_mp3d_materialized_assets_pass_dataset_specific_preflight(
     assert result["status"] == "PASS"
 
 
+def test_manifest_derivation_repairs_relocated_chunk_paths(
+    tmp_path: Path,
+) -> None:
+    selection, scene_root, scene_config = make_materializer_fixture(
+        tmp_path
+    )
+    original_root = tmp_path / "original_materialized"
+    subprocess.run(
+        [
+            sys.executable,
+            str(MATERIALIZER),
+            "--selection",
+            str(selection),
+            "--output-root",
+            str(original_root),
+            "--scene-dataset-config",
+            str(scene_config),
+            "--dataset",
+            "hm3d",
+            "--episodes",
+            "1",
+            "--chunk-size",
+            "1",
+            "--label",
+            "fixture",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    relocated_root = tmp_path / "relocated_materialized"
+    original_root.rename(relocated_root)
+    source_manifest = relocated_root / "chunk_manifest.json"
+    stale = json.loads(source_manifest.read_text())
+    assert not Path(stale["chunks"][0]["data_path"]).exists()
+
+    derived_manifest = tmp_path / "derived" / "shard0.json"
+    subprocess.run(
+        [
+            sys.executable,
+            str(MANIFEST_DERIVER),
+            "--source-manifest",
+            str(source_manifest),
+            "--materialized-root",
+            str(relocated_root),
+            "--output-manifest",
+            str(derived_manifest),
+            "--chunk-indices",
+            "0",
+            "--variant",
+            "relocated_shard0",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    derived = json.loads(derived_manifest.read_text())
+    assert derived["episode_count"] == 1
+    assert derived["chunk_count"] == 1
+    assert derived["logical_case_ids"] == ["case_0"]
+    assert derived["derivation"]["source_chunk_indices"] == [0]
+    assert (
+        derived["derivation"]["source_manifest_sha256"]
+        == sha256(source_manifest)
+    )
+    assert Path(derived["chunks"][0]["data_path"]).is_file()
+
+    preflight_output = tmp_path / "derived_preflight.json"
+    subprocess.run(
+        [
+            sys.executable,
+            str(PREFLIGHT),
+            "--manifest",
+            str(derived_manifest),
+            "--scene-root",
+            str(scene_root),
+            "--expected-dataset",
+            "hm3d",
+            "--expected-episodes",
+            "1",
+            "--expected-chunks",
+            "1",
+            "--output-json",
+            str(preflight_output),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert json.loads(preflight_output.read_text())["status"] == "PASS"
+
+
 def test_unified_controller_binds_dataset_and_real_reset_contracts() -> None:
     checker = (
         ROOT / "scripts" / "check_submap_task_reset.py"
     ).read_text(encoding="utf-8")
     controller = (
         ROOT / "pbs" / "run_submap_screen_3shared.pbs"
+    ).read_text(encoding="utf-8")
+    submitter = (
+        ROOT / "pbs" / "submit_submap_screen.sh"
     ).read_text(encoding="utf-8")
     assert "with habitat.Env(" in checker
     assert 'config_name=f"eval_ascent_{dataset}.yaml"' in checker
@@ -401,6 +497,23 @@ def test_unified_controller_binds_dataset_and_real_reset_contracts() -> None:
     assert "echo calibration_contract=$CALIBRATION_CONTRACT" in controller
     assert 'SUMMARY_ARGS+=(--calibration-json "$CALIBRATION_OUTPUT")' in controller
     assert '"$TASK_RESET_CHECK"' in controller
+    assert (
+        "ARTIFACT_ROOT=${ASCENT_SUBMAP_ARTIFACT_ROOT:-"
+        "$PROJECT/artifacts/objectnav/submap_v1}"
+    ) in controller
+    assert (
+        "RUN_ROOT=$ARTIFACT_ROOT/runs/submap_${DATASET}_${MODE}_"
+    ) in controller
+    assert "artifact_root=$ARTIFACT_ROOT" in controller
+    assert "MANIFEST_ROOT=$ARTIFACT_ROOT/manifests" in submitter
+    assert "LOG_ROOT=$ARTIFACT_ROOT/pbs_logs" in submitter
+    assert "SUBMISSION_ROOT=$ARTIFACT_ROOT/submissions" in submitter
+    assert "ASCENT_SUBMAP_ARTIFACT_ROOT=$ARTIFACT_ROOT" in submitter
+    assert "ASCENT_SUBMAP_SHARD_INDEX=$SHARD_INDEX" in submitter
+    assert "ASCENT_SUBMAP_SHARD_COUNT=$SHARD_COUNT" in submitter
+    assert "LANE_COUNT=$EXPECTED_CHUNKS" in controller
+    assert "full_shard_episode_contract" in controller
+    assert "/scratch/e1538633/liuyi/submap_v1_" not in submitter
     assert "external/ascent_vo_submap_v1_mp3d" not in controller
 
 

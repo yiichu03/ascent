@@ -12,6 +12,7 @@ PROJECT=/scratch/e1538633/liuyi/drift-aware-submap-exploration
 SOURCE_ROOT=$PROJECT/external/ascent_vo_submap_v1
 RESOURCE_ROOT=$PROJECT/external/ascent
 POINTNAV_VO_ROOT=$PROJECT/external/PointNav-VO
+ARTIFACT_ROOT=${ASCENT_SUBMAP_ARTIFACT_ROOT:-$PROJECT/artifacts/objectnav/submap_v1}
 WORKER=$SOURCE_ROOT/pbs/run_submap_screen_lane.sh
 PREFLIGHT=$SOURCE_ROOT/scripts/preflight_submap_screen.py
 LOADING_CHECK=$SOURCE_ROOT/scripts/check_submap_habitat_loading.py
@@ -22,6 +23,8 @@ PORT_SELECTOR=$SOURCE_ROOT/scripts/select_submap_port_block.py
 
 DATASET=${ASCENT_SUBMAP_DATASET:?ASCENT_SUBMAP_DATASET is required}
 MODE=${ASCENT_SUBMAP_MODE:?ASCENT_SUBMAP_MODE is required}
+SHARD_INDEX=${ASCENT_SUBMAP_SHARD_INDEX:-}
+SHARD_COUNT=${ASCENT_SUBMAP_SHARD_COUNT:-}
 MANIFEST=${ASCENT_SUBMAP_MANIFEST:?ASCENT_SUBMAP_MANIFEST is required}
 MANIFEST_SHA256=${ASCENT_SUBMAP_MANIFEST_SHA256:?ASCENT_SUBMAP_MANIFEST_SHA256 is required}
 EXPECTED_CHUNKS=${ASCENT_SUBMAP_EXPECTED_CHUNKS:?ASCENT_SUBMAP_EXPECTED_CHUNKS is required}
@@ -64,10 +67,14 @@ SCRATCH_ROOT=/scratch/e1538633/liuyi
 ASCENT_ENV=$SCRATCH_ROOT/micromamba/envs/ascent_nav
 ASCENT_PYTHON=$ASCENT_ENV/bin/python
 JOB_START_EPOCH=$(date +%s)
-RUN_ROOT=$SCRATCH_ROOT/submap_v1_runs/submap_${DATASET}_${MODE}_${PBS_JOBID:-manual}_${STAMP}
+RUN_ROOT=$ARTIFACT_ROOT/runs/submap_${DATASET}_${MODE}_${PBS_JOBID:-manual}_${STAMP}
 
 case "$MODE" in
   smoke)
+    [ -z "$SHARD_INDEX" ] && [ -z "$SHARD_COUNT" ] || {
+      echo smoke_shard_contract
+      exit 20
+    }
     [ "$EXPECTED_CHUNKS" = 1 ] || { echo smoke_chunk_contract; exit 20; }
     [ "$EXPECTED_EPISODES" = 5 ] || { echo smoke_episode_contract; exit 20; }
     LANE_COUNT=1
@@ -85,9 +92,46 @@ case "$MODE" in
     fi
     ;;
   full)
-    [ "$EXPECTED_CHUNKS" = 5 ] || { echo full_chunk_contract; exit 20; }
-    [ "$EXPECTED_EPISODES" = 150 ] || { echo full_episode_contract; exit 20; }
-    LANE_COUNT=3
+    if [ -n "$SHARD_INDEX" ] || [ -n "$SHARD_COUNT" ]; then
+      [ "$SHARD_COUNT" = 4 ] || {
+        echo full_shard_count_contract
+        exit 20
+      }
+      case "$SHARD_INDEX" in
+        0)
+          [ "$EXPECTED_CHUNKS" = 2 ] || {
+            echo full_shard_chunk_contract
+            exit 20
+          }
+          [ "$EXPECTED_EPISODES" = 60 ] || {
+            echo full_shard_episode_contract
+            exit 20
+          }
+          ;;
+        1|2|3)
+          [ "$EXPECTED_CHUNKS" = 1 ] || {
+            echo full_shard_chunk_contract
+            exit 20
+          }
+          [ "$EXPECTED_EPISODES" = 30 ] || {
+            echo full_shard_episode_contract
+            exit 20
+          }
+          ;;
+        *) echo full_shard_index_contract; exit 20 ;;
+      esac
+      LANE_COUNT=$EXPECTED_CHUNKS
+    else
+      [ "$EXPECTED_CHUNKS" = 5 ] || {
+        echo full_chunk_contract
+        exit 20
+      }
+      [ "$EXPECTED_EPISODES" = 150 ] || {
+        echo full_episode_contract
+        exit 20
+      }
+      LANE_COUNT=3
+    fi
     DEADLINE_EPOCH=$((JOB_START_EPOCH + 88 * 3600))
     TASK_RESET_TIMEOUT_SECONDS=3600
     ;;
@@ -215,6 +259,8 @@ BASE_PORT_ROOT=$(
   echo host=$(hostname)
   echo start_time=$(date -Is)
   echo mode=$MODE
+  echo shard_index=$SHARD_INDEX
+  echo shard_count=$SHARD_COUNT
   echo dataset=$DATASET
   echo source_root=$SOURCE_ROOT
   echo source_commit=$SOURCE_COMMIT
@@ -229,6 +275,7 @@ BASE_PORT_ROOT=$(
   echo calibration_json_sha256=$CALIBRATION_JSON_SHA256
   echo run_calibration=$RUN_CALIBRATION
   echo calibration_contract=$CALIBRATION_CONTRACT
+  echo artifact_root=$ARTIFACT_ROOT
   echo task_reset_preflight=real_synchronous_objectnav_reset
   echo task_reset_timeout_seconds=$TASK_RESET_TIMEOUT_SECONDS
   echo lane_count=$LANE_COUNT
