@@ -9,7 +9,6 @@ import csv
 import gzip
 import hashlib
 import json
-from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Sequence
 
@@ -150,15 +149,12 @@ def materialize_chunk(
     combined_episodes: List[Dict[str, Any]] = []
     combined_goals: Dict[str, Any] = {}
     identity_rows: List[Dict[str, Any]] = []
-    rows_by_source: Dict[str, List[Mapping[str, str]]] = defaultdict(
-        list
-    )
-    for row in rows:
-        rows_by_source[row["source_content_file"]].append(row)
-
-    runtime_id = 0
-    for source_path in sorted(rows_by_source):
+    sources: Dict[str, Dict[str, Any]] = {}
+    for source_path in sorted(
+        {row["source_content_file"] for row in rows}
+    ):
         source = read_gzip_json(Path(source_path))
+        sources[source_path] = source
         for key, value in source.items():
             if key in {"episodes", "goals_by_category"}:
                 continue
@@ -175,35 +171,35 @@ def materialize_chunk(
                 raise ValueError(f"conflicting goal definition {key!r}")
             combined_goals[key] = copy.deepcopy(value)
 
-        for row in sorted(
-            rows_by_source[source_path],
-            key=lambda item: int(item["dataset_case_index"]),
-        ):
-            episode = copy.deepcopy(
-                verified_episode(row, source, verified_hashes)
-            )
-            episode["episode_id"] = row["logical_case_id"]
-            # Habitat Env intentionally replaces simulator.scene_dataset with
-            # this per-episode value.  The upstream HM3D JSON stores a path
-            # relative to the checkout's ./data directory, which is not a
-            # portable invariant for sibling worktrees.  Bind the episode to
-            # the exact, hash-checked scene-dataset config instead of relying
-            # on an untracked local symlink or Habitat's silent fallback.
-            episode["scene_dataset_config"] = str(scene_dataset_config)
-            combined_episodes.append(episode)
-            identity_rows.append(
-                {
-                    "runtime_episode_id": runtime_id,
-                    "logical_case_id": row["logical_case_id"],
-                    "dataset": dataset,
-                    "episode_seed": row["episode_seed"],
-                    "source_episode_id": row["source_episode_id"],
-                    "scene_id": row["scene_id"],
-                    "target_category": row["target_category"],
-                    "geodesic_distance": row["geodesic_distance"],
-                }
-            )
-            runtime_id += 1
+    # Runtime order is a scientific contract: preserve the selection order
+    # exactly.  Source payloads are loaded and merged above, but must never
+    # reorder episodes by source filename.
+    for runtime_id, row in enumerate(rows):
+        source = sources[row["source_content_file"]]
+        episode = copy.deepcopy(
+            verified_episode(row, source, verified_hashes)
+        )
+        episode["episode_id"] = row["logical_case_id"]
+        # Habitat Env intentionally replaces simulator.scene_dataset with
+        # this per-episode value.  The upstream HM3D JSON stores a path
+        # relative to the checkout's ./data directory, which is not a
+        # portable invariant for sibling worktrees.  Bind the episode to
+        # the exact, hash-checked scene-dataset config instead of relying
+        # on an untracked local symlink or Habitat's silent fallback.
+        episode["scene_dataset_config"] = str(scene_dataset_config)
+        combined_episodes.append(episode)
+        identity_rows.append(
+            {
+                "runtime_episode_id": runtime_id,
+                "logical_case_id": row["logical_case_id"],
+                "dataset": dataset,
+                "episode_seed": row["episode_seed"],
+                "source_episode_id": row["source_episode_id"],
+                "scene_id": row["scene_id"],
+                "target_category": row["target_category"],
+                "geodesic_distance": row["geodesic_distance"],
+            }
+        )
 
     combined["episodes"] = combined_episodes
     combined["goals_by_category"] = combined_goals

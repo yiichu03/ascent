@@ -183,6 +183,99 @@ def test_materialized_episode_binds_hashed_absolute_scene_config(
     assert json.loads(preflight_output.read_text())["status"] == "PASS"
 
 
+def test_materializer_preserves_selection_order_across_source_files(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source" / "train.json.gz"
+    root_payload = {
+        "episodes": [],
+        "goals_by_category": {},
+        "category_to_task_category_id": {"chair": 0},
+    }
+    write_gzip_json(source_root, root_payload)
+    rows = []
+    for dataset_index, source_name in enumerate(("z_scene", "a_scene")):
+        source_content = (
+            tmp_path / "source" / "content" / f"{source_name}.json.gz"
+        )
+        episode = {
+            "episode_id": str(70 + dataset_index),
+            "scene_id": (
+                f"hm3d/train/{source_name}/{source_name}.basis.glb"
+            ),
+            "object_category": "chair",
+            "start_position": [0.0, 0.0, 0.0],
+            "start_rotation": [0.0, 0.0, 0.0, 1.0],
+            "goals": [],
+            "info": {"geodesic_distance": 4.0 + dataset_index},
+        }
+        write_gzip_json(
+            source_content,
+            {
+                **root_payload,
+                "episodes": [episode],
+                "goals_by_category": {},
+            },
+        )
+        rows.append(
+            {
+                "logical_case_id": f"case_{dataset_index}",
+                "dataset": "hm3d",
+                "dataset_case_index": str(dataset_index),
+                "episode_seed": str(100 + dataset_index),
+                "source_root_file": str(source_root),
+                "source_content_file": str(source_content),
+                "source_content_sha256": sha256(source_content),
+                "source_episode_index": "0",
+                "source_episode_id": episode["episode_id"],
+                "scene_id": episode["scene_id"],
+                "target_category": "chair",
+                "geodesic_distance": str(4.0 + dataset_index),
+            }
+        )
+    selection = tmp_path / "selection.csv"
+    write_csv(selection, rows, list(rows[0]))
+    scene_config = tmp_path / "hm3d.scene_dataset_config.json"
+    scene_config.write_text('{"stages": {}}\n', encoding="utf-8")
+    output_root = tmp_path / "materialized"
+    subprocess.run(
+        [
+            sys.executable,
+            str(MATERIALIZER),
+            "--selection",
+            str(selection),
+            "--output-root",
+            str(output_root),
+            "--scene-dataset-config",
+            str(scene_config),
+            "--dataset",
+            "hm3d",
+            "--episodes",
+            "2",
+            "--chunk-size",
+            "2",
+            "--label",
+            "ordered",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    manifest = json.loads(
+        (output_root / "chunk_manifest.json").read_text()
+    )
+    chunk = manifest["chunks"][0]
+    identities = read_csv(Path(chunk["identity_path"]))
+    with gzip.open(
+        chunk["content_file"], "rt", encoding="utf-8"
+    ) as handle:
+        episodes = json.load(handle)["episodes"]
+    expected = ["case_0", "case_1"]
+    assert manifest["logical_case_ids"] == expected
+    assert [row["logical_case_id"] for row in identities] == expected
+    assert [episode["episode_id"] for episode in episodes] == expected
+
+
 def test_controller_requires_synchronous_task_reset_preflight() -> None:
     checker = (
         ROOT / "scripts" / "check_submap_task_reset.py"
