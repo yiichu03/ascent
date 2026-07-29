@@ -689,6 +689,23 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 )
         self._submap_event_cursor[env] = len(events)
 
+    def _record_submap_policy_event(
+        self, env: int, event: str, **payload: object
+    ) -> None:
+        """Audit a policy-side topology decision without affecting state."""
+
+        if self._submap_diagnostics is None:
+            return
+        self._submap_diagnostics.record_event(
+            env=env,
+            episode_sequence=self._submap_episode_sequence[env],
+            event={
+                "event": str(event),
+                "step": int(self._num_steps[env]),
+                **payload,
+            },
+        )
+
     @staticmethod
     def _frontier_array(payload: object) -> np.ndarray:
         frontiers = np.asarray(
@@ -930,6 +947,13 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 np.asarray(destination_local_xy).reshape(1, 2),
             )[0]
             distance = float(np.linalg.norm(local_goal - robot_xy))
+            self._record_submap_policy_event(
+                env,
+                "remote_destination_direct_action",
+                destination_submap_id=str(destination_submap_id),
+                frontier_id=frontier_id,
+                distance_m=distance,
+            )
             if frontier_id is not None:
                 registry = self._submap_manager.registry(env)
                 if self._submap_remote_frontier_id[env] != frontier_id:
@@ -941,6 +965,13 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 ):
                     registry.mark_attempted(
                         frontier_id, self._num_steps[env]
+                    )
+                    self._record_submap_policy_event(
+                        env,
+                        "remote_frontier_boundary_crossing",
+                        destination_submap_id=str(destination_submap_id),
+                        frontier_id=str(frontier_id),
+                        distance_m=distance,
                     )
                     return get_action_tensor(
                         MOVE_FORWARD, device=masks.device
@@ -963,16 +994,36 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             return None
         edge = graph.edge_between(path[0], path[1])
         gateway_goal = edge.endpoint_for(active.submap_id)[:2]
+        gateway_distance = float(
+            np.linalg.norm(gateway_goal - robot_xy)
+        )
+        self._record_submap_policy_event(
+            env,
+            "gateway_route_action",
+            destination_submap_id=str(destination_submap_id),
+            frontier_id=frontier_id,
+            edge_id=str(edge.edge_id),
+            graph_hops=int(len(path) - 1),
+            distance_m=gateway_distance,
+        )
         if frontier_id is not None:
             registry = self._submap_manager.registry(env)
             if self._submap_remote_frontier_id[env] != frontier_id:
                 registry.mark_selected(frontier_id, self._num_steps[env])
                 self._submap_remote_frontier_id[env] = frontier_id
         if (
-            np.linalg.norm(gateway_goal - robot_xy)
+            gateway_distance
             <= self._submap_config.gateway_reached_radius_m
         ):
             self._submap_pending_revisit[env] = edge.edge_id
+            self._record_submap_policy_event(
+                env,
+                "gateway_revisit_requested",
+                destination_submap_id=str(destination_submap_id),
+                frontier_id=frontier_id,
+                edge_id=str(edge.edge_id),
+                distance_m=gateway_distance,
+            )
             return get_action_tensor(MOVE_FORWARD, device=masks.device)
         action = self._pointnav(
             observations,
