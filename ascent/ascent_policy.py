@@ -725,6 +725,36 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             self._map_controller._initialize_step[env] += 1 
         return get_action_tensor(TURN_LEFT, device=masks.device)
 
+    def _restore_watchdog_frontier_before_stop(
+        self,
+        env: int,
+        initial_frontiers,
+        previous_this_floor_explored: bool,
+    ):
+        """Undo only a watchdog deletion that is the direct cause of STOP."""
+        pending = self.llm_planner.clear_pending_singleton_watchdog_frontier(
+            env
+        )
+        if pending is None:
+            return None
+
+        pending_array = np.asarray(pending)
+        still_observed = any(
+            np.array_equal(np.asarray(frontier), pending_array)
+            for frontier in initial_frontiers
+        )
+        disabled_frontiers = (
+            self._map_controller._obstacle_map[env]._disabled_frontiers
+        )
+        if not still_observed or pending not in disabled_frontiers:
+            return None
+
+        disabled_frontiers.remove(pending)
+        self._map_controller._obstacle_map[
+            env
+        ]._this_floor_explored = previous_this_floor_explored
+        return pending_array
+
     def _explore(self, observations: Union[Dict[str, Tensor], "TensorDict"], env: int, masks: Tensor) -> Tensor:
         """
         根据当前观测和环境状态执行探索行为。
@@ -740,11 +770,19 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
 
         # 场景一：当前楼层没有有效 Frontier (包括初始为全零或列表为空的情况)
         if np.array_equal(frontiers, np.zeros((1, 2))) or len(frontiers) == 0:
+            previous_this_floor_explored = (
+                self._map_controller._obstacle_map[
+                    env
+                ]._this_floor_explored
+            )
             # 如果还没有初始化过，并且在该楼层步数很短，并且有没探索过的高层或者低层并且没有找到对应的楼梯，如果在楼梯间且未探索完（防止卡在楼梯间），尝试重置并初始化.
             if not self._map_controller._obstacle_map[env]._reinitialize_flag and \
                self._map_controller._obstacle_map[env]._floor_num_steps < 50 and \
                ((self._map_controller._obstacle_map[env]._explored_up_stair == False and self._map_controller._obstacle_map[env]._up_stair_frontiers.size == 0) or \
                 (self._map_controller._obstacle_map[env]._explored_down_stair == False and self._map_controller._obstacle_map[env]._down_stair_frontiers.size == 0)):
+                self.llm_planner.clear_pending_singleton_watchdog_frontier(
+                    env
+                )
                 return self._handle_stairwell_reinitialization(env, masks)
 
             # 标记当前楼层已探索
@@ -760,15 +798,50 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 action = self._navigate_stair_if_unexplored_floor(observations, env, 'down')
 
             if action is not None:
+                self.llm_planner.clear_pending_singleton_watchdog_frontier(
+                    env
+                )
                 self._last_explore_trace[env]["no_frontier_action"] = "stair_navigation"
                 return action
             else:
+                restored_frontier = (
+                    self._restore_watchdog_frontier_before_stop(
+                        env,
+                        initial_frontiers,
+                        previous_this_floor_explored,
+                    )
+                )
+                if restored_frontier is not None:
+                    action = self._explore(observations, env, masks)
+                    self._last_explore_trace[env].update(
+                        {
+                            "pre_guard_no_frontier": True,
+                            "no_frontier_action": (
+                                "watchdog_stop_guard_restore"
+                            ),
+                            "stop_guard_suppressed": True,
+                            "restored_watchdog_frontier": (
+                                restored_frontier.tolist()
+                            ),
+                        }
+                    )
+                    watchdog_trace = self._last_explore_trace[env].get(
+                        "singleton_watchdog"
+                    )
+                    if isinstance(watchdog_trace, dict):
+                        watchdog_trace[
+                            "stop_guard_suppressed"
+                        ] = True
+                    return action
                 print(f"Environment {env}: In all floors, no unexplored stairs or frontiers found, stopping.")
                 self._last_explore_trace[env]["no_frontier_action"] = "stop"
                 return self._stop_action.to(masks.device)
 
         # 场景二：当前楼层有有效 Frontier，使用 LLM 规划器选择最佳 Frontier
         else:
+            self.llm_planner.clear_pending_singleton_watchdog_frontier(
+                env
+            )
             best_frontier, best_value = self.llm_planner._get_best_frontier_with_llm(
                 self._observations_cache, self._map_controller._obstacle_map, self._map_controller._value_map, self._map_controller._object_map,
                 self._map_controller._obstacle_map_list, self._map_controller._value_map_list, self._map_controller._object_map_list,

@@ -11,6 +11,7 @@ ENABLED_ENV = "ASCENT_SINGLETON_FRONTIER_WATCHDOG"
 POSITION_TOLERANCE_ENV = "ASCENT_SINGLETON_WATCHDOG_POSITION_TOLERANCE_M"
 PATIENCE_STEPS_ENV = "ASCENT_SINGLETON_WATCHDOG_PATIENCE_STEPS"
 MIN_PROGRESS_ENV = "ASCENT_SINGLETON_WATCHDOG_MIN_PROGRESS_M"
+STOP_GUARD_ENV = "ASCENT_SINGLETON_WATCHDOG_STOP_GUARD"
 
 
 def _env_enabled(name: str, default: bool = False) -> bool:
@@ -55,6 +56,7 @@ class SingletonFrontierWatchdog:
     position_tolerance_m: float = 0.25
     patience_steps: int = 80
     min_progress_m: float = 0.2
+    stop_guard_enabled: bool = False
     anchor_frontier: Optional[np.ndarray] = None
     progress_reference_distance_m: float = float("inf")
     best_distance_m: float = float("inf")
@@ -71,6 +73,7 @@ class SingletonFrontierWatchdog:
             ),
             patience_steps=_env_positive_int(PATIENCE_STEPS_ENV, 80),
             min_progress_m=_env_positive_float(MIN_PROGRESS_ENV, 0.2),
+            stop_guard_enabled=_env_enabled(STOP_GUARD_ENV, False),
         )
 
     def reset_tracking(self) -> None:
@@ -91,6 +94,7 @@ class SingletonFrontierWatchdog:
             "position_tolerance_m": self.position_tolerance_m,
             "patience_steps": self.patience_steps,
             "min_progress_m": self.min_progress_m,
+            "stop_guard_enabled": self.stop_guard_enabled,
         }
 
     def observe(
@@ -203,5 +207,6 @@ class SingletonFrontierWatchdog:
             "position_tolerance_m": self.position_tolerance_m,
             "patience_steps": self.patience_steps,
             "min_progress_m": self.min_progress_m,
+            "stop_guard_enabled": self.stop_guard_enabled,
             "meaningful_progress": bool(meaningful_progress),
         }

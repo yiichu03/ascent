@@ -50,6 +50,9 @@ class Ascent_LLM_Planner:
         self.last_singleton_watchdog_trace = [
             {} for _ in range(self._num_envs)
         ]
+        self.pending_singleton_watchdog_frontier = [
+            None for _ in range(self._num_envs)
+        ]
     def reset(self, env):
         # 防止来回走动
         self._force_frontier[env] = np.zeros(2)
@@ -63,6 +66,12 @@ class Ascent_LLM_Planner:
         self.floor_num[env] = 1
         self._singleton_frontier_watchdogs[env].reset_tracking()
         self.last_singleton_watchdog_trace[env] = {}
+        self.pending_singleton_watchdog_frontier[env] = None
+
+    def clear_pending_singleton_watchdog_frontier(self, env):
+        pending = self.pending_singleton_watchdog_frontier[env]
+        self.pending_singleton_watchdog_frontier[env] = None
+        return pending
 
     def _get_best_frontier_with_llm(
             self,
@@ -107,9 +116,12 @@ class Ascent_LLM_Planner:
                 )
                 self.last_singleton_watchdog_trace[env] = watchdog_trace
                 if watchdog_trace["triggered"]:
-                    obstacle_map[env]._disabled_frontiers.add(
-                        tuple(frontiers[0])
-                    )
+                    frontier_tuple = tuple(frontiers[0])
+                    obstacle_map[env]._disabled_frontiers.add(frontier_tuple)
+                    if watchdog.stop_guard_enabled:
+                        self.pending_singleton_watchdog_frontier[env] = (
+                            frontier_tuple
+                        )
                     print(
                         "Singleton frontier watchdog disabled "
                         f"{frontiers[0]} after "
