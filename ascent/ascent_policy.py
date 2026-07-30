@@ -1,7 +1,7 @@
 from vlfm.policy.itm_policy import ITMPolicyV2
 from vlfm.policy.habitat_policies import HabitatMixin
 from habitat_baselines.common.baseline_registry import baseline_registry
-from typing import Dict, Tuple, Any, Union, List, Optional
+from typing import Dict, Tuple, Any, Union, List, Optional, Set
 from vlfm.policy.base_objectnav_policy import BaseObjectNavPolicy
 from habitat_baselines.common.tensor_dict import TensorDict
 from depth_camera_filtering import filter_depth
@@ -37,6 +37,7 @@ from ascent.submaps import (
     SubmapDiagnosticsWriter,
     SubmapLifecycleConfig,
     SubmapManager,
+    RemoteRoute,
     ViewOverlapConfig,
     estimate_view_overlap,
     transfer_stair_topology,
@@ -202,11 +203,16 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             min_action_endpoints=int(
                 _submap_config_value(config, "min_action_endpoints", 20)
             ),
+            min_anchor_displacement_m=float(
+                _submap_config_value(
+                    config, "min_anchor_displacement_m", 1.5
+                )
+            ),
             min_path_length_m=float(
                 _submap_config_value(config, "min_path_length_m", 1.5)
             ),
             overlap_threshold=float(
-                _submap_config_value(config, "overlap_threshold", 0.25)
+                _submap_config_value(config, "overlap_threshold", 0.35)
             ),
             low_overlap_consecutive=int(
                 _submap_config_value(config, "low_overlap_consecutive", 3)
@@ -229,6 +235,21 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             gateway_reached_radius_m=float(
                 _submap_config_value(
                     config, "gateway_reached_radius_m", 0.9
+                )
+            ),
+            route_min_progress_m=float(
+                _submap_config_value(
+                    config, "route_min_progress_m", 0.30
+                )
+            ),
+            route_max_stagnation_actions=int(
+                _submap_config_value(
+                    config, "route_max_stagnation_actions", 30
+                )
+            ),
+            route_max_waypoint_actions=int(
+                _submap_config_value(
+                    config, "route_max_waypoint_actions", 60
                 )
             ),
             provisional_thresholds=_as_config_bool(
@@ -285,12 +306,13 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         )
         self._submap_episode_sequence = [-1] * self._num_envs
         self._submap_event_cursor = [0] * self._num_envs
-        self._submap_pending_revisit: List[Optional[str]] = [
+        self._submap_remote_route: List[Optional[RemoteRoute]] = [
             None
         ] * self._num_envs
-        self._submap_remote_frontier_id: List[Optional[str]] = [
-            None
-        ] * self._num_envs
+        self._submap_route_sequence: List[int] = [0] * self._num_envs
+        self._submap_attempted_semantics: List[Set[str]] = [
+            set() for _ in range(self._num_envs)
+        ]
         self._submap_boundary_frames: List[List[Dict[str, object]]] = [
             [] for _ in range(self._num_envs)
         ]
@@ -318,6 +340,9 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     ),
                     "pose_source": "zhao_rgbd_2021",
                     "policy_gt_isolation": True,
+                    "method_version": "submap_v1.1",
+                    "split_contract": "vo_anchor_and_rgbd_overlap_joint",
+                    "fallback_contract": "ascent_local_first_persistent_route",
                     "config": {
                         key: getattr(self._submap_config, key)
                         for key in self._submap_config.__dataclass_fields__
@@ -367,8 +392,9 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             self._submap_manager.reset(env)
             self._submap_episode_sequence[env] += 1
             self._submap_event_cursor[env] = 0
-            self._submap_pending_revisit[env] = None
-            self._submap_remote_frontier_id[env] = None
+            self._submap_remote_route[env] = None
+            self._submap_route_sequence[env] = 0
+            self._submap_attempted_semantics[env].clear()
             self._submap_boundary_frames[env] = []
             self.llm_planner.reset_submap_local_state(env)
             if self._submap_diagnostics is not None:
@@ -671,7 +697,6 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         self._last_frontier_distance[env] = 0.0
         self.min_distance_xy[env] = np.inf
         self.cur_frontier[env] = np.array([])
-        self._submap_remote_frontier_id[env] = None
         self.llm_planner.reset_submap_local_state(env)
         self._map_controller.reset_submap_local_navigation_state(
             env, initialize_new_floor=initialize_new_floor
@@ -788,16 +813,22 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             overlap=overlap,
             allow_nonfloor_split=bool(
                 self._map_controller._climb_stair_over[env]
-            ),
+            )
+            and not bool(cache.get("submap_route_action", False)),
         )
         decision_record = {
             "should_split": bool(decision.should_split),
             "reason": decision.reason,
             "mature": bool(decision.mature),
             "motion_budget_m": float(decision.motion_budget_m),
+            "anchor_displacement_m": float(
+                decision.anchor_displacement_m
+            ),
             "low_overlap_streak": int(decision.low_overlap_streak),
             "floor_changed": bool(decision.floor_changed),
-            "pending_revisit_edge_id": self._submap_pending_revisit[env],
+            "route_action": bool(
+                cache.get("submap_route_action", False)
+            ),
         }
         if self._submap_diagnostics is not None:
             self._submap_diagnostics.record_action_endpoint(
@@ -814,28 +845,11 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
 
         new_bundle = None
         split_reason = None
-        pending_revisit = self._submap_pending_revisit[env]
         frontiers = self._frontier_array(old_bundle.payload)
         frontier_scores = self._frontier_scores(
             old_bundle.payload, frontiers
         )
-        if pending_revisit is not None:
-            self._snapshot_submap_policy_state(env, old_bundle)
-            new_payload = self._map_controller.create_empty_map_payload()
-            new_bundle, _, _ = self._submap_manager.commit_revisit(
-                env=env,
-                world_pose=world_pose,
-                floor_id=floor_id,
-                new_payload=new_payload,
-                step=action_step,
-                gateway_edge_id=pending_revisit,
-                frontiers_local=frontiers,
-                frontier_scores=frontier_scores,
-                boundary_frames=self._submap_boundary_frames[env],
-            )
-            split_reason = "gateway_revisit"
-            self._submap_pending_revisit[env] = None
-        elif decision.should_split:
+        if decision.should_split:
             self._snapshot_submap_policy_state(env, old_bundle)
             new_payload = self._map_controller.create_empty_map_payload()
             new_bundle, _, _ = self._submap_manager.commit_split(
@@ -885,16 +899,18 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
 
     def _find_remote_object_plan(
         self, env: int
-    ) -> Optional[Tuple[str, np.ndarray]]:
+    ) -> Optional[Tuple[str, np.ndarray, str]]:
         target = self._map_controller._target_object[env]
         if not target:
             return None
         graph = self._submap_manager.graph(env)
-        view = self._submap_manager.query_view(env)
         active = self._submap_manager.active_bundle(env)
         candidates = []
         for submap_id, bundle in graph.nodes.items():
             if submap_id == active.submap_id:
+                continue
+            candidate_key = f"semantic:{submap_id}:{target}"
+            if candidate_key in self._submap_attempted_semantics[env]:
                 continue
             object_map = bundle.payload.object_map
             if not object_map.has_object(target):
@@ -902,138 +918,216 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             cloud = object_map.get_target_cloud(target)
             if len(cloud) == 0:
                 continue
-            if active.reference_submap_id == submap_id:
-                hops = 0
-            else:
-                path = graph.shortest_path(active.submap_id, submap_id)
-                if len(path) < 2:
-                    continue
-                hops = len(path) - 1
+            path = graph.shortest_path(active.submap_id, submap_id)
+            if len(path) < 2:
+                continue
+            hops = len(path) - 1
             source_xy = np.median(
                 np.asarray(cloud[:, :2], dtype=np.float64), axis=0
             )
             candidates.append(
-                (hops, bundle.creation_step, submap_id, source_xy)
+                (
+                    hops,
+                    bundle.creation_step,
+                    submap_id,
+                    source_xy,
+                    candidate_key,
+                )
             )
         if not candidates:
             return None
         candidates.sort(key=lambda item: (item[0], item[1], item[2]))
-        _, _, source_submap_id, source_xy = candidates[0]
-        # Validate the transform now so an invalid historical hypothesis fails
-        # before an action is emitted.
-        view.project_points_to_active(
-            source_submap_id, source_xy.reshape(1, 2)
-        )
-        return source_submap_id, source_xy
+        _, _, source_submap_id, source_xy, candidate_key = candidates[0]
+        return source_submap_id, source_xy, candidate_key
 
-    def _submap_remote_destination_action(
+    def _start_remote_route(
+        self,
+        env: int,
+        *,
+        destination_submap_id: str,
+        destination_local_xy: np.ndarray,
+        target_kind: str,
+        candidate_key: str,
+        frontier_id: Optional[str],
+    ) -> Optional[RemoteRoute]:
+        if self._submap_remote_route[env] is not None:
+            return self._submap_remote_route[env]
+        graph = self._submap_manager.graph(env)
+        active = self._submap_manager.active_bundle(env)
+        route_id = (
+            f"env{env}:route{self._submap_route_sequence[env]:04d}"
+        )
+        self._submap_route_sequence[env] += 1
+        try:
+            route = RemoteRoute.build(
+                graph=graph,
+                route_id=route_id,
+                active_submap_id=active.submap_id,
+                destination_submap_id=destination_submap_id,
+                destination_local_xy=destination_local_xy,
+                target_kind=target_kind,
+                candidate_key=candidate_key,
+                selected_step=self._num_steps[env],
+                frontier_id=frontier_id,
+            )
+        except (KeyError, ValueError) as error:
+            if target_kind == "semantic":
+                self._submap_attempted_semantics[env].add(candidate_key)
+            elif frontier_id is not None:
+                registry = self._submap_manager.registry(env)
+                if registry.get(frontier_id).eligible:
+                    registry.mark_attempted(
+                        frontier_id, self._num_steps[env]
+                    )
+            self._record_submap_policy_event(
+                env,
+                "remote_route_rejected",
+                target_kind=target_kind,
+                candidate_key=candidate_key,
+                destination_submap_id=str(destination_submap_id),
+                frontier_id=frontier_id,
+                error_type=type(error).__name__,
+            )
+            return None
+
+        if target_kind == "semantic":
+            # A frozen submap-target pair is one evidence item. A later submap
+            # can contribute a new item, but this one is never retried.
+            self._submap_attempted_semantics[env].add(candidate_key)
+        elif frontier_id is not None:
+            self._submap_manager.registry(env).mark_selected(
+                frontier_id, self._num_steps[env]
+            )
+        self._submap_remote_route[env] = route
+        self._record_submap_policy_event(
+            env,
+            "remote_route_selected",
+            route_id=route.route_id,
+            target_kind=route.target_kind,
+            candidate_key=route.candidate_key,
+            destination_submap_id=str(destination_submap_id),
+            frontier_id=frontier_id,
+            gateway_waypoints=sum(
+                waypoint.kind == "gateway"
+                for waypoint in route.waypoints
+            ),
+        )
+        return route
+
+    def _finish_remote_route(
+        self, env: int, *, outcome: str
+    ) -> None:
+        route = self._submap_remote_route[env]
+        if route is None:
+            return
+        if route.frontier_id is not None:
+            registry = self._submap_manager.registry(env)
+            if registry.get(route.frontier_id).eligible:
+                registry.mark_attempted(
+                    route.frontier_id, self._num_steps[env]
+                )
+        self._record_submap_policy_event(
+            env,
+            "remote_route_finished",
+            route_id=route.route_id,
+            target_kind=route.target_kind,
+            candidate_key=route.candidate_key,
+            destination_submap_id=route.destination_submap_id,
+            frontier_id=route.frontier_id,
+            outcome=str(outcome),
+            reached_waypoints=int(route.cursor),
+            waypoint_count=len(route.waypoints),
+        )
+        self._submap_remote_route[env] = None
+
+    def _execute_remote_route(
         self,
         observations: Union[Dict[str, Tensor], "TensorDict"],
         env: int,
         masks: Tensor,
-        *,
-        destination_submap_id: str,
-        destination_local_xy: np.ndarray,
-        frontier_id: Optional[str],
     ) -> Optional[Tensor]:
+        route = self._submap_remote_route[env]
+        if route is None:
+            return None
         graph = self._submap_manager.graph(env)
         active = self._submap_manager.active_bundle(env)
-        view = self._submap_manager.query_view(env)
-        robot_xy = self._observations_cache[env]["robot_xy"]
+        try:
+            route.rebase_execution_submap(graph, active.submap_id)
+        except (KeyError, RuntimeError):
+            self._finish_remote_route(
+                env, outcome="execution_frame_disconnected"
+            )
+            return None
+        robot_xy = np.asarray(
+            self._observations_cache[env]["robot_xy"],
+            dtype=np.float64,
+        )
 
-        if active.reference_submap_id == destination_submap_id:
-            local_goal = view.project_points_to_active(
-                destination_submap_id,
-                np.asarray(destination_local_xy).reshape(1, 2),
-            )[0]
+        while not route.complete:
+            waypoint = route.current_waypoint
+            local_goal = route.project_current_waypoint()
             distance = float(np.linalg.norm(local_goal - robot_xy))
+            if distance > self._submap_config.gateway_reached_radius_m:
+                break
             self._record_submap_policy_event(
                 env,
-                "remote_destination_direct_action",
-                destination_submap_id=str(destination_submap_id),
-                frontier_id=frontier_id,
+                "remote_route_waypoint_reached",
+                route_id=route.route_id,
+                waypoint_index=int(route.cursor),
+                waypoint_kind=waypoint.kind,
+                waypoint_owner_submap_id=waypoint.owner_submap_id,
+                edge_id=waypoint.edge_id,
                 distance_m=distance,
             )
-            if frontier_id is not None:
-                registry = self._submap_manager.registry(env)
-                if self._submap_remote_frontier_id[env] != frontier_id:
-                    registry.mark_selected(frontier_id, self._num_steps[env])
-                    self._submap_remote_frontier_id[env] = frontier_id
-                if (
-                    distance
-                    <= self._submap_config.gateway_reached_radius_m
-                ):
-                    registry.mark_attempted(
-                        frontier_id, self._num_steps[env]
-                    )
-                    self._record_submap_policy_event(
-                        env,
-                        "remote_frontier_boundary_crossing",
-                        destination_submap_id=str(destination_submap_id),
-                        frontier_id=str(frontier_id),
-                        distance_m=distance,
-                    )
-                    return get_action_tensor(
-                        MOVE_FORWARD, device=masks.device
-                    )
-            action = self._pointnav(
-                observations,
-                local_goal,
-                stop=False,
-                env=env,
-                stop_radius=self._pointnav_stop_radius,
-            )
-            if action.item() == STOP:
-                action.fill_(MOVE_FORWARD)
-            return action
+            route.reach_current_waypoint(graph, robot_xy)
 
-        path = graph.shortest_path(
-            active.submap_id, destination_submap_id
-        )
-        if len(path) < 2:
-            return None
-        edge = graph.edge_between(path[0], path[1])
-        gateway_goal = edge.endpoint_for(active.submap_id)[:2]
-        gateway_distance = float(
-            np.linalg.norm(gateway_goal - robot_xy)
+        if route.complete:
+            self._finish_remote_route(env, outcome="destination_reached")
+            self._observations_cache[env]["submap_route_action"] = True
+            return get_action_tensor(MOVE_FORWARD, device=masks.device)
+
+        waypoint = route.current_waypoint
+        local_goal = route.project_current_waypoint()
+        distance = float(np.linalg.norm(local_goal - robot_xy))
+        failure = route.observe_distance(
+            distance,
+            min_progress_m=self._submap_config.route_min_progress_m,
+            max_stagnation_actions=(
+                self._submap_config.route_max_stagnation_actions
+            ),
+            max_waypoint_actions=(
+                self._submap_config.route_max_waypoint_actions
+            ),
         )
         self._record_submap_policy_event(
             env,
-            "gateway_route_action",
-            destination_submap_id=str(destination_submap_id),
-            frontier_id=frontier_id,
-            edge_id=str(edge.edge_id),
-            graph_hops=int(len(path) - 1),
-            distance_m=gateway_distance,
+            "remote_route_waypoint_action",
+            route_id=route.route_id,
+            waypoint_index=int(route.cursor),
+            waypoint_kind=waypoint.kind,
+            waypoint_owner_submap_id=waypoint.owner_submap_id,
+            edge_id=waypoint.edge_id,
+            distance_m=distance,
+            waypoint_action_count=int(route.waypoint_action_count),
+            waypoint_stagnation_count=int(
+                route.waypoint_stagnation_count
+            ),
         )
-        if frontier_id is not None:
-            registry = self._submap_manager.registry(env)
-            if self._submap_remote_frontier_id[env] != frontier_id:
-                registry.mark_selected(frontier_id, self._num_steps[env])
-                self._submap_remote_frontier_id[env] = frontier_id
-        if (
-            gateway_distance
-            <= self._submap_config.gateway_reached_radius_m
-        ):
-            self._submap_pending_revisit[env] = edge.edge_id
-            self._record_submap_policy_event(
-                env,
-                "gateway_revisit_requested",
-                destination_submap_id=str(destination_submap_id),
-                frontier_id=frontier_id,
-                edge_id=str(edge.edge_id),
-                distance_m=gateway_distance,
-            )
-            return get_action_tensor(MOVE_FORWARD, device=masks.device)
+        if failure is not None:
+            self._finish_remote_route(env, outcome=failure)
+            return None
+
         action = self._pointnav(
             observations,
-            gateway_goal,
+            local_goal,
             stop=False,
             env=env,
             stop_radius=self._pointnav_stop_radius,
         )
         if action.item() == STOP:
-            action.fill_(MOVE_FORWARD)
+            self._finish_remote_route(env, outcome="pointnav_stop")
+            return None
+        self._observations_cache[env]["submap_route_action"] = True
         return action
 
     def _submap_remote_semantic_action(
@@ -1047,15 +1141,18 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         plan = self._find_remote_object_plan(env)
         if plan is None:
             return None
-        source_submap_id, source_xy = plan
-        return self._submap_remote_destination_action(
-            observations,
+        source_submap_id, source_xy, candidate_key = plan
+        route = self._start_remote_route(
             env,
-            masks,
             destination_submap_id=source_submap_id,
             destination_local_xy=source_xy,
+            target_kind="semantic",
+            candidate_key=candidate_key,
             frontier_id=None,
         )
+        if route is None:
+            return None
+        return self._execute_remote_route(observations, env, masks)
 
     def _submap_remote_frontier_action(
         self,
@@ -1072,13 +1169,37 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         frontier = self._submap_manager.registry(env).get(
             plan.frontier_id
         )
-        return self._submap_remote_destination_action(
-            observations,
+        route = self._start_remote_route(
             env,
-            masks,
             destination_submap_id=frontier.source_submap_id,
             destination_local_xy=frontier.local_xy,
+            target_kind="frontier",
+            candidate_key=f"frontier:{frontier.frontier_id}",
             frontier_id=frontier.frontier_id,
+        )
+        if route is None:
+            return None
+        return self._execute_remote_route(observations, env, masks)
+
+    def _submap_remote_fallback_action(
+        self,
+        observations: Union[Dict[str, Tensor], "TensorDict"],
+        env: int,
+        masks: Tensor,
+    ) -> Optional[Tensor]:
+        """Use historical evidence only after ASCENT has no local action."""
+
+        if not self._submap_enabled:
+            return None
+        if self._submap_remote_route[env] is not None:
+            return self._execute_remote_route(observations, env, masks)
+        action = self._submap_remote_semantic_action(
+            observations, env, masks
+        )
+        if action is not None:
+            return action
+        return self._submap_remote_frontier_action(
+            observations, env, masks
         )
 
     def act(
@@ -1269,23 +1390,33 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     mode = "initialize"
                     pointnav_action = self._initialize(env, masks)
                 elif goal is None:
-                    remote_semantic_action = None
-                    if self._submap_enabled:
-                        remote_semantic_action = (
-                            self._submap_remote_semantic_action(
-                                observations, env, masks
-                            )
-                        )
-                    if remote_semantic_action is not None:
-                        mode = "submap_remote_semantic"
-                        pointnav_action = remote_semantic_action
-                    elif self._map_controller._obstacle_map[env]._look_for_downstair_flag:
+                    if self._map_controller._obstacle_map[env]._look_for_downstair_flag:
                         mode = "look_for_downstair"
                         pointnav_action = self._look_for_downstair(observations, env, masks)
+                    elif (
+                        self._submap_enabled
+                        and self._submap_remote_route[env] is not None
+                    ):
+                        mode = "submap_remote_route"
+                        pointnav_action = self._execute_remote_route(
+                            observations, env, masks
+                        )
+                        if pointnav_action is None:
+                            mode = "explore_after_remote_route"
+                            pointnav_action = self._explore(
+                                observations, env, masks
+                            )
                     else:
                         mode = "explore"
                         pointnav_action = self._explore(observations, env, masks)
                 else:
+                    if (
+                        self._submap_enabled
+                        and self._submap_remote_route[env] is not None
+                    ):
+                        self._finish_remote_route(
+                            env, outcome="preempted_by_local_detection"
+                        )
                     mode = "navigate"
                     self._try_to_navigate[env] = True
                     pointnav_action = self._navigate(observations, goal[:2], stop=True, env=env, ori_masks=masks)
@@ -1370,12 +1501,6 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
 
         # 场景一：当前楼层没有有效 Frontier (包括初始为全零或列表为空的情况)
         if np.array_equal(frontiers, np.zeros((1, 2))) or len(frontiers) == 0:
-            if self._submap_enabled:
-                remote_action = self._submap_remote_frontier_action(
-                    observations, env, masks
-                )
-                if remote_action is not None:
-                    return remote_action
             # 如果还没有初始化过，并且在该楼层步数很短，并且有没探索过的高层或者低层并且没有找到对应的楼梯，如果在楼梯间且未探索完（防止卡在楼梯间），尝试重置并初始化.
             if not self._map_controller._obstacle_map[env]._reinitialize_flag and \
                self._map_controller._obstacle_map[env]._floor_num_steps < 50 and \
@@ -1397,9 +1522,14 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
 
             if action is not None:
                 return action
-            else:
-                print(f"Environment {env}: In all floors, no unexplored stairs or frontiers found, stopping.")
-                return self._stop_action.to(masks.device)
+            if self._submap_enabled:
+                remote_action = self._submap_remote_fallback_action(
+                    observations, env, masks
+                )
+                if remote_action is not None:
+                    return remote_action
+            print(f"Environment {env}: In all floors, no unexplored stairs or frontiers found, stopping.")
+            return self._stop_action.to(masks.device)
 
         # 场景二：当前楼层有有效 Frontier，使用 LLM 规划器选择最佳 Frontier
         else:

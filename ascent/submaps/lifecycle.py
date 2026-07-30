@@ -22,18 +22,24 @@ from ascent.submaps.types import (
 class SubmapLifecycleConfig:
     enabled: bool = False
     min_action_endpoints: int = 20
+    min_anchor_displacement_m: float = 1.5
     min_path_length_m: float = 1.5
-    overlap_threshold: float = 0.25
+    overlap_threshold: float = 0.35
     low_overlap_consecutive: int = 3
     max_motion_budget_m: float = 8.0
     rotation_weight_m_per_rad: float = 0.10
     gateway_frontier_resolution_radius_m: float = 1.0
     gateway_reached_radius_m: float = 0.9
+    route_min_progress_m: float = 0.30
+    route_max_stagnation_actions: int = 30
+    route_max_waypoint_actions: int = 60
     provisional_thresholds: bool = True
 
     def __post_init__(self) -> None:
         if self.min_action_endpoints < 1:
             raise ValueError("min_action_endpoints must be positive")
+        if self.min_anchor_displacement_m < 0.0:
+            raise ValueError("min_anchor_displacement_m cannot be negative")
         if self.min_path_length_m < 0.0:
             raise ValueError("min_path_length_m cannot be negative")
         if not 0.0 <= self.overlap_threshold <= 1.0:
@@ -48,6 +54,14 @@ class SubmapLifecycleConfig:
             raise ValueError("gateway frontier radius cannot be negative")
         if self.gateway_reached_radius_m <= 0.0:
             raise ValueError("gateway reached radius must be positive")
+        if self.route_min_progress_m < 0.0:
+            raise ValueError("route_min_progress_m cannot be negative")
+        if self.route_max_stagnation_actions < 1:
+            raise ValueError(
+                "route_max_stagnation_actions must be positive"
+            )
+        if self.route_max_waypoint_actions < 1:
+            raise ValueError("route_max_waypoint_actions must be positive")
 
 
 @dataclass(frozen=True)
@@ -56,6 +70,7 @@ class SplitDecision:
     reason: Optional[str]
     mature: bool
     motion_budget_m: float
+    anchor_displacement_m: float
     low_overlap_streak: int
     floor_changed: bool
 
@@ -185,11 +200,20 @@ class SubmapManager:
                 bundle.low_overlap_streak += 1
             else:
                 bundle.low_overlap_streak = 0
+        else:
+            # Missing RGB-D evidence breaks the required consecutive-low-
+            # overlap sequence; it must not bridge two separated observations.
+            bundle.low_overlap_streak = 0
 
         floor_changed = int(floor_id) != bundle.floor_id
+        anchor_displacement = float(
+            np.linalg.norm(pose[:2] - bundle.anchor_pose_world[:2])
+        )
         mature = (
-            bundle.accepted_action_endpoints >= self.config.min_action_endpoints
-            and bundle.path_length_m >= self.config.min_path_length_m
+            bundle.accepted_action_endpoints
+            >= self.config.min_action_endpoints
+            and anchor_displacement
+            >= self.config.min_anchor_displacement_m
         )
         motion_budget = (
             bundle.path_length_m
@@ -205,18 +229,12 @@ class SubmapManager:
                 bundle.low_overlap_streak >= self.config.low_overlap_consecutive
             ):
                 reason = "low_overlap"
-            elif (
-                allow_nonfloor_split
-                and mature
-                and motion_budget >= self.config.max_motion_budget_m
-            ):
-                reason = "motion_budget"
-
         decision = SplitDecision(
             should_split=reason is not None,
             reason=reason,
             mature=mature,
             motion_budget_m=motion_budget,
+            anchor_displacement_m=anchor_displacement,
             low_overlap_streak=bundle.low_overlap_streak,
             floor_changed=floor_changed,
         )

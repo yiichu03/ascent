@@ -65,7 +65,6 @@ class FrontierRecord:
         return self.status in {
             FrontierStatus.ACTIVE,
             FrontierStatus.SELECTED,
-            FrontierStatus.ATTEMPTED,
         }
 
 

@@ -9,6 +9,7 @@ import torch
 from ascent.submaps import (
     FrontierStatus,
     MapPayload,
+    RemoteRoute,
     SubmapDiagnosticsWriter,
     SubmapLifecycleConfig,
     SubmapManager,
@@ -88,26 +89,26 @@ def test_default_off_never_requests_split() -> None:
     assert decision.reason is None
 
 
-def test_motion_split_freezes_old_map_and_creates_gateway() -> None:
+def test_joint_anchor_overlap_split_freezes_old_map_and_creates_gateway() -> None:
     manager = SubmapManager(
         1,
         SubmapLifecycleConfig(
             enabled=True,
             min_action_endpoints=2,
-            min_path_length_m=0.5,
-            overlap_threshold=0.1,
-            low_overlap_consecutive=3,
-            max_motion_budget_m=1.0,
+            min_anchor_displacement_m=1.0,
+            overlap_threshold=0.5,
+            low_overlap_consecutive=2,
             gateway_frontier_resolution_radius_m=0.3,
         ),
     )
     first = manager.start(0, [2.0, 1.0, 0.2], 0, payload("first"), 0)
     assert not manager.observe_action_endpoint(
-        0, [2.6, 1.0, 0.2], 0, 0.9
+        0, [2.6, 1.0, 0.2], 0, 0.2
     ).should_split
-    decision = manager.observe_action_endpoint(0, [3.2, 1.0, 0.2], 0, 0.9)
+    decision = manager.observe_action_endpoint(0, [3.2, 1.0, 0.2], 0, 0.2)
     assert decision.should_split
-    assert decision.reason == "motion_budget"
+    assert decision.reason == "low_overlap"
+    assert decision.anchor_displacement_m == pytest.approx(1.2)
 
     frontiers = np.array([[1.2, 0.0], [4.0, 2.0]])
     second, edge, resolved = manager.commit_split(
@@ -137,7 +138,7 @@ def test_low_overlap_requires_maturity_and_consecutive_endpoints() -> None:
         SubmapLifecycleConfig(
             enabled=True,
             min_action_endpoints=3,
-            min_path_length_m=0.5,
+            min_anchor_displacement_m=0.5,
             overlap_threshold=0.4,
             low_overlap_consecutive=2,
             max_motion_budget_m=100.0,
@@ -155,6 +156,86 @@ def test_low_overlap_requires_maturity_and_consecutive_endpoints() -> None:
     assert decision.reason == "low_overlap"
 
 
+def test_long_cumulative_motion_without_anchor_displacement_does_not_split() -> None:
+    manager = SubmapManager(
+        1,
+        SubmapLifecycleConfig(
+            enabled=True,
+            min_action_endpoints=4,
+            min_anchor_displacement_m=1.5,
+            overlap_threshold=0.5,
+            low_overlap_consecutive=3,
+            max_motion_budget_m=0.1,
+            rotation_weight_m_per_rad=10.0,
+        ),
+    )
+    manager.start(0, [0.0, 0.0, 0.0], 0, payload("initial"), 0)
+    poses = [
+        [1.0, 0.0, np.pi],
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, np.pi],
+        [0.0, 0.0, 0.0],
+    ]
+    decision = None
+    for pose in poses:
+        decision = manager.observe_action_endpoint(0, pose, 0, 0.0)
+        assert not decision.should_split
+    assert decision is not None
+    assert decision.motion_budget_m > 10.0
+    assert decision.anchor_displacement_m == pytest.approx(0.0)
+    assert not decision.mature
+
+
+def test_anchor_displacement_without_low_rgbd_overlap_does_not_split() -> None:
+    manager = SubmapManager(
+        1,
+        SubmapLifecycleConfig(
+            enabled=True,
+            min_action_endpoints=2,
+            min_anchor_displacement_m=1.0,
+            overlap_threshold=0.35,
+            low_overlap_consecutive=2,
+        ),
+    )
+    manager.start(0, [0.0, 0.0, 0.0], 0, payload("initial"), 0)
+    manager.observe_action_endpoint(0, [0.6, 0.0, 0.0], 0, 0.8)
+    decision = manager.observe_action_endpoint(
+        0, [1.2, 0.0, 0.0], 0, 0.8
+    )
+
+    assert decision.mature
+    assert decision.low_overlap_streak == 0
+    assert not decision.should_split
+
+
+def test_missing_overlap_breaks_consecutive_low_overlap_evidence() -> None:
+    manager = SubmapManager(
+        1,
+        SubmapLifecycleConfig(
+            enabled=True,
+            min_action_endpoints=1,
+            min_anchor_displacement_m=0.0,
+            overlap_threshold=0.35,
+            low_overlap_consecutive=2,
+        ),
+    )
+    manager.start(0, [0.0, 0.0, 0.0], 0, payload("initial"), 0)
+    first = manager.observe_action_endpoint(
+        0, [0.1, 0.0, 0.0], 0, 0.1
+    )
+    missing = manager.observe_action_endpoint(
+        0, [0.2, 0.0, 0.0], 0, None
+    )
+    final = manager.observe_action_endpoint(
+        0, [0.3, 0.0, 0.0], 0, 0.1
+    )
+
+    assert first.low_overlap_streak == 1
+    assert missing.low_overlap_streak == 0
+    assert final.low_overlap_streak == 1
+    assert not final.should_split
+
+
 def test_floor_change_is_a_hard_boundary_before_maturity() -> None:
     manager = SubmapManager(1, SubmapLifecycleConfig(enabled=True))
     manager.start(0, [0.0, 0.0, 0.0], 0, payload("initial"), 0)
@@ -170,13 +251,14 @@ def test_query_view_routes_to_next_gateway_without_mutating_frontiers() -> None:
         SubmapLifecycleConfig(
             enabled=True,
             min_action_endpoints=1,
-            min_path_length_m=0.0,
-            max_motion_budget_m=0.1,
+            min_anchor_displacement_m=0.5,
+            overlap_threshold=0.5,
+            low_overlap_consecutive=1,
             gateway_frontier_resolution_radius_m=0.1,
         ),
     )
     first = manager.start(0, [0.0, 0.0, 0.0], 0, payload("first"), 0)
-    manager.observe_action_endpoint(0, [1.0, 0.0, 0.0], 0, 1.0)
+    manager.observe_action_endpoint(0, [1.0, 0.0, 0.0], 0, 0.0)
     second, _, _ = manager.commit_split(
         0,
         [1.0, 0.0, 0.0],
@@ -204,8 +286,9 @@ def test_nonfloor_split_is_deferred_during_transition_execution() -> None:
         SubmapLifecycleConfig(
             enabled=True,
             min_action_endpoints=1,
-            min_path_length_m=0.0,
-            max_motion_budget_m=0.1,
+            min_anchor_displacement_m=0.5,
+            overlap_threshold=0.5,
+            low_overlap_consecutive=1,
         ),
     )
     manager.start(0, [0.0, 0.0, 0.0], 0, payload("initial"), 0)
@@ -220,19 +303,20 @@ def test_nonfloor_split_is_deferred_during_transition_execution() -> None:
     assert not decision.should_split
 
 
-def test_revisit_creates_a_fresh_writer_and_direct_frontier_plan() -> None:
+def test_persistent_route_advances_without_creating_revisit_submaps() -> None:
     manager = SubmapManager(
         1,
         SubmapLifecycleConfig(
             enabled=True,
             min_action_endpoints=1,
-            min_path_length_m=0.0,
-            max_motion_budget_m=0.1,
+            min_anchor_displacement_m=0.5,
+            overlap_threshold=0.5,
+            low_overlap_consecutive=1,
             gateway_frontier_resolution_radius_m=0.1,
         ),
     )
     first = manager.start(0, [0.0, 0.0, 0.0], 0, payload("first"), 0)
-    manager.observe_action_endpoint(0, [1.0, 0.0, 0.0], 0, 1.0)
+    manager.observe_action_endpoint(0, [1.0, 0.0, 0.0], 0, 0.0)
     second, gateway, _ = manager.commit_split(
         0,
         [1.0, 0.0, 0.0],
@@ -241,25 +325,170 @@ def test_revisit_creates_a_fresh_writer_and_direct_frontier_plan() -> None:
         1,
         np.array([[0.0, 2.0]]),
     )
-    revisit, revisit_edge, _ = manager.commit_revisit(
-        0,
-        [1.0, 0.0, 0.0],
-        0,
-        payload("revisit"),
-        2,
-        gateway.edge_id,
-        np.empty((0, 2)),
+    route = RemoteRoute.build(
+        graph=manager.graph(0),
+        route_id="env0:route0000",
+        active_submap_id=second.submap_id,
+        destination_submap_id=first.submap_id,
+        destination_local_xy=np.array([0.0, 2.0]),
+        target_kind="frontier",
+        candidate_key=f"frontier:{first.submap_id}:f0000",
+        frontier_id=f"{first.submap_id}:f0000",
+        selected_step=2,
     )
 
-    assert second.state.value == "frozen"
-    assert revisit.state.value == "active"
-    assert revisit.reference_submap_id == first.submap_id
-    assert revisit_edge.kind == "revisit"
-    plan = manager.query_view(0).best_remote_frontier_plan()
-    assert plan is not None
-    assert plan.execution_kind == "direct_frontier"
-    assert plan.next_gateway_edge_id is None
-    np.testing.assert_allclose(plan.execution_local_xy, [-1.0, 2.0])
+    assert len(route.waypoints) == 2
+    assert route.current_waypoint.kind == "gateway"
+    assert route.current_waypoint.edge_id == gateway.edge_id
+    assert route.current_waypoint.owner_submap_id == second.submap_id
+    np.testing.assert_allclose(
+        route.project_current_waypoint(), np.zeros(2)
+    )
+    route.reach_current_waypoint(
+        manager.graph(0), np.array([0.2, 0.1])
+    )
+    assert route.current_waypoint.kind == "destination_frontier"
+    assert route.current_waypoint.owner_submap_id == first.submap_id
+    np.testing.assert_allclose(
+        route.project_current_waypoint(), [-0.8, 2.1]
+    )
+    assert manager.active_bundle(0).submap_id == second.submap_id
+    assert len(manager.graph(0).nodes) == 2
+    assert len(manager.graph(0).edges) == 1
+
+
+def test_attempted_frontier_is_not_eligible_for_another_route() -> None:
+    registry = SubmapManager(
+        1, SubmapLifecycleConfig(enabled=True)
+    ).registry(0)
+    record = registry.register_submap_frontiers(
+        "env0:sm0000", np.array([[1.0, 2.0]]), 1
+    )[0]
+    registry.mark_selected(record.frontier_id, 2)
+    registry.mark_attempted(record.frontier_id, 3)
+
+    assert record.status is FrontierStatus.ATTEMPTED
+    assert registry.eligible() == []
+
+
+def test_route_no_progress_guard_is_bounded_per_waypoint() -> None:
+    manager = SubmapManager(
+        1, SubmapLifecycleConfig(enabled=True)
+    )
+    bundle = manager.start(
+        0, [0.0, 0.0, 0.0], 0, payload("initial"), 0
+    )
+    route = RemoteRoute.build(
+        graph=manager.graph(0),
+        route_id="env0:route0000",
+        active_submap_id=bundle.submap_id,
+        destination_submap_id=bundle.submap_id,
+        destination_local_xy=np.array([2.0, 0.0]),
+        target_kind="semantic",
+        candidate_key="semantic:env0:sm0000:chair",
+        selected_step=1,
+    )
+
+    assert (
+        route.observe_distance(
+            2.0,
+            min_progress_m=0.3,
+            max_stagnation_actions=2,
+            max_waypoint_actions=10,
+        )
+        is None
+    )
+    assert (
+        route.observe_distance(
+            1.9,
+            min_progress_m=0.3,
+            max_stagnation_actions=2,
+            max_waypoint_actions=10,
+        )
+        is None
+    )
+    assert (
+        route.observe_distance(
+            1.8,
+            min_progress_m=0.3,
+            max_stagnation_actions=2,
+            max_waypoint_actions=10,
+        )
+        == "no_progress"
+    )
+
+
+def _no_frontier_obstacle(*, reinitialize_flag: bool) -> SimpleNamespace:
+    return SimpleNamespace(
+        _disabled_frontiers=set(),
+        _reinitialize_flag=reinitialize_flag,
+        _floor_num_steps=100 if reinitialize_flag else 10,
+        _explored_up_stair=True,
+        _explored_down_stair=True,
+        _up_stair_frontiers=np.empty((0, 2)),
+        _down_stair_frontiers=np.empty((0, 2)),
+        _this_floor_explored=False,
+    )
+
+
+def test_remote_fallback_runs_only_after_original_no_local_path() -> None:
+    policy = object.__new__(Ascent_Policy)
+    obstacle = _no_frontier_obstacle(reinitialize_flag=True)
+    policy._observations_cache = [
+        {"frontier_sensor": np.empty((0, 2))}
+    ]
+    policy._map_controller = SimpleNamespace(
+        _obstacle_map=[obstacle]
+    )
+    policy._submap_enabled = True
+    policy._stop_action = torch.tensor([[0]], dtype=torch.int64)
+    calls = []
+    policy._submap_remote_fallback_action = (
+        lambda observations, env, masks: (
+            calls.append("remote")
+            or torch.tensor([[1]], dtype=torch.int64)
+        )
+    )
+
+    action = policy._explore(
+        observations=None,
+        env=0,
+        masks=torch.ones((1, 1), dtype=torch.bool),
+    )
+
+    assert action.item() == 1
+    assert calls == ["remote"]
+    assert obstacle._this_floor_explored
+
+
+def test_original_stairwell_reinitialization_precedes_remote_fallback() -> None:
+    policy = object.__new__(Ascent_Policy)
+    obstacle = _no_frontier_obstacle(reinitialize_flag=False)
+    obstacle._explored_up_stair = False
+    policy._observations_cache = [
+        {"frontier_sensor": np.empty((0, 2))}
+    ]
+    policy._map_controller = SimpleNamespace(
+        _obstacle_map=[obstacle]
+    )
+    policy._submap_enabled = True
+    policy._stop_action = torch.tensor([[0]], dtype=torch.int64)
+    policy._handle_stairwell_reinitialization = (
+        lambda env, masks: torch.tensor([[2]], dtype=torch.int64)
+    )
+    policy._submap_remote_fallback_action = (
+        lambda observations, env, masks: pytest.fail(
+            "remote fallback preempted ASCENT reinitialization"
+        )
+    )
+
+    action = policy._explore(
+        observations=None,
+        env=0,
+        masks=torch.ones((1, 1), dtype=torch.bool),
+    )
+
+    assert action.item() == 2
 
 
 class _OverlapMap:
@@ -416,8 +645,9 @@ def test_policy_action_end_swaps_to_fresh_active_payload() -> None:
     config = SubmapLifecycleConfig(
         enabled=True,
         min_action_endpoints=1,
-        min_path_length_m=0.0,
-        max_motion_budget_m=0.5,
+        min_anchor_displacement_m=0.5,
+        overlap_threshold=0.5,
+        low_overlap_consecutive=1,
     )
     initial = _runtime_payload()
     replacement = _runtime_payload()
@@ -434,10 +664,9 @@ def test_policy_action_end_swaps_to_fresh_active_payload() -> None:
             "world_pose_vo": np.array([1.0, 0.0, 0.0]),
             "robot_xy": np.array([1.0, 0.0]),
             "robot_heading": 0.0,
-            "submap_overlap_before_update": 1.0,
+            "submap_overlap_before_update": 0.0,
         }
     ]
-    policy._submap_pending_revisit = [None]
     policy._submap_boundary_frames = [[]]
     policy._submap_diagnostics = None
     policy._submap_episode_sequence = [0]
@@ -450,7 +679,6 @@ def test_policy_action_end_swaps_to_fresh_active_payload() -> None:
     policy._last_frontier_distance = [3.0]
     policy.min_distance_xy = [2.0]
     policy.cur_frontier = [np.ones(2)]
-    policy._submap_remote_frontier_id = ["old"]
     policy.llm_planner = SimpleNamespace(
         _last_frontier=[np.zeros(2)],
         reset_submap_local_state=lambda env: None
@@ -463,7 +691,7 @@ def test_policy_action_end_swaps_to_fresh_active_payload() -> None:
     assert active.payload.identity == replacement.identity
     assert policy._map_controller.payload.identity == replacement.identity
     assert policy._pointnav_policy[0].reset_count == 1
-    assert policy._policy_info[0]["submap_split_reason"] == "motion_budget"
+    assert policy._policy_info[0]["submap_split_reason"] == "low_overlap"
     assert policy._policy_info[0]["submap_count"] == 2
 
 

@@ -7,12 +7,15 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Optional
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CALIBRATOR = ROOT / "scripts" / "calibrate_submap_thresholds.py"
 SUMMARIZER = ROOT / "scripts" / "summarize_submap_screen.py"
+V1_1_SUMMARIZER = (
+    ROOT / "scripts" / "summarize_submap_v1_1_screen.py"
+)
 MATERIALIZER = ROOT / "scripts" / "materialize_submap_screen.py"
 MANIFEST_DERIVER = ROOT / "scripts" / "derive_submap_manifest.py"
 PREFLIGHT = ROOT / "scripts" / "preflight_submap_screen.py"
@@ -686,11 +689,23 @@ def test_calibration_is_train_diagnostic_only(tmp_path: Path) -> None:
 
 
 def make_vo_diagnostics(
-    path: Path, condition: str, episode_count: int
+    path: Path,
+    condition: str,
+    episode_count: int,
+    *,
+    execution_order: Optional[Iterable[int]] = None,
+    action_steps_by_episode: Optional[Mapping[int, int]] = None,
 ) -> None:
     rows = [vo_metadata()]
-    for episode in range(episode_count):
-        for step in (1, 2):
+    order = (
+        list(range(episode_count))
+        if execution_order is None
+        else list(execution_order)
+    )
+    step_counts = dict(action_steps_by_episode or {})
+    for episode in order:
+        action_steps = step_counts.get(episode, 2)
+        for step in range(1, action_steps + 1):
             rows.append(
                 {
                     "record_type": "vo_step",
@@ -709,7 +724,7 @@ def make_vo_diagnostics(
                 "record_type": "episode_end",
                 "scene_id": f"/asset/hm3d/train/s{episode}/s{episode}.basis.glb",
                 "episode_id": str(episode),
-                "action_steps": 2,
+                "action_steps": action_steps,
                 "native_metrics": {
                     "success": float(
                         episode == 0 or condition == "B2"
@@ -730,38 +745,89 @@ def make_submap_diagnostics(
     path: Path,
     config: Mapping[str, Any],
     episode_count: int,
+    *,
+    execution_order: Optional[Iterable[int]] = None,
+    action_steps_by_episode: Optional[Mapping[int, int]] = None,
+    v1_1: bool = False,
 ) -> None:
-    rows = [
-        {
-            "record_type": "submap_run_metadata",
-            "ascent_source_commit": SOURCE,
-            "pose_source": "zhao_rgbd_2021",
-            "policy_gt_isolation": True,
-            "config": {"enabled": True, **dict(config)},
-        }
-    ]
-    for episode in range(episode_count):
+    metadata = {
+        "record_type": "submap_run_metadata",
+        "ascent_source_commit": SOURCE,
+        "pose_source": "zhao_rgbd_2021",
+        "policy_gt_isolation": True,
+        "config": {"enabled": True, **dict(config)},
+    }
+    if v1_1:
+        metadata.update(
+            {
+                "method_version": "submap_v1.1",
+                "split_contract": (
+                    "vo_anchor_and_rgbd_overlap_joint"
+                ),
+                "fallback_contract": (
+                    "ascent_local_first_persistent_route"
+                ),
+            }
+        )
+    rows = [metadata]
+    order = (
+        list(range(episode_count))
+        if execution_order is None
+        else list(execution_order)
+    )
+    step_counts = dict(action_steps_by_episode or {})
+    for sequence, episode in enumerate(order):
         rows.append(
             {
                 "record_type": "submap_episode_reset",
-                "episode_sequence": episode,
+                "episode_sequence": sequence,
             }
         )
-        for step in (0, 1):
-            rows.append(
-                {
-                    "record_type": "submap_action_endpoint",
-                    "episode_sequence": episode,
-                    "action_step": step,
+        for step in range(step_counts.get(episode, 2)):
+            endpoint = {
+                "record_type": "submap_action_endpoint",
+                "episode_sequence": sequence,
+                "action_step": step,
+            }
+            if v1_1:
+                is_last = step == step_counts.get(episode, 2) - 1
+                endpoint["decision"] = {
+                    "should_split": is_last,
+                    "reason": "low_overlap" if is_last else None,
+                    "mature": is_last,
+                    "anchor_displacement_m": 1.5 if is_last else 0.5,
+                    "low_overlap_streak": 3 if is_last else step + 1,
+                    "route_action": False,
                 }
-            )
+            rows.append(endpoint)
         rows.append(
             {
                 "record_type": "submap_event",
-                "episode_sequence": episode,
+                "episode_sequence": sequence,
                 "event": "submap_split",
+                "reason": "low_overlap",
             }
         )
+        if v1_1:
+            rows.extend(
+                [
+                    {
+                        "record_type": "submap_event",
+                        "episode_sequence": sequence,
+                        "event": "remote_route_selected",
+                        "candidate_key": (
+                            f"semantic:sm{episode}:chair"
+                        ),
+                        "target_kind": "semantic",
+                    },
+                    {
+                        "record_type": "submap_event",
+                        "episode_sequence": sequence,
+                        "event": "remote_route_finished",
+                        "outcome": "destination_reached",
+                    },
+                ]
+            )
     write_jsonl(path, rows)
 
 
@@ -824,9 +890,27 @@ def test_paired_summarizer_checks_submap_and_gt_separation(
     b1_vo = tmp_path / "b1_vo.jsonl"
     b2_vo = tmp_path / "b2_vo.jsonl"
     b2_submap = tmp_path / "b2_submap.jsonl"
-    make_vo_diagnostics(b1_vo, "B1", 2)
-    make_vo_diagnostics(b2_vo, "B2", 2)
-    make_submap_diagnostics(b2_submap, config, 2)
+    action_steps = {0: 2, 1: 3}
+    make_vo_diagnostics(
+        b1_vo,
+        "B1",
+        2,
+        action_steps_by_episode=action_steps,
+    )
+    make_vo_diagnostics(
+        b2_vo,
+        "B2",
+        2,
+        execution_order=[1, 0],
+        action_steps_by_episode=action_steps,
+    )
+    make_submap_diagnostics(
+        b2_submap,
+        config,
+        2,
+        execution_order=[1, 0],
+        action_steps_by_episode=action_steps,
+    )
     inventory = tmp_path / "inventory.csv"
     rows = [
         {
@@ -899,11 +983,168 @@ def test_paired_summarizer_checks_submap_and_gt_separation(
     assert result["mechanism"]["split_count"] == 2
 
 
+def test_v1_1_b2_only_summarizer_matches_frozen_arm_a(
+    tmp_path: Path,
+) -> None:
+    identities = tmp_path / "identity.csv"
+    identity_rows = [
+        {
+            "runtime_episode_id": str(index),
+            "logical_case_id": f"case_{index}",
+            "dataset": "hm3d",
+            "episode_seed": str(10 + index),
+            "source_episode_id": str(index),
+            "scene_id": f"hm3d/train/s{index}/s{index}.basis.glb",
+            "target_category": "chair",
+            "geodesic_distance": "5.0",
+        }
+        for index in range(2)
+    ]
+    write_csv(identities, identity_rows, list(identity_rows[0]))
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema": "ascent_vo_submap_screen_materialized_v1",
+                "dataset": "hm3d",
+                "split": "train",
+                "episode_count": 2,
+                "logical_case_ids": ["case_0", "case_1"],
+                "chunks": [
+                    {
+                        "chunk_id": "c000",
+                        "episode_count": 2,
+                        "identity_path": str(identities),
+                        "identity_sha256": sha256(identities),
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config = {
+        "min_action_endpoints": 20,
+        "min_anchor_displacement_m": 1.5,
+        "overlap_threshold": 0.35,
+        "low_overlap_consecutive": 3,
+        "gateway_frontier_resolution_radius_m": 1.0,
+        "gateway_reached_radius_m": 0.9,
+        "route_min_progress_m": 0.30,
+        "route_max_stagnation_actions": 30,
+        "route_max_waypoint_actions": 60,
+        "provisional_thresholds": False,
+    }
+    b2_vo = tmp_path / "b2_vo.jsonl"
+    b2_submap = tmp_path / "b2_submap.jsonl"
+    action_steps = {0: 2, 1: 3}
+    make_vo_diagnostics(
+        b2_vo,
+        "B2",
+        2,
+        execution_order=[1, 0],
+        action_steps_by_episode=action_steps,
+    )
+    make_submap_diagnostics(
+        b2_submap,
+        config,
+        2,
+        execution_order=[1, 0],
+        action_steps_by_episode=action_steps,
+        v1_1=True,
+    )
+    inventory = tmp_path / "inventory.csv"
+    write_csv(
+        inventory,
+        [
+            {
+                "priority": 0,
+                "stage": "screen",
+                "condition": "B2",
+                "chunk_id": "c000",
+                "vo_diagnostics": b2_vo,
+                "submap_diagnostics": b2_submap,
+            }
+        ],
+        [
+            "priority",
+            "stage",
+            "condition",
+            "chunk_id",
+            "vo_diagnostics",
+            "submap_diagnostics",
+        ],
+    )
+    registry = tmp_path / "registry.csv"
+    write_csv(
+        registry,
+        [{"lane_id": 0, "inventory": inventory}],
+        ["lane_id", "inventory"],
+    )
+    baseline = tmp_path / "arm_a.csv"
+    baseline_rows = [
+        {
+            "logical_case_id": f"case_{index}",
+            "dataset": "hm3d",
+            "arm": "A",
+            "scene_id": (
+                f"/asset/hm3d/train/s{index}/s{index}.basis.glb"
+            ),
+            "action_steps": action_steps[index],
+            "success": float(index == 0),
+            "spl": 0.4,
+        }
+        for index in range(2)
+    ]
+    write_csv(baseline, baseline_rows, list(baseline_rows[0]))
+    output = tmp_path / "summary"
+    subprocess.run(
+        [
+            sys.executable,
+            str(V1_1_SUMMARIZER),
+            "--manifest",
+            str(manifest),
+            "--registry",
+            str(registry),
+            "--mode",
+            "full",
+            "--expected-dataset",
+            "hm3d",
+            "--expected-episodes",
+            "2",
+            "--source-commit",
+            SOURCE,
+            "--forward-checkpoint-sha256",
+            FORWARD,
+            "--turn-checkpoint-sha256",
+            TURN,
+            "--baseline-episodes-csv",
+            str(baseline),
+            "--output-dir",
+            str(output),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads((output / "summary.json").read_text())
+    assert result["technical_status"] == "PASS"
+    assert result["b2_valid_episodes"] == 2
+    assert result["historical_b1_matched_episodes"] == 2
+    assert result["metrics"]["success_flips"]["0->1"] == 1
+    assert result["mechanism"]["route_selected_count"] == 2
+    assert result["mechanism"]["legacy_revisit_count"] == 0
+    assert result["performance_verdict"] == "SCREEN_POSITIVE"
+
+
 def test_pbs_scripts_are_syntactically_valid() -> None:
     for relative in (
         "pbs/run_submap_screen_lane.sh",
         "pbs/run_submap_screen_3shared.pbs",
         "pbs/submit_submap_screen.sh",
+        "pbs/run_submap_v1_1_lane.sh",
+        "pbs/run_submap_v1_1_3shared.pbs",
+        "pbs/submit_submap_v1_1.sh",
     ):
         subprocess.run(
             ["bash", "-n", str(ROOT / relative)],
@@ -911,6 +1152,45 @@ def test_pbs_scripts_are_syntactically_valid() -> None:
             capture_output=True,
             text=True,
         )
+
+
+def test_v1_1_harness_is_b2_only_fixed_and_placement_gated() -> None:
+    worker = (
+        ROOT / "pbs" / "run_submap_v1_1_lane.sh"
+    ).read_text()
+    controller = (
+        ROOT / "pbs" / "run_submap_v1_1_3shared.pbs"
+    ).read_text()
+    submitter = (
+        ROOT / "pbs" / "submit_submap_v1_1.sh"
+    ).read_text()
+
+    assert "external/ascent_vo_submap_v1_1" in worker
+    assert "condition=B2" in worker
+    assert "condition=B1" not in worker
+    assert "ascent_submaps.min_action_endpoints=20" in worker
+    assert "ascent_submaps.min_anchor_displacement_m=1.5" in worker
+    assert "ascent_submaps.overlap_threshold=0.35" in worker
+    assert "ascent_submaps.low_overlap_consecutive=3" in worker
+    assert "ascent_submaps.max_motion_budget_m=" not in worker
+    assert "run_lane smoke" in controller
+    assert controller.index("run_lane smoke") < controller.index(
+        "for lane_row in"
+    )
+    assert "no_metric_driven_retry=1" in controller
+    assert "artifacts/objectnav/submap_v1_1" in submitter
+    assert "artifacts/objectnav/submap_v1/manifests" in submitter
+    inventory_header = next(
+        line
+        for line in worker.splitlines()
+        if line.startswith("printf 'priority,stage,condition,")
+    )
+    inventory_row = next(
+        line
+        for line in worker.splitlines()
+        if line.startswith("  printf '%s,screen,B2,")
+    )
+    assert inventory_header.count(",") == inventory_row.count(",")
 
 
 def test_frozen_calibration_selection_is_episode_disjoint() -> None:

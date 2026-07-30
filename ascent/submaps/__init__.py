@@ -17,6 +17,7 @@ from ascent.submaps.lifecycle import (
 from ascent.submaps.overlap import ViewOverlapConfig, estimate_view_overlap
 from ascent.submaps.topology import transfer_stair_topology
 from ascent.submaps.query_view import SubmapQueryView
+from ascent.submaps.routes import RemoteRoute, RouteWaypoint
 from ascent.submaps.types import (
     FrontierRecord,
     FrontierStatus,
@@ -33,6 +34,8 @@ __all__ = [
     "FrontierStatus",
     "GatewayEdge",
     "MapPayload",
+    "RemoteRoute",
+    "RouteWaypoint",
     "SplitDecision",
     "SubmapDiagnosticsWriter",
     "SubmapBundle",

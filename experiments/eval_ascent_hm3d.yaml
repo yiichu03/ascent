@@ -20,13 +20,17 @@ ascent_vo:
 ascent_submaps:
   enabled: ${oc.env:ASCENT_SUBMAP_ENABLED,false}
   min_action_endpoints: 20
+  min_anchor_displacement_m: 1.5
   min_path_length_m: 1.5
-  overlap_threshold: 0.25
+  overlap_threshold: 0.35
   low_overlap_consecutive: 3
   max_motion_budget_m: 8.0
   rotation_weight_m_per_rad: 0.10
   gateway_frontier_resolution_radius_m: 1.0
   gateway_reached_radius_m: 0.9
+  route_min_progress_m: 0.30
+  route_max_stagnation_actions: 30
+  route_max_waypoint_actions: 60
   overlap_sample_stride: 16
   overlap_ray_samples: 4
   overlap_explored_dilation_cells: 3

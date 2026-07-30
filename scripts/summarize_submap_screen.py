@@ -188,6 +188,35 @@ def validate_submap_metadata(
     if not isinstance(config, Mapping) or config.get("enabled") is not True:
         errors.append("submap_metadata:enabled")
         return errors
+    if metadata.get("method_version") == "submap_v1.1":
+        v1_1_expected = {
+            "split_contract": "vo_anchor_and_rgbd_overlap_joint",
+            "fallback_contract": "ascent_local_first_persistent_route",
+        }
+        for key, value in v1_1_expected.items():
+            if metadata.get(key) != value:
+                errors.append(
+                    f"submap_metadata:{key}:{metadata.get(key)!r}"
+                )
+        expected_config = {
+            "min_action_endpoints": 20,
+            "min_anchor_displacement_m": 1.5,
+            "overlap_threshold": 0.35,
+            "low_overlap_consecutive": 3,
+            "gateway_frontier_resolution_radius_m": 1.0,
+            "gateway_reached_radius_m": 0.9,
+            "route_min_progress_m": 0.30,
+            "route_max_stagnation_actions": 30,
+            "route_max_waypoint_actions": 60,
+            "provisional_thresholds": False,
+        }
+        for key, value in expected_config.items():
+            if config.get(key) != value:
+                errors.append(
+                    f"submap_metadata:v1_1_config:{key}:"
+                    f"{config.get(key)!r}:{value!r}"
+                )
+        return errors
     if calibration is None and mode == "smoke":
         if config.get("provisional_thresholds") is not True:
             errors.append("submap_metadata:smoke_not_provisional")
@@ -270,14 +299,20 @@ def parse_attempt(
         )
     steps: Dict[str, list[Dict[str, Any]]] = defaultdict(list)
     ends: Dict[str, list[Dict[str, Any]]] = defaultdict(list)
+    episode_sequences: Dict[str, list[int]] = defaultdict(list)
     for record in vo_records:
         kind = record.get("record_type")
         if kind == "vo_step":
             steps[str(record.get("episode_id"))].append(record)
         elif kind == "episode_end":
-            ends[str(record.get("episode_id"))].append(record)
+            runtime_id = str(record.get("episode_id"))
+            episode_sequences[runtime_id].append(
+                sum(len(values) for values in ends.values())
+            )
+            ends[runtime_id].append(record)
 
     submap_by_sequence: Dict[int, Dict[str, Any]] = {}
+    submap_method_version = None
     submap_path_text = row.get("submap_diagnostics", "")
     if condition == "B1":
         if submap_path_text and Path(submap_path_text).exists():
@@ -306,6 +341,9 @@ def parse_attempt(
                 f"{len(submap_metadata)}"
             )
         else:
+            submap_method_version = submap_metadata[0].get(
+                "method_version"
+            )
             errors.extend(
                 validate_submap_metadata(
                     submap_metadata[0],
@@ -333,6 +371,7 @@ def parse_attempt(
     accepted: Dict[str, Dict[str, Any]] = {}
     for runtime_id, identity in chunk["identity_by_runtime"].items():
         local_errors = []
+        episode_submap_events: list[Dict[str, Any]] = []
         episode_ends = ends.get(runtime_id, [])
         if len(episode_ends) != 1:
             continue
@@ -369,11 +408,16 @@ def parse_attempt(
         if any(item.get("finite") is not True for item in episode_steps):
             local_errors.append("vo_finite")
         if condition == "B2":
-            sequence = int(runtime_id)
-            submap = submap_by_sequence.get(sequence)
+            sequence_values = episode_sequences.get(runtime_id, [])
+            if len(sequence_values) != 1:
+                local_errors.append("submap_episode_sequence")
+                submap = None
+            else:
+                submap = submap_by_sequence.get(sequence_values[0])
             if submap is None or submap["resets"] != 1:
                 local_errors.append("submap_reset")
                 submap = {"endpoints": [], "events": []}
+            episode_submap_events = list(submap["events"])
             endpoint_steps = sorted(
                 int(item.get("action_step", -1))
                 for item in submap["endpoints"]
@@ -383,6 +427,57 @@ def parse_attempt(
             events = Counter(
                 str(item.get("event")) for item in submap["events"]
             )
+            if submap_method_version == "submap_v1.1":
+                selected_candidates = Counter(
+                    str(item.get("candidate_key"))
+                    for item in submap["events"]
+                    if item.get("event") == "remote_route_selected"
+                )
+                if any(
+                    count > 1
+                    for candidate, count in selected_candidates.items()
+                    if candidate not in {"", "None"}
+                ):
+                    local_errors.append("remote_candidate_reselected")
+                if any(
+                    events[name] > 0
+                    for name in (
+                        "submap_revisit",
+                        "gateway_revisit_requested",
+                        "gateway_route_action",
+                    )
+                ):
+                    local_errors.append("legacy_revisit_event")
+                for endpoint in submap["endpoints"]:
+                    decision = endpoint.get("decision", {})
+                    if not isinstance(decision, Mapping):
+                        local_errors.append("split_decision_schema")
+                        break
+                    if decision.get("reason") == "motion_budget":
+                        local_errors.append("motion_budget_split")
+                        break
+                    if (
+                        decision.get("should_split") is True
+                        and decision.get("reason") == "low_overlap"
+                        and (
+                            decision.get("mature") is not True
+                            or finite_float(
+                                decision.get("anchor_displacement_m")
+                            )
+                            is None
+                            or float(
+                                decision.get("anchor_displacement_m")
+                            )
+                            < 1.5
+                            or int(
+                                decision.get("low_overlap_streak", -1)
+                            )
+                            < 3
+                            or decision.get("route_action") is True
+                        )
+                    ):
+                        local_errors.append("joint_split_contract")
+                        break
         else:
             events = Counter()
         if local_errors:
@@ -432,6 +527,39 @@ def parse_attempt(
             "remote_boundary_crossing_count": events[
                 "remote_frontier_boundary_crossing"
             ],
+            "remote_route_selected_count": events[
+                "remote_route_selected"
+            ],
+            "remote_route_waypoint_action_count": events[
+                "remote_route_waypoint_action"
+            ],
+            "remote_route_waypoint_reached_count": events[
+                "remote_route_waypoint_reached"
+            ],
+            "remote_route_finished_count": events[
+                "remote_route_finished"
+            ],
+            "remote_route_target_kinds": dict(
+                Counter(
+                    str(item.get("target_kind"))
+                    for item in episode_submap_events
+                    if item.get("event") == "remote_route_selected"
+                )
+            ),
+            "remote_route_outcomes": dict(
+                Counter(
+                    str(item.get("outcome"))
+                    for item in episode_submap_events
+                    if item.get("event") == "remote_route_finished"
+                )
+            ),
+            "submap_split_reasons": dict(
+                Counter(
+                    str(item.get("reason"))
+                    for item in episode_submap_events
+                    if item.get("event") == "submap_split"
+                )
+            ),
             "evidence_vo_diagnostics": str(vo_path),
             "evidence_submap_diagnostics": submap_path_text,
         }
