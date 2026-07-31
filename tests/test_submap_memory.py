@@ -33,14 +33,39 @@ def payload(tag: str) -> MapPayload:
     )
 
 
-def test_fresh_submap_frontier_has_step_zero_visualization_record() -> None:
-    obstacle_map = ObstacleMap(
+def _obstacle_map(
+    *, allow_step_zero_frontier_projection: bool = False
+) -> ObstacleMap:
+    return ObstacleMap(
         min_height=0.1,
         max_height=1.5,
         area_thresh=1.0,
         agent_radius=0.18,
         hole_area_thresh=0.1,
         size=64,
+        allow_step_zero_frontier_projection=(
+            allow_step_zero_frontier_projection
+        ),
+    )
+
+
+def test_episode_start_preserves_ascent_step_zero_frontier_guard() -> None:
+    obstacle_map = _obstacle_map()
+    frontier = np.array([0.8, -0.75], dtype=np.float64)
+    rgb = np.zeros((12, 16, 3), dtype=np.uint8)
+    obstacle_map.frontiers = frontier.reshape(1, 2)
+
+    assert obstacle_map._floor_num_steps == 0
+    obstacle_map.project_frontiers_to_rgb_hush(rgb)
+
+    assert obstacle_map.previous_frontiers == []
+    assert obstacle_map.frontier_visualization_info == {}
+    assert obstacle_map._each_step_rgb == {}
+
+
+def test_fresh_submap_frontier_has_step_zero_visualization_record() -> None:
+    obstacle_map = _obstacle_map(
+        allow_step_zero_frontier_projection=True
     )
     frontier = np.array([0.8, -0.75], dtype=np.float64)
     rgb = np.zeros((12, 16, 3), dtype=np.uint8)
@@ -57,6 +82,21 @@ def test_fresh_submap_frontier_has_step_zero_visualization_record() -> None:
     )
     assert floor_step == 0
     np.testing.assert_array_equal(cached_rgb, rgb)
+
+
+def test_episode_reset_revokes_successor_step_zero_permission() -> None:
+    obstacle_map = _obstacle_map(
+        allow_step_zero_frontier_projection=True
+    )
+    frontier = np.array([0.8, -0.75], dtype=np.float64)
+    rgb = np.zeros((12, 16, 3), dtype=np.uint8)
+
+    obstacle_map.reset()
+    obstacle_map.frontiers = frontier.reshape(1, 2)
+    obstacle_map.project_frontiers_to_rgb_hush(rgb)
+
+    assert obstacle_map._allow_step_zero_frontier_projection is False
+    assert obstacle_map.frontier_visualization_info == {}
 
 
 def test_relative_pose_and_point_transform_round_trip() -> None:
@@ -611,11 +651,17 @@ class _ControllerStub:
         self._cur_floor_index = [0]
         self._climb_stair_over = [True]
         self.reset_calls = []
+        self.step_zero_projection_permissions = []
 
     def current_map_payload(self, env):
         return self.payload
 
-    def create_empty_map_payload(self):
+    def create_empty_map_payload(
+        self, *, allow_step_zero_frontier_projection=False
+    ):
+        self.step_zero_projection_permissions.append(
+            allow_step_zero_frontier_projection
+        )
         return self.replacement
 
     def install_map_payload(self, env, payload):
@@ -690,6 +736,7 @@ def test_policy_action_end_swaps_to_fresh_active_payload() -> None:
     assert old.state.value == "frozen"
     assert active.payload.identity == replacement.identity
     assert policy._map_controller.payload.identity == replacement.identity
+    assert policy._map_controller.step_zero_projection_permissions == [True]
     assert policy._pointnav_policy[0].reset_count == 1
     assert policy._policy_info[0]["submap_split_reason"] == "low_overlap"
     assert policy._policy_info[0]["submap_count"] == 2

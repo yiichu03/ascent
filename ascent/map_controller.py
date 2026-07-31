@@ -196,7 +196,9 @@ class Map_Controller:
             object_map=self._object_map[env],
         )
 
-    def create_empty_map_payload(self) -> MapPayload:
+    def create_empty_map_payload(
+        self, *, allow_step_zero_frontier_projection: bool = False
+    ) -> MapPayload:
         object_map = ObjectPointCloudMap(
             erosion_size=self._object_map_erosion_size,
             size=self.MAP_SIZE,
@@ -208,6 +210,9 @@ class Map_Controller:
             agent_radius=self.agent_radius,
             hole_area_thresh=self.hole_area_thresh,
             size=self.MAP_SIZE,
+            allow_step_zero_frontier_projection=(
+                allow_step_zero_frontier_projection
+            ),
         )
         value_map = ValueMap(
             value_channels=len(self._text_prompt.split(PROMPT_SEPARATOR)),
@@ -279,7 +284,9 @@ class Map_Controller:
         self._cur_floor_index[env] = destination_index
         self.install_map_payload(
             env,
-            self.create_empty_map_payload(),
+            self.create_empty_map_payload(
+                allow_step_zero_frontier_projection=True
+            ),
             floor_index=destination_index,
         )
     def is_robot_in_stair_map_fast(self, env: int, robot_px:np.ndarray, stair_map: np.ndarray):

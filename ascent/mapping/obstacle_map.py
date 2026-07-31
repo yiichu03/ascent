@@ -62,6 +62,7 @@ class ObstacleMap(BaseMap):
         hole_area_thresh: int = 100000,  # square pixels
         size: int = 1000,
         pixels_per_meter: int = 20,
+        allow_step_zero_frontier_projection: bool = False,
     ):
         super().__init__(size, pixels_per_meter)
 
@@ -124,6 +125,9 @@ class ObstacleMap(BaseMap):
         self.stair_boundary = np.zeros((size, size), dtype=bool)
         self.stair_boundary_goal = np.zeros((size, size), dtype=bool)
         self._floor_num_steps = 0
+        self._allow_step_zero_frontier_projection = bool(
+            allow_step_zero_frontier_projection
+        )
         self._disabled_frontiers = set()
         self._disabled_frontiers_px =  np.array([], dtype=np.float64).reshape(0, 2) # np.array([])
         # self._temp_down_stair_map_frontiers_px = np.array([])
@@ -267,7 +271,11 @@ class ObstacleMap(BaseMap):
 
         self._carrot_goal_px = np.array([])
 
-        self._floor_num_steps = 0      
+        self._floor_num_steps = 0
+        # reset() marks an episode boundary.  Even if the first floor slot
+        # still holds the final successor submap from the previous episode,
+        # the next episode must recover ASCENT's original step-zero behavior.
+        self._allow_step_zero_frontier_projection = False
         self._disabled_frontiers = set()
         self._disabled_frontiers_px =  np.array([], dtype=np.float64).reshape(0, 2) # np.array([])
         # self._search_down_stair = False
@@ -407,11 +415,13 @@ class ObstacleMap(BaseMap):
             dict: A dictionary containing the visualized RGB images with frontiers marked for each new frontier.
         """
         # Step 1: Convert frontiers from pixel coordinates to world coordinates
-        # A freshly activated submap starts its local step counter at zero.
-        # Frontiers produced by that first local update are already valid and
-        # may be consumed by the LLM planner in the same policy step, so zero
-        # must remain a valid visualization-cache key.
-        if len(self.frontiers) == 0:
+        # ASCENT intentionally skips the episode's first local step.  A true
+        # successor submap is the sole exception: it starts its own local
+        # counter at zero after the episode is already underway.
+        if len(self.frontiers) == 0 or (
+            self._floor_num_steps == 0
+            and not self._allow_step_zero_frontier_projection
+        ):
             return {}  # No frontiers to project
 
         # Step 2: Identify new frontiers

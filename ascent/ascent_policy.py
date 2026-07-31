@@ -851,7 +851,9 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         )
         if decision.should_split:
             self._snapshot_submap_policy_state(env, old_bundle)
-            new_payload = self._map_controller.create_empty_map_payload()
+            new_payload = self._map_controller.create_empty_map_payload(
+                allow_step_zero_frontier_projection=True
+            )
             new_bundle, _, _ = self._submap_manager.commit_split(
                 env=env,
                 world_pose=world_pose,
