@@ -30,17 +30,26 @@ from constants import (
     TURN_RIGHT,
     LOOK_UP,
     LOOK_DOWN,
+    STICKY_FRONTIER_DISTANCE_THRESHOLD,
+    STICKY_FRONTIER_STEP_THRESHOLD,
 )
 from ascent.llm_planner import Ascent_LLM_Planner
 from ascent.map_controller import Map_Controller
 from ascent.submaps import (
+    BoundaryHandoff,
+    DepthGeometryFrame,
+    ExhaustionRecovery,
     SubmapDiagnosticsWriter,
     SubmapLifecycleConfig,
     SubmapManager,
     RemoteRoute,
     ViewOverlapConfig,
     estimate_view_overlap,
+    replay_depth_geometry,
+    select_connected_handoff_waypoint,
     transfer_stair_topology,
+    transform_points_xy,
+    waypoint_in_robot_component,
 )
 from ascent.submaps.types import SubmapState
 from ascent.utils import (
@@ -78,6 +87,9 @@ def _as_config_bool(value: Any, key: str) -> bool:
 
 @baseline_registry.register_policy
 class Ascent_Policy(HabitatMixin, ITMPolicyV2):
+
+    _RECOVERY_SCAN_TURNS = 12
+    _RECOVERY_MIN_REMAINING_ACTIONS = 13
 
     @classmethod
     def from_config(cls, config: DictConfig, *args_unused: Any, **kwargs_unused: Any) -> "Ascent_Policy":
@@ -260,6 +272,24 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             ),
         )
         self._submap_enabled = self._submap_config.enabled
+        self._submap_handoff_enabled = _as_config_bool(
+            _submap_config_value(config, "handoff_enabled", False),
+            "handoff_enabled",
+        )
+        self._submap_exhaustion_recovery_enabled = _as_config_bool(
+            _submap_config_value(
+                config, "exhaustion_recovery_enabled", False
+            ),
+            "exhaustion_recovery_enabled",
+        )
+        if (
+            self._submap_handoff_enabled
+            or self._submap_exhaustion_recovery_enabled
+        ) and not self._submap_enabled:
+            raise RuntimeError(
+                "ASCENT submap continuity features require "
+                "ascent_submaps.enabled=true"
+            )
         allow_provisional = _as_config_bool(
             _submap_config_value(
                 config, "allow_provisional_thresholds", False
@@ -316,6 +346,15 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         self._submap_boundary_frames: List[List[Dict[str, object]]] = [
             [] for _ in range(self._num_envs)
         ]
+        self._submap_depth_frames: List[List[DepthGeometryFrame]] = [
+            [] for _ in range(self._num_envs)
+        ]
+        self._submap_handoff: List[Optional[BoundaryHandoff]] = [
+            None for _ in range(self._num_envs)
+        ]
+        self._submap_exhaustion_recovery: List[ExhaustionRecovery] = [
+            ExhaustionRecovery() for _ in range(self._num_envs)
+        ]
         self._submap_diagnostics: Optional[
             SubmapDiagnosticsWriter
         ] = None
@@ -340,9 +379,23 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     ),
                     "pose_source": "zhao_rgbd_2021",
                     "policy_gt_isolation": True,
-                    "method_version": "submap_v1.1",
+                    "method_version": (
+                        "submap_v1.2"
+                        if (
+                            self._submap_handoff_enabled
+                            or self._submap_exhaustion_recovery_enabled
+                        )
+                        else "submap_v1.1"
+                    ),
                     "split_contract": "vo_anchor_and_rgbd_overlap_joint",
                     "fallback_contract": "ascent_local_first_persistent_route",
+                    "handoff_enabled": self._submap_handoff_enabled,
+                    "exhaustion_recovery_enabled": (
+                        self._submap_exhaustion_recovery_enabled
+                    ),
+                    "continuity_contract": (
+                        "single_connected_handoff_and_one_shot_360_recovery"
+                    ),
                     "config": {
                         key: getattr(self._submap_config, key)
                         for key in self._submap_config.__dataclass_fields__
@@ -396,6 +449,9 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             self._submap_route_sequence[env] = 0
             self._submap_attempted_semantics[env].clear()
             self._submap_boundary_frames[env] = []
+            self._submap_depth_frames[env] = []
+            self._submap_handoff[env] = None
+            self._submap_exhaustion_recovery[env] = ExhaustionRecovery()
             self.llm_planner.reset_submap_local_state(env)
             if self._submap_diagnostics is not None:
                 self._submap_diagnostics.record_episode_reset(
@@ -686,11 +742,37 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             self._submap_boundary_frames[env] = (
                 self._submap_boundary_frames[env][-4:]
             )
+            if (
+                self._submap_handoff_enabled
+                or self._submap_exhaustion_recovery_enabled
+            ):
+                self._submap_depth_frames[env].append(
+                    DepthGeometryFrame(
+                        depth=depth,
+                        tf_camera_to_source=cache[
+                            "tf_camera_to_episodic"
+                        ],
+                        min_depth=float(cache["min_depth"]),
+                        max_depth=float(cache["max_depth"]),
+                        fx=float(cache["fx"]),
+                        fy=float(cache["fy"]),
+                        camera_fov=float(cache["camera_fov"]),
+                        action_step=int(self._num_steps[env]),
+                    )
+                )
+                self._submap_depth_frames[env] = self._submap_depth_frames[
+                    env
+                ][-4:]
 
     def _reset_submap_coordinate_state(
-        self, env: int, *, initialize_new_floor: bool
+        self,
+        env: int,
+        *,
+        initialize_new_floor: bool,
+        preserve_pointnav: bool = False,
     ) -> None:
-        self._pointnav_policy[env].reset()
+        if not preserve_pointnav:
+            self._pointnav_policy[env].reset()
         self._last_goal[env] = np.zeros(2)
         self._try_to_navigate_step[env] = 0
         self._try_to_navigate[env] = False
@@ -787,6 +869,208 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             }
         )
 
+    def _handoff_frontier_before_split(
+        self, env: int, split_reason: Optional[str]
+    ) -> Tuple[Optional[np.ndarray], str]:
+        """Return the sole intent eligible for a low-overlap handoff."""
+
+        if not getattr(self, "_submap_handoff_enabled", False):
+            return None, "feature_disabled"
+        if split_reason != "low_overlap":
+            return None, "not_low_overlap"
+        cache = self._observations_cache[env]
+        if cache.get("policy_mode") != "explore":
+            return None, "not_explore_mode"
+        if bool(self._try_to_navigate[env]):
+            return None, "object_navigation_active"
+        if self._submap_remote_route[env] is not None:
+            return None, "remote_route_active"
+        if (
+            not bool(self._map_controller._climb_stair_over[env])
+            or int(self._map_controller._climb_stair_flag[env]) != 0
+            or bool(
+                self._map_controller._obstacle_map[
+                    env
+                ]._look_for_downstair_flag
+            )
+            or int(self._pitch_angle[env]) != 0
+        ):
+            return None, "stair_action_active"
+        frontier = np.asarray(self.cur_frontier[env], dtype=np.float64)
+        if frontier.shape != (2,) or not np.isfinite(frontier).all():
+            return None, "invalid_frontier"
+        if tuple(frontier) in self._map_controller._obstacle_map[
+            env
+        ]._disabled_frontiers:
+            return None, "disabled_frontier"
+        current_frontiers = np.asarray(
+            self._map_controller._obstacle_map[env].frontiers,
+            dtype=np.float64,
+        )
+        if current_frontiers.size == 0:
+            return None, "frontier_not_current"
+        current_frontiers = current_frontiers.reshape(-1, 2)
+        if np.array_equal(
+            current_frontiers, np.zeros((1, 2), dtype=np.float64)
+        ) or not np.any(
+            np.linalg.norm(current_frontiers - frontier, axis=1) <= 1e-6
+        ):
+            return None, "frontier_not_current"
+        return frontier.copy(), "eligible"
+
+    def _eligible_frontiers(self, payload: object) -> np.ndarray:
+        """Filter frozen frontier evidence through ASCENT's hard disable set."""
+
+        frontiers = self._frontier_array(payload)
+        disabled = payload.obstacle_map._disabled_frontiers
+        if len(frontiers) == 0 or np.array_equal(
+            frontiers, np.zeros((1, 2), dtype=np.float64)
+        ):
+            return np.empty((0, 2), dtype=np.float64)
+        eligible = [point for point in frontiers if tuple(point) not in disabled]
+        if len(eligible) == 0:
+            return np.empty((0, 2), dtype=np.float64)
+        return np.asarray(eligible, dtype=np.float64).reshape(-1, 2)
+
+    def _cancel_handoff(self, env: int, reason: str) -> None:
+        handoff = self._submap_handoff[env]
+        if handoff is None:
+            return
+        self._record_submap_policy_event(
+            env,
+            "handoff_cancelled",
+            reason=str(reason),
+            source_submap_id=handoff.source_submap_id,
+            destination_submap_id=handoff.destination_submap_id,
+            stagnation_decisions=int(handoff.stagnation_decisions),
+        )
+        self._submap_handoff[env] = None
+
+    def _execute_handoff(
+        self,
+        observations: Union[Dict[str, Tensor], "TensorDict"],
+        env: int,
+        masks: Tensor,
+    ) -> Optional[Tensor]:
+        handoff = self._submap_handoff[env]
+        if handoff is None:
+            return None
+        robot_xy = np.asarray(
+            self._observations_cache[env]["robot_xy"], dtype=np.float64
+        )
+        obstacle_map = self._map_controller._obstacle_map[env]
+        if not waypoint_in_robot_component(
+            obstacle_map,
+            robot_xy=robot_xy,
+            waypoint_xy=handoff.waypoint_local,
+        ):
+            self._cancel_handoff(env, "left_connected_free_space")
+            return None
+        distance = float(np.linalg.norm(handoff.waypoint_local - robot_xy))
+        if distance <= self._pointnav_stop_radius:
+            self._record_submap_policy_event(
+                env,
+                "handoff_completed",
+                reason="reached",
+                destination_submap_id=handoff.destination_submap_id,
+                final_distance_m=distance,
+            )
+            self._submap_handoff[env] = None
+            return None
+        if handoff.observe_distance(
+            distance,
+            progress_threshold_m=STICKY_FRONTIER_DISTANCE_THRESHOLD,
+            max_stagnation_decisions=STICKY_FRONTIER_STEP_THRESHOLD,
+        ):
+            self._cancel_handoff(env, "no_progress")
+            return None
+        action = self._pointnav(
+            observations,
+            handoff.waypoint_local,
+            stop=False,
+            env=env,
+            stop_radius=self._pointnav_stop_radius,
+        )
+        if action.item() == STOP:
+            action.fill_(MOVE_FORWARD)
+        self._record_submap_policy_event(
+            env,
+            "handoff_action",
+            destination_submap_id=handoff.destination_submap_id,
+            distance_m=distance,
+            stagnation_decisions=int(handoff.stagnation_decisions),
+            action=int(action.item()),
+        )
+        return action
+
+    def _request_exhaustion_recovery(
+        self, env: int, masks: Tensor
+    ) -> Optional[Tensor]:
+        if not getattr(
+            self, "_submap_exhaustion_recovery_enabled", False
+        ):
+            return None
+        state = self._submap_exhaustion_recovery[env]
+        if state.used:
+            self._record_submap_policy_event(
+                env, "exhaustion_recovery_skipped", reason="already_used"
+            )
+            return None
+        if self.max_episode_steps is None:
+            self._record_submap_policy_event(
+                env,
+                "exhaustion_recovery_skipped",
+                reason="missing_episode_budget",
+            )
+            return None
+        remaining = int(self.max_episode_steps) - int(self._num_steps[env])
+        if remaining < self._RECOVERY_MIN_REMAINING_ACTIONS:
+            self._record_submap_policy_event(
+                env,
+                "exhaustion_recovery_skipped",
+                reason="insufficient_action_budget",
+                remaining_actions=remaining,
+            )
+            return None
+        if self._get_target_object_location(
+            self._observations_cache[env]["robot_xy"], env
+        ) is not None:
+            return None
+        self._observations_cache[env][
+            "submap_exhaustion_recovery_request"
+        ] = True
+        self._observations_cache[env][
+            "submap_recovery_scan_action"
+        ] = True
+        self._record_submap_policy_event(
+            env,
+            "exhaustion_recovery_requested",
+            remaining_actions=remaining,
+            scan_turn_index=1,
+            scan_turn_total=self._RECOVERY_SCAN_TURNS,
+        )
+        return get_action_tensor(TURN_LEFT, device=masks.device)
+
+    def _execute_exhaustion_recovery_scan(
+        self, env: int, masks: Tensor
+    ) -> Tensor:
+        state = self._submap_exhaustion_recovery[env]
+        before = int(state.turns_remaining)
+        remaining = state.issue_turn()
+        turn_index = self._RECOVERY_SCAN_TURNS - before + 1
+        self._observations_cache[env][
+            "submap_recovery_scan_action"
+        ] = True
+        self._record_submap_policy_event(
+            env,
+            "exhaustion_recovery_scan_turn",
+            scan_turn_index=turn_index,
+            scan_turn_total=self._RECOVERY_SCAN_TURNS,
+            turns_remaining=remaining,
+            submap_id=state.submap_id,
+        )
+        return get_action_tensor(TURN_LEFT, device=masks.device)
+
     def _finish_submap_action(self, *, env: int, action_step: int) -> None:
         """Advance lifecycle after policy logging but before cache release."""
 
@@ -843,28 +1127,71 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 decision=decision_record,
             )
 
+        recovery_requested = bool(
+            cache.get("submap_exhaustion_recovery_request", False)
+        )
+        if recovery_requested and decision.floor_changed:
+            recovery_requested = False
+            self._record_submap_policy_event(
+                env,
+                "exhaustion_recovery_skipped",
+                reason="floor_transition_priority",
+            )
+        if self._submap_handoff[env] is not None and (
+            decision.should_split or recovery_requested
+        ):
+            self._cancel_handoff(env, "second_submap_boundary")
+
+        handoff_frontier, handoff_reason = (
+            self._handoff_frontier_before_split(env, decision.reason)
+            if decision.should_split
+            else (None, "no_split")
+        )
         new_bundle = None
         split_reason = None
-        frontiers = self._frontier_array(old_bundle.payload)
+        boundary_kind = None
+        replayed_frames = 0
+        frontiers = (
+            self._eligible_frontiers(old_bundle.payload)
+            if recovery_requested
+            else self._frontier_array(old_bundle.payload)
+        )
         frontier_scores = self._frontier_scores(
             old_bundle.payload, frontiers
         )
-        if decision.should_split:
+        if recovery_requested or decision.should_split:
             self._snapshot_submap_policy_state(env, old_bundle)
             new_payload = self._map_controller.create_empty_map_payload(
                 allow_step_zero_frontier_projection=True
             )
-            new_bundle, _, _ = self._submap_manager.commit_split(
-                env=env,
-                world_pose=world_pose,
-                floor_id=floor_id,
-                new_payload=new_payload,
-                step=action_step,
-                frontiers_local=frontiers,
-                frontier_scores=frontier_scores,
-                boundary_frames=self._submap_boundary_frames[env],
-            )
-            split_reason = decision.reason
+            if recovery_requested:
+                new_bundle, _, _ = (
+                    self._submap_manager.commit_exhaustion_recovery(
+                        env=env,
+                        world_pose=world_pose,
+                        floor_id=floor_id,
+                        new_payload=new_payload,
+                        step=action_step,
+                        frontiers_local=frontiers,
+                        frontier_scores=frontier_scores,
+                        boundary_frames=self._submap_boundary_frames[env],
+                    )
+                )
+                split_reason = "no_frontier_exhaustion"
+                boundary_kind = "recovery"
+            else:
+                new_bundle, _, _ = self._submap_manager.commit_split(
+                    env=env,
+                    world_pose=world_pose,
+                    floor_id=floor_id,
+                    new_payload=new_payload,
+                    step=action_step,
+                    frontiers_local=frontiers,
+                    frontier_scores=frontier_scores,
+                    boundary_frames=self._submap_boundary_frames[env],
+                )
+                split_reason = decision.reason
+                boundary_kind = "lifecycle"
 
         if new_bundle is not None:
             topology_source = (
@@ -879,11 +1206,98 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 destination_anchor_world=new_bundle.anchor_pose_world,
             )
             self._map_controller.install_map_payload(env, new_bundle.payload)
-            self._reset_submap_coordinate_state(
-                env,
-                initialize_new_floor=bool(decision.floor_changed),
-            )
+            waypoint = None
+            if boundary_kind == "recovery":
+                replayed_frames = replay_depth_geometry(
+                    self._submap_depth_frames[env],
+                    source_anchor_world=old_bundle.anchor_pose_world,
+                    destination_anchor_world=new_bundle.anchor_pose_world,
+                    obstacle_map=new_bundle.payload.obstacle_map,
+                )
+                self._reset_submap_coordinate_state(
+                    env, initialize_new_floor=False
+                )
+                state = self._submap_exhaustion_recovery[env]
+                state.start(
+                    started_step=action_step,
+                    submap_id=new_bundle.submap_id,
+                    total_turns=self._RECOVERY_SCAN_TURNS,
+                    turns_already_issued=1,
+                )
+                self._record_submap_policy_event(
+                    env,
+                    "exhaustion_recovery_started",
+                    source_submap_id=old_bundle.submap_id,
+                    destination_submap_id=new_bundle.submap_id,
+                    replayed_depth_frames=replayed_frames,
+                    turns_remaining=state.turns_remaining,
+                )
+            elif handoff_frontier is not None:
+                replayed_frames = replay_depth_geometry(
+                    self._submap_depth_frames[env],
+                    source_anchor_world=old_bundle.anchor_pose_world,
+                    destination_anchor_world=new_bundle.anchor_pose_world,
+                    obstacle_map=new_bundle.payload.obstacle_map,
+                )
+                transformed_frontier = transform_points_xy(
+                    handoff_frontier,
+                    old_bundle.anchor_pose_world,
+                    new_bundle.anchor_pose_world,
+                )
+                waypoint = select_connected_handoff_waypoint(
+                    new_bundle.payload.obstacle_map,
+                    robot_xy=np.zeros(2, dtype=np.float64),
+                    old_frontier_direction_xy=transformed_frontier,
+                )
+                self._reset_submap_coordinate_state(
+                    env,
+                    initialize_new_floor=False,
+                    preserve_pointnav=waypoint is not None,
+                )
+                if waypoint is not None:
+                    self._submap_handoff[env] = BoundaryHandoff(
+                        waypoint_local=waypoint,
+                        source_submap_id=old_bundle.submap_id,
+                        destination_submap_id=new_bundle.submap_id,
+                        created_step=action_step,
+                        reference_distance_m=float(
+                            np.linalg.norm(waypoint)
+                        ),
+                    )
+                    self._last_goal[env] = waypoint.copy()
+                    self.cur_frontier[env] = waypoint.copy()
+                    self._record_submap_policy_event(
+                        env,
+                        "handoff_created",
+                        source_submap_id=old_bundle.submap_id,
+                        destination_submap_id=new_bundle.submap_id,
+                        waypoint_local=waypoint.tolist(),
+                        replayed_depth_frames=replayed_frames,
+                    )
+                else:
+                    self._record_submap_policy_event(
+                        env,
+                        "handoff_skipped",
+                        reason="no_connected_waypoint",
+                        replayed_depth_frames=replayed_frames,
+                    )
+            else:
+                self._reset_submap_coordinate_state(
+                    env,
+                    initialize_new_floor=bool(decision.floor_changed),
+                )
+                if (
+                    getattr(self, "_submap_handoff_enabled", False)
+                    and decision.reason == "low_overlap"
+                ):
+                    self._record_submap_policy_event(
+                        env,
+                        "handoff_skipped",
+                        reason=handoff_reason,
+                        replayed_depth_frames=0,
+                    )
             self._submap_boundary_frames[env] = []
+            self._submap_depth_frames[env] = []
 
         active = self._submap_manager.active_bundle(env)
         graph = self._submap_manager.graph(env)
@@ -895,6 +1309,13 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 "submap_count": len(graph.nodes),
                 "submap_gateway_count": len(graph.edges),
                 "submap_registry_size": len(registry.records),
+                "submap_boundary_replayed_depth_frames": replayed_frames,
+                "submap_handoff_active": (
+                    self._submap_handoff[env] is not None
+                ),
+                "submap_exhaustion_recovery_active": (
+                    self._submap_exhaustion_recovery[env].active
+                ),
             }
         )
         self._flush_submap_events(env)
@@ -1266,9 +1687,58 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             x, y = int(robot_px[0, 0]), int(robot_px[0, 1]) # 确保索引是整数
 
             mode = "unknown" # 明确初始化 mode 变量
+            recovery_scan_active = False
+            recovery_target_reacquired = False
+            recovery_state = self._submap_exhaustion_recovery[env]
+            if recovery_state.active:
+                if goal is not None:
+                    recovery_state.finish()
+                    recovery_target_reacquired = True
+                    self._record_submap_policy_event(
+                        env,
+                        "exhaustion_recovery_target_reacquired",
+                        submap_id=recovery_state.submap_id,
+                    )
+                elif recovery_state.turns_remaining > 0:
+                    recovery_scan_active = True
+                else:
+                    recovery_state.finish()
+                    self._record_submap_policy_event(
+                        env,
+                        "exhaustion_recovery_scan_completed",
+                        submap_id=recovery_state.submap_id,
+                    )
+
+            if self._submap_handoff[env] is not None:
+                if goal is not None:
+                    self._cancel_handoff(env, "target_detected")
+                elif (
+                    not self._map_controller._climb_stair_over[env]
+                    or self._map_controller._climb_stair_flag[env] != 0
+                    or self._map_controller._obstacle_map[
+                        env
+                    ]._look_for_downstair_flag
+                    or self._pitch_angle[env] != 0
+                ):
+                    self._cancel_handoff(env, "stair_logic_priority")
 
             # 楼梯状态判断与动作逻辑
-            if not self._map_controller._climb_stair_over[env]:
+            if recovery_target_reacquired:
+                mode = "navigate_after_exhaustion_recovery"
+                self._try_to_navigate[env] = True
+                pointnav_action = self._navigate(
+                    observations,
+                    goal[:2],
+                    stop=True,
+                    env=env,
+                    ori_masks=masks,
+                )
+            elif recovery_scan_active:
+                mode = "exhaustion_recovery_scan"
+                pointnav_action = self._execute_exhaustion_recovery_scan(
+                    env, masks
+                )
+            elif not self._map_controller._climb_stair_over[env]:
                 if self._map_controller._reach_stair[env]:
                     if self._pitch_angle[env] == 0 and self._map_controller._climb_stair_flag[env] == 2:
                         self._pitch_angle[env] -= self._pitch_angle_offset
@@ -1395,6 +1865,16 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     if self._map_controller._obstacle_map[env]._look_for_downstair_flag:
                         mode = "look_for_downstair"
                         pointnav_action = self._look_for_downstair(observations, env, masks)
+                    elif self._submap_handoff[env] is not None:
+                        mode = "submap_handoff"
+                        pointnav_action = self._execute_handoff(
+                            observations, env, masks
+                        )
+                        if pointnav_action is None:
+                            mode = "explore_after_handoff"
+                            pointnav_action = self._explore(
+                                observations, env, masks
+                            )
                     elif (
                         self._submap_enabled
                         and self._submap_remote_route[env] is not None
@@ -1423,6 +1903,12 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     self._try_to_navigate[env] = True
                     pointnav_action = self._navigate(observations, goal[:2], stop=True, env=env, ori_masks=masks)
 
+            if self._observations_cache[env].get(
+                "submap_exhaustion_recovery_request", False
+            ):
+                mode = "exhaustion_recovery_scan_start"
+            self._observations_cache[env]["policy_mode"] = mode
+
             if pointnav_action is None:
                 action_numpy = 0
                 pointnav_action = torch.tensor([[action_numpy]], dtype=torch.int64, device=masks.device)
@@ -1441,7 +1927,11 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 # old_action_in_history = self.history_action[env][0] 
                 self.history_action[env].pop(0) # Remove the oldest action to maintain window size
 
-                if all(action in [2, 3] for action in self.history_action[env]):
+                if all(
+                    action in [2, 3] for action in self.history_action[env]
+                ) and not self._observations_cache[env].get(
+                    "submap_recovery_scan_action", False
+                ):
                     action_numpy = 1 # Force forward
                     pointnav_action = torch.tensor([[action_numpy]], dtype=torch.int64, device=masks.device)
                     print("Continuous turns to force forward.")
@@ -1530,6 +2020,9 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 )
                 if remote_action is not None:
                     return remote_action
+            recovery_action = self._request_exhaustion_recovery(env, masks)
+            if recovery_action is not None:
+                return recovery_action
             print(f"Environment {env}: In all floors, no unexplored stairs or frontiers found, stopping.")
             return self._stop_action.to(masks.device)
 

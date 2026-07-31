@@ -7,6 +7,8 @@ import pytest
 import torch
 
 from ascent.submaps import (
+    DepthGeometryFrame,
+    ExhaustionRecovery,
     FrontierStatus,
     MapPayload,
     RemoteRoute,
@@ -647,9 +649,11 @@ class _ControllerStub:
     def __init__(self, initial, replacement):
         self.payload = initial
         self.replacement = replacement
+        self._obstacle_map = [initial.obstacle_map]
         self._policy_floor_id = [0]
         self._cur_floor_index = [0]
         self._climb_stair_over = [True]
+        self._climb_stair_flag = [0]
         self.reset_calls = []
         self.step_zero_projection_permissions = []
 
@@ -666,6 +670,7 @@ class _ControllerStub:
 
     def install_map_payload(self, env, payload):
         self.payload = payload
+        self._obstacle_map[env] = payload.obstacle_map
 
     def reset_submap_local_navigation_state(
         self, env, *, initialize_new_floor
@@ -714,6 +719,11 @@ def test_policy_action_end_swaps_to_fresh_active_payload() -> None:
         }
     ]
     policy._submap_boundary_frames = [[]]
+    policy._submap_depth_frames = [[]]
+    policy._submap_handoff_enabled = False
+    policy._submap_exhaustion_recovery_enabled = False
+    policy._submap_handoff = [None]
+    policy._submap_exhaustion_recovery = [ExhaustionRecovery()]
     policy._submap_diagnostics = None
     policy._submap_episode_sequence = [0]
     policy._submap_event_cursor = [0]
@@ -740,6 +750,177 @@ def test_policy_action_end_swaps_to_fresh_active_payload() -> None:
     assert policy._pointnav_policy[0].reset_count == 1
     assert policy._policy_info[0]["submap_split_reason"] == "low_overlap"
     assert policy._policy_info[0]["submap_count"] == 2
+
+
+def _depth_replay_frames_at(x: float) -> list[DepthGeometryFrame]:
+    frames = []
+    for step, yaw in enumerate(
+        [0.0, np.pi / 2, np.pi, -np.pi / 2]
+    ):
+        transform = np.eye(4, dtype=np.float64)
+        transform[:2, :2] = [
+            [np.cos(yaw), -np.sin(yaw)],
+            [np.sin(yaw), np.cos(yaw)],
+        ]
+        transform[0, 3] = x
+        transform[2, 3] = 0.88
+        frames.append(
+            DepthGeometryFrame(
+                depth=np.full((16, 16), 0.5, dtype=np.float32),
+                tf_camera_to_source=transform,
+                min_depth=0.0,
+                max_depth=4.0,
+                fx=8.0,
+                fy=8.0,
+                camera_fov=np.pi / 2,
+                action_step=step,
+            )
+        )
+    return frames
+
+
+def _boundary_policy(
+    initial: MapPayload,
+    replacement: MapPayload,
+    manager: SubmapManager,
+) -> tuple[Ascent_Policy, _ControllerStub, _PointNavStub]:
+    controller = _ControllerStub(initial, replacement)
+    pointnav = _PointNavStub()
+    policy = object.__new__(Ascent_Policy)
+    policy._submap_manager = manager
+    policy._submap_config = manager.config
+    policy._map_controller = controller
+    policy._observations_cache = [
+        {
+            "world_pose_vo": np.array([1.0, 0.0, 0.0]),
+            "robot_xy": np.array([1.0, 0.0]),
+            "robot_heading": 0.0,
+            "submap_overlap_before_update": 0.0,
+            "policy_mode": "explore",
+        }
+    ]
+    policy._submap_boundary_frames = [[]]
+    policy._submap_depth_frames = [_depth_replay_frames_at(1.0)]
+    policy._submap_diagnostics = None
+    policy._submap_episode_sequence = [0]
+    policy._submap_event_cursor = [0]
+    policy._policy_info = [{}]
+    policy._pointnav_policy = [pointnav]
+    policy._pointnav_stop_radius = 0.9
+    policy._last_goal = [np.array([3.0, 0.0])]
+    policy._try_to_navigate_step = [0]
+    policy._try_to_navigate = [False]
+    policy._last_frontier_distance = [2.0]
+    policy.min_distance_xy = [np.inf]
+    policy.cur_frontier = [np.array([3.0, 0.0])]
+    policy._submap_remote_route = [None]
+    policy._submap_handoff = [None]
+    policy._submap_exhaustion_recovery = [ExhaustionRecovery()]
+    policy._pitch_angle = [0]
+    policy.llm_planner = SimpleNamespace(
+        _last_frontier=[np.array([3.0, 0.0])],
+        reset_submap_local_state=lambda env: None,
+    )
+    return policy, controller, pointnav
+
+
+def test_low_overlap_handoff_replays_geometry_and_preserves_pointnav() -> None:
+    config = SubmapLifecycleConfig(
+        enabled=True,
+        min_action_endpoints=1,
+        min_anchor_displacement_m=0.5,
+        overlap_threshold=0.5,
+        low_overlap_consecutive=1,
+    )
+    initial = _runtime_payload()
+    replacement = _runtime_payload()
+    initial.obstacle_map.frontiers = np.array([[3.0, 0.0]])
+    manager = SubmapManager(1, config)
+    manager.start(0, [0.0, 0.0, 0.0], 0, initial, 0)
+    policy, _, pointnav = _boundary_policy(
+        initial, replacement, manager
+    )
+    policy._submap_handoff_enabled = True
+    policy._submap_exhaustion_recovery_enabled = False
+
+    policy._finish_submap_action(env=0, action_step=20)
+
+    assert policy._submap_handoff[0] is not None
+    assert pointnav.reset_count == 0
+    np.testing.assert_allclose(
+        policy._last_goal[0],
+        policy._submap_handoff[0].waypoint_local,
+    )
+    assert policy._policy_info[0][
+        "submap_boundary_replayed_depth_frames"
+    ] == 4
+
+
+def test_low_overlap_handoff_rejects_a_stale_current_frontier() -> None:
+    config = SubmapLifecycleConfig(
+        enabled=True,
+        min_action_endpoints=1,
+        min_anchor_displacement_m=0.5,
+        overlap_threshold=0.5,
+        low_overlap_consecutive=1,
+    )
+    initial = _runtime_payload()
+    replacement = _runtime_payload()
+    initial.obstacle_map.frontiers = np.array([[4.0, 0.0]])
+    manager = SubmapManager(1, config)
+    manager.start(0, [0.0, 0.0, 0.0], 0, initial, 0)
+    policy, _, pointnav = _boundary_policy(
+        initial, replacement, manager
+    )
+    policy._submap_handoff_enabled = True
+    policy._submap_exhaustion_recovery_enabled = False
+
+    policy._finish_submap_action(env=0, action_step=20)
+
+    assert policy._submap_handoff[0] is None
+    assert pointnav.reset_count == 1
+    assert policy._policy_info[0][
+        "submap_boundary_replayed_depth_frames"
+    ] == 0
+
+
+def test_no_frontier_request_commits_one_clean_recovery_submap() -> None:
+    config = SubmapLifecycleConfig(
+        enabled=True,
+        min_action_endpoints=20,
+        min_anchor_displacement_m=1.5,
+        overlap_threshold=0.35,
+        low_overlap_consecutive=3,
+    )
+    initial = _runtime_payload()
+    replacement = _runtime_payload()
+    initial.obstacle_map.frontiers = np.array([[2.0, 0.0]])
+    initial.obstacle_map._disabled_frontiers.add((2.0, 0.0))
+    manager = SubmapManager(1, config)
+    old = manager.start(0, [0.0, 0.0, 0.0], 0, initial, 0)
+    policy, _, pointnav = _boundary_policy(
+        initial, replacement, manager
+    )
+    policy._submap_handoff_enabled = True
+    policy._submap_exhaustion_recovery_enabled = True
+    policy._observations_cache[0][
+        "submap_exhaustion_recovery_request"
+    ] = True
+
+    policy._finish_submap_action(env=0, action_step=40)
+
+    active = manager.active_bundle(0)
+    state = policy._submap_exhaustion_recovery[0]
+    assert old.state.value == "frozen"
+    assert old.frozen_frontiers_local.shape == (0, 2)
+    assert active.parent_submap_id == old.submap_id
+    assert manager.events(0)[-1]["event"] == "submap_exhaustion_recovery"
+    assert state.used and state.active and state.turns_remaining == 11
+    assert pointnav.reset_count == 1
+    assert policy._submap_handoff[0] is None
+    assert policy._policy_info[0]["submap_split_reason"] == (
+        "no_frontier_exhaustion"
+    )
 
 
 def test_policy_binding_guard_rejects_a_frozen_or_foreign_payload() -> None:

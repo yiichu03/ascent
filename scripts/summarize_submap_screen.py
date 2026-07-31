@@ -188,7 +188,8 @@ def validate_submap_metadata(
     if not isinstance(config, Mapping) or config.get("enabled") is not True:
         errors.append("submap_metadata:enabled")
         return errors
-    if metadata.get("method_version") == "submap_v1.1":
+    method_version = metadata.get("method_version")
+    if method_version in {"submap_v1.1", "submap_v1.2"}:
         v1_1_expected = {
             "split_contract": "vo_anchor_and_rgbd_overlap_joint",
             "fallback_contract": "ascent_local_first_persistent_route",
@@ -213,9 +214,23 @@ def validate_submap_metadata(
         for key, value in expected_config.items():
             if config.get(key) != value:
                 errors.append(
-                    f"submap_metadata:v1_1_config:{key}:"
+                    f"submap_metadata:fixed_config:{key}:"
                     f"{config.get(key)!r}:{value!r}"
                 )
+        if method_version == "submap_v1.2":
+            v1_2_expected = {
+                "handoff_enabled": True,
+                "exhaustion_recovery_enabled": True,
+                "continuity_contract": (
+                    "single_connected_handoff_and_one_shot_360_recovery"
+                ),
+            }
+            for key, value in v1_2_expected.items():
+                if metadata.get(key) != value:
+                    errors.append(
+                        f"submap_metadata:{key}:"
+                        f"{metadata.get(key)!r}:{value!r}"
+                    )
         return errors
     if calibration is None and mode == "smoke":
         if config.get("provisional_thresholds") is not True:
@@ -427,7 +442,10 @@ def parse_attempt(
             events = Counter(
                 str(item.get("event")) for item in submap["events"]
             )
-            if submap_method_version == "submap_v1.1":
+            if submap_method_version in {
+                "submap_v1.1",
+                "submap_v1.2",
+            }:
                 selected_candidates = Counter(
                     str(item.get("candidate_key"))
                     for item in submap["events"]
@@ -478,6 +496,46 @@ def parse_attempt(
                     ):
                         local_errors.append("joint_split_contract")
                         break
+            if submap_method_version == "submap_v1.2":
+                if events["submap_exhaustion_recovery"] > 1:
+                    local_errors.append("recovery_repeated")
+                if events["exhaustion_recovery_started"] > 1:
+                    local_errors.append("recovery_start_repeated")
+                if (
+                    events["submap_exhaustion_recovery"]
+                    != events["exhaustion_recovery_started"]
+                ):
+                    local_errors.append("recovery_boundary_contract")
+                floor_priority_skips = sum(
+                    item.get("event") == "exhaustion_recovery_skipped"
+                    and item.get("reason") == "floor_transition_priority"
+                    for item in episode_submap_events
+                )
+                if events["exhaustion_recovery_requested"] != (
+                    events["exhaustion_recovery_started"]
+                    + floor_priority_skips
+                ):
+                    local_errors.append("recovery_request_contract")
+                if events["exhaustion_recovery_scan_turn"] > 11:
+                    local_errors.append("recovery_turn_budget")
+                if events["exhaustion_recovery_scan_completed"] > 0 and (
+                    events["exhaustion_recovery_scan_turn"] != 11
+                ):
+                    local_errors.append("recovery_full_scan_contract")
+                for item in episode_submap_events:
+                    if item.get("event") != "handoff_created":
+                        continue
+                    waypoint = item.get("waypoint_local")
+                    replayed = item.get("replayed_depth_frames")
+                    if (
+                        not isinstance(waypoint, list)
+                        or len(waypoint) != 2
+                        or any(finite_float(value) is None for value in waypoint)
+                        or not isinstance(replayed, int)
+                        or not 1 <= replayed <= 4
+                    ):
+                        local_errors.append("handoff_creation_schema")
+                        break
         else:
             events = Counter()
         if local_errors:
@@ -516,6 +574,23 @@ def parse_attempt(
                 math.nan,
             ),
             "submap_split_count": events["submap_split"],
+            "handoff_created_count": events["handoff_created"],
+            "handoff_action_count": events["handoff_action"],
+            "handoff_completed_count": events["handoff_completed"],
+            "handoff_cancelled_count": events["handoff_cancelled"],
+            "handoff_skipped_count": events["handoff_skipped"],
+            "exhaustion_recovery_count": events[
+                "submap_exhaustion_recovery"
+            ],
+            "exhaustion_recovery_scan_turn_count": events[
+                "exhaustion_recovery_scan_turn"
+            ],
+            "exhaustion_recovery_scan_completed_count": events[
+                "exhaustion_recovery_scan_completed"
+            ],
+            "exhaustion_recovery_target_reacquired_count": events[
+                "exhaustion_recovery_target_reacquired"
+            ],
             "submap_revisit_count": events["submap_revisit"],
             "gateway_route_action_count": events["gateway_route_action"],
             "gateway_revisit_requested_count": events[
@@ -558,6 +633,29 @@ def parse_attempt(
                     str(item.get("reason"))
                     for item in episode_submap_events
                     if item.get("event") == "submap_split"
+                )
+            ),
+            "handoff_outcomes": dict(
+                Counter(
+                    str(item.get("reason"))
+                    for item in episode_submap_events
+                    if item.get("event")
+                    in {"handoff_completed", "handoff_cancelled"}
+                )
+            ),
+            "handoff_skip_reasons": dict(
+                Counter(
+                    str(item.get("reason"))
+                    for item in episode_submap_events
+                    if item.get("event") == "handoff_skipped"
+                )
+            ),
+            "exhaustion_recovery_skip_reasons": dict(
+                Counter(
+                    str(item.get("reason"))
+                    for item in episode_submap_events
+                    if item.get("event")
+                    == "exhaustion_recovery_skipped"
                 )
             ),
             "evidence_vo_diagnostics": str(vo_path),

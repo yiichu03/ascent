@@ -19,6 +19,8 @@ ascent_vo:
 
 ascent_submaps:
   enabled: ${oc.env:ASCENT_SUBMAP_ENABLED,false}
+  handoff_enabled: ${oc.env:ASCENT_SUBMAP_HANDOFF_ENABLED,false}
+  exhaustion_recovery_enabled: ${oc.env:ASCENT_SUBMAP_EXHAUSTION_RECOVERY_ENABLED,false}
   min_action_endpoints: 20
   min_anchor_displacement_m: 1.5
   min_path_length_m: 1.5

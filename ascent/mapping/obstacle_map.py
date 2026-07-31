@@ -399,6 +399,99 @@ class ObstacleMap(BaseMap):
                     self._down_stair_map[start_y, start_x] = True
                     queue.append((ny, nx))  # 将该点加入队列继续搜索
 
+    def update_geometry_only(
+        self,
+        depth: np.ndarray,
+        tf_camera_to_episodic: np.ndarray,
+        min_depth: float,
+        max_depth: float,
+        fx: float,
+        fy: float,
+        topdown_fov: float,
+    ) -> None:
+        """Replay RGB-D geometry without copying semantic/task memory.
+
+        This is intentionally narrower than :meth:`update_map`: it updates
+        obstacle, navigability, explored-area and derived frontier geometry,
+        but never writes object/value evidence or stair classifications.
+        """
+
+        normalized_depth = np.asarray(depth, dtype=np.float32)
+        camera_transform = np.asarray(
+            tf_camera_to_episodic, dtype=np.float64
+        )
+        if normalized_depth.ndim != 2 or camera_transform.shape != (4, 4):
+            raise ValueError("geometry replay requires 2-D depth and 4x4 pose")
+        if self._hole_area_thresh == -1:
+            filled_depth = normalized_depth.copy()
+            filled_depth[normalized_depth == 0] = 1.0
+        else:
+            filled_depth = fill_small_holes(
+                normalized_depth, self._hole_area_thresh
+            )
+        scaled_depth = filled_depth * (max_depth - min_depth) + min_depth
+        valid_depth = np.isfinite(scaled_depth) & (scaled_depth < max_depth)
+        if valid_depth.any():
+            camera_cloud = get_point_cloud(
+                scaled_depth, valid_depth, fx, fy
+            )
+            local_cloud = transform_points(camera_transform, camera_cloud)
+            obstacle_cloud = filter_points_by_height(
+                local_cloud, self._min_height, self._max_height
+            )
+            if len(obstacle_cloud) > 0:
+                pixels = self._xy_to_px(obstacle_cloud[:, :2])
+                in_bounds = (
+                    (pixels[:, 0] >= 0)
+                    & (pixels[:, 0] < self._map.shape[1])
+                    & (pixels[:, 1] >= 0)
+                    & (pixels[:, 1] < self._map.shape[0])
+                )
+                pixels = pixels[in_bounds]
+                self._map[pixels[:, 1], pixels[:, 0]] = True
+
+        dilated = cv2.dilate(
+            self._map.astype(np.uint8),
+            self._navigable_kernel,
+            iterations=1,
+        )
+        self._navigable_map = 1 - dilated.astype(bool)
+        strict_dilated = cv2.dilate(
+            self._map.astype(np.uint8),
+            self._strict_navigable_kernel,
+            iterations=1,
+        )
+        self._strict_navigable_map = 1 - strict_dilated.astype(bool)
+
+        agent_xy = camera_transform[:2, 3]
+        agent_pixel = self._xy_to_px(agent_xy.reshape(1, 2))[0]
+        if (
+            0 <= agent_pixel[0] < self._map.shape[1]
+            and 0 <= agent_pixel[1] < self._map.shape[0]
+        ):
+            visible = reveal_fog_of_war(
+                top_down_map=self._navigable_map.astype(np.uint8),
+                current_fog_of_war_mask=np.zeros_like(
+                    self._map, dtype=np.uint8
+                ),
+                current_point=agent_pixel[::-1],
+                current_angle=-extract_yaw(camera_transform),
+                fov=np.rad2deg(topdown_fov),
+                max_line_len=max_depth * self.pixels_per_meter,
+            )
+            visible = cv2.dilate(
+                visible, np.ones((3, 3), np.uint8), iterations=1
+            )
+            self.explored_area[visible > 0] = True
+            self.explored_area[self._navigable_map == 0] = False
+
+        self._frontiers_px = self._get_frontiers()
+        self.frontiers = (
+            np.array([])
+            if len(self._frontiers_px) == 0
+            else self._px_to_xy(self._frontiers_px)
+        )
+
     def project_frontiers_to_rgb_hush(self, rgb: np.ndarray) -> dict: 
         # , robot_xy: np.ndarray, min_arrow_length: float = 4.0, max_arrow_length: float = 10.0
         """

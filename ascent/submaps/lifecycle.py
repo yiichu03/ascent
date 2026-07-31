@@ -322,6 +322,92 @@ class SubmapManager:
         )
         return new_bundle, edge, resolved
 
+    def commit_exhaustion_recovery(
+        self,
+        env: int,
+        world_pose: Sequence[float],
+        floor_id: int,
+        new_payload: MapPayload,
+        step: int,
+        frontiers_local: np.ndarray,
+        frontier_scores: Optional[Sequence[float]] = None,
+        boundary_frames: Sequence[Dict[str, object]] = (),
+    ) -> Tuple[SubmapBundle, GatewayEdge, List[str]]:
+        """Force one same-floor boundary at the terminal no-frontier branch."""
+
+        memory = self._environments[env]
+        old_bundle = self.active_bundle(env)
+        old_bundle.require_active()
+        pose_world = as_pose(world_pose)
+        source_local_pose = relative_pose(
+            old_bundle.anchor_pose_world, pose_world
+        )
+        if int(floor_id) != old_bundle.floor_id:
+            raise ValueError(
+                "exhaustion recovery cannot replace a floor transition"
+            )
+
+        old_bundle.freeze(step, frontiers_local)
+        records = memory.registry.register_submap_frontiers(
+            old_bundle.submap_id,
+            old_bundle.frozen_frontiers_local,
+            creation_step=int(step),
+            scores=frontier_scores,
+        )
+        new_bundle = SubmapBundle(
+            submap_id=self._new_submap_id(env),
+            floor_id=int(floor_id),
+            anchor_pose_world=pose_world,
+            creation_step=int(step),
+            payload=new_payload,
+            last_world_pose=pose_world,
+            parent_submap_id=old_bundle.submap_id,
+        )
+        memory.graph.add_node(new_bundle)
+        relative_transform = (
+            np.linalg.inv(pose_to_matrix(old_bundle.anchor_pose_world))
+            @ pose_to_matrix(new_bundle.anchor_pose_world)
+        )
+        edge = GatewayEdge(
+            edge_id=self._new_edge_id(env),
+            source_submap_id=old_bundle.submap_id,
+            destination_submap_id=new_bundle.submap_id,
+            source_local_pose=source_local_pose,
+            destination_local_pose=np.zeros(3, dtype=np.float64),
+            creation_step=int(step),
+            source_floor_id=old_bundle.floor_id,
+            destination_floor_id=new_bundle.floor_id,
+            relative_transform=relative_transform,
+            confidence=1.0,
+            kind="exhaustion_recovery",
+            boundary_frames=tuple(
+                dict(frame) for frame in boundary_frames[-4:]
+            ),
+        )
+        memory.graph.add_edge(edge)
+        memory.active_submap_id = new_bundle.submap_id
+        resolved = memory.registry.resolve_near_gateway(
+            old_bundle.submap_id,
+            source_local_pose[:2],
+            new_bundle.submap_id,
+            self.config.gateway_frontier_resolution_radius_m,
+            int(step),
+        )
+        memory.pending_decision = None
+        memory.events.append(
+            {
+                "event": "submap_exhaustion_recovery",
+                "step": int(step),
+                "source_submap_id": old_bundle.submap_id,
+                "destination_submap_id": new_bundle.submap_id,
+                "edge_id": edge.edge_id,
+                "reason": "no_frontier_exhaustion",
+                "registered_frontiers": len(records),
+                "resolved_gateway_frontiers": len(resolved),
+            }
+        )
+        return new_bundle, edge, resolved
+
     def commit_revisit(
         self,
         env: int,

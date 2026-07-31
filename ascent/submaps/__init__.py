@@ -16,6 +16,15 @@ from ascent.submaps.lifecycle import (
 )
 from ascent.submaps.overlap import ViewOverlapConfig, estimate_view_overlap
 from ascent.submaps.topology import transfer_stair_topology
+from ascent.submaps.continuity import (
+    BoundaryHandoff,
+    DepthGeometryFrame,
+    ExhaustionRecovery,
+    replay_depth_geometry,
+    select_connected_handoff_waypoint,
+    transform_camera_to_destination,
+    waypoint_in_robot_component,
+)
 from ascent.submaps.query_view import SubmapQueryView
 from ascent.submaps.routes import RemoteRoute, RouteWaypoint
 from ascent.submaps.types import (
@@ -29,6 +38,9 @@ from ascent.submaps.types import (
 )
 
 __all__ = [
+    "BoundaryHandoff",
+    "DepthGeometryFrame",
+    "ExhaustionRecovery",
     "FrontierRecord",
     "FrontierRegistry",
     "FrontierStatus",
@@ -49,7 +61,11 @@ __all__ = [
     "matrix_to_pose",
     "pose_to_matrix",
     "relative_pose",
+    "replay_depth_geometry",
+    "select_connected_handoff_waypoint",
+    "transform_camera_to_destination",
     "transform_points_xy",
     "transfer_stair_topology",
+    "waypoint_in_robot_component",
     "wrap_angle",
 ]

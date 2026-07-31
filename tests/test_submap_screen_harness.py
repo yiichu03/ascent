@@ -16,6 +16,9 @@ SUMMARIZER = ROOT / "scripts" / "summarize_submap_screen.py"
 V1_1_SUMMARIZER = (
     ROOT / "scripts" / "summarize_submap_v1_1_screen.py"
 )
+V1_2_SUMMARIZER = (
+    ROOT / "scripts" / "summarize_submap_v1_2_screen.py"
+)
 MATERIALIZER = ROOT / "scripts" / "materialize_submap_screen.py"
 MANIFEST_DERIVER = ROOT / "scripts" / "derive_submap_manifest.py"
 PREFLIGHT = ROOT / "scripts" / "preflight_submap_screen.py"
@@ -749,6 +752,7 @@ def make_submap_diagnostics(
     execution_order: Optional[Iterable[int]] = None,
     action_steps_by_episode: Optional[Mapping[int, int]] = None,
     v1_1: bool = False,
+    v1_2: bool = False,
 ) -> None:
     metadata = {
         "record_type": "submap_run_metadata",
@@ -757,15 +761,27 @@ def make_submap_diagnostics(
         "policy_gt_isolation": True,
         "config": {"enabled": True, **dict(config)},
     }
-    if v1_1:
+    if v1_1 or v1_2:
         metadata.update(
             {
-                "method_version": "submap_v1.1",
+                "method_version": (
+                    "submap_v1.2" if v1_2 else "submap_v1.1"
+                ),
                 "split_contract": (
                     "vo_anchor_and_rgbd_overlap_joint"
                 ),
                 "fallback_contract": (
                     "ascent_local_first_persistent_route"
+                ),
+            }
+        )
+    if v1_2:
+        metadata.update(
+            {
+                "handoff_enabled": True,
+                "exhaustion_recovery_enabled": True,
+                "continuity_contract": (
+                    "single_connected_handoff_and_one_shot_360_recovery"
                 ),
             }
         )
@@ -789,7 +805,7 @@ def make_submap_diagnostics(
                 "episode_sequence": sequence,
                 "action_step": step,
             }
-            if v1_1:
+            if v1_1 or v1_2:
                 is_last = step == step_counts.get(episode, 2) - 1
                 endpoint["decision"] = {
                     "should_split": is_last,
@@ -808,7 +824,7 @@ def make_submap_diagnostics(
                 "reason": "low_overlap",
             }
         )
-        if v1_1:
+        if v1_1 or v1_2:
             rows.extend(
                 [
                     {
@@ -825,6 +841,74 @@ def make_submap_diagnostics(
                         "episode_sequence": sequence,
                         "event": "remote_route_finished",
                         "outcome": "destination_reached",
+                    },
+                ]
+            )
+        if v1_2 and episode == 0:
+            rows.extend(
+                [
+                    {
+                        "record_type": "submap_event",
+                        "episode_sequence": sequence,
+                        "event": "handoff_created",
+                        "waypoint_local": [1.0, 0.0],
+                        "replayed_depth_frames": 4,
+                    },
+                    {
+                        "record_type": "submap_event",
+                        "episode_sequence": sequence,
+                        "event": "handoff_action",
+                    },
+                    {
+                        "record_type": "submap_event",
+                        "episode_sequence": sequence,
+                        "event": "handoff_completed",
+                        "reason": "reached",
+                    },
+                    {
+                        "record_type": "submap_event",
+                        "episode_sequence": sequence,
+                        "event": "exhaustion_recovery_requested",
+                    },
+                    {
+                        "record_type": "submap_event",
+                        "episode_sequence": sequence,
+                        "event": "submap_exhaustion_recovery",
+                    },
+                    {
+                        "record_type": "submap_event",
+                        "episode_sequence": sequence,
+                        "event": "exhaustion_recovery_started",
+                    },
+                    *[
+                        {
+                            "record_type": "submap_event",
+                            "episode_sequence": sequence,
+                            "event": "exhaustion_recovery_scan_turn",
+                            "scan_turn_index": index,
+                        }
+                        for index in range(2, 13)
+                    ],
+                    {
+                        "record_type": "submap_event",
+                        "episode_sequence": sequence,
+                        "event": "exhaustion_recovery_scan_completed",
+                    },
+                ]
+            )
+        elif v1_2 and episode == 1:
+            rows.extend(
+                [
+                    {
+                        "record_type": "submap_event",
+                        "episode_sequence": sequence,
+                        "event": "exhaustion_recovery_requested",
+                    },
+                    {
+                        "record_type": "submap_event",
+                        "episode_sequence": sequence,
+                        "event": "exhaustion_recovery_skipped",
+                        "reason": "floor_transition_priority",
                     },
                 ]
             )
@@ -1136,6 +1220,86 @@ def test_v1_1_b2_only_summarizer_matches_frozen_arm_a(
     assert result["mechanism"]["legacy_revisit_count"] == 0
     assert result["performance_verdict"] == "SCREEN_POSITIVE"
 
+    v1_2_submap = tmp_path / "v1_2_submap.jsonl"
+    make_submap_diagnostics(
+        v1_2_submap,
+        config,
+        2,
+        execution_order=[1, 0],
+        action_steps_by_episode=action_steps,
+        v1_2=True,
+    )
+    v1_2_inventory = tmp_path / "v1_2_inventory.csv"
+    write_csv(
+        v1_2_inventory,
+        [
+            {
+                "priority": 0,
+                "stage": "screen",
+                "condition": "B2",
+                "chunk_id": "c000",
+                "vo_diagnostics": b2_vo,
+                "submap_diagnostics": v1_2_submap,
+            }
+        ],
+        [
+            "priority",
+            "stage",
+            "condition",
+            "chunk_id",
+            "vo_diagnostics",
+            "submap_diagnostics",
+        ],
+    )
+    v1_2_registry = tmp_path / "v1_2_registry.csv"
+    write_csv(
+        v1_2_registry,
+        [{"lane_id": 0, "inventory": v1_2_inventory}],
+        ["lane_id", "inventory"],
+    )
+    v1_2_output = tmp_path / "v1_2_summary"
+    subprocess.run(
+        [
+            sys.executable,
+            str(V1_2_SUMMARIZER),
+            "--manifest",
+            str(manifest),
+            "--registry",
+            str(v1_2_registry),
+            "--mode",
+            "full",
+            "--expected-dataset",
+            "hm3d",
+            "--expected-episodes",
+            "2",
+            "--source-commit",
+            SOURCE,
+            "--forward-checkpoint-sha256",
+            FORWARD,
+            "--turn-checkpoint-sha256",
+            TURN,
+            "--baseline-episodes-csv",
+            str(baseline),
+            "--output-dir",
+            str(v1_2_output),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    v1_2_result = json.loads(
+        (v1_2_output / "summary.json").read_text()
+    )
+    assert v1_2_result["technical_status"] == "PASS"
+    assert v1_2_result["mechanism_exposure"] == (
+        "HANDOFF+RECOVERY+ROUTE"
+    )
+    assert v1_2_result["mechanism"]["handoff_created_count"] == 1
+    assert v1_2_result["mechanism"]["exhaustion_recovery_count"] == 1
+    assert v1_2_result["mechanism"][
+        "exhaustion_recovery_scan_completed_count"
+    ] == 1
+
 
 def test_pbs_scripts_are_syntactically_valid() -> None:
     for relative in (
@@ -1145,6 +1309,9 @@ def test_pbs_scripts_are_syntactically_valid() -> None:
         "pbs/run_submap_v1_1_lane.sh",
         "pbs/run_submap_v1_1_3shared.pbs",
         "pbs/submit_submap_v1_1.sh",
+        "pbs/run_submap_v1_2_lane.sh",
+        "pbs/run_submap_v1_2_3shared.pbs",
+        "pbs/submit_submap_v1_2.sh",
     ):
         subprocess.run(
             ["bash", "-n", str(ROOT / relative)],
@@ -1191,6 +1358,35 @@ def test_v1_1_harness_is_b2_only_fixed_and_placement_gated() -> None:
         if line.startswith("  printf '%s,screen,B2,")
     )
     assert inventory_header.count(",") == inventory_row.count(",")
+
+
+def test_v1_2_harness_enables_both_bounded_mechanisms() -> None:
+    worker = (ROOT / "pbs" / "run_submap_v1_2_lane.sh").read_text()
+    controller = (
+        ROOT / "pbs" / "run_submap_v1_2_3shared.pbs"
+    ).read_text()
+    submitter = (ROOT / "pbs" / "submit_submap_v1_2.sh").read_text()
+
+    assert "external/ascent_vo_submap_v1_2" in worker
+    assert "condition=B2" in worker and "condition=B1" not in worker
+    assert '"ascent_submaps.handoff_enabled=true"' in worker
+    assert (
+        '"ascent_submaps.exhaustion_recovery_enabled=true"' in worker
+    )
+    assert "ASCENT_SUBMAP_HANDOFF_ENABLED=true" in worker
+    assert "ASCENT_SUBMAP_EXHAUSTION_RECOVERY_ENABLED=true" in worker
+    assert "method_version=submap_v1.2" in worker
+    assert "run_lane smoke" in controller
+    assert controller.index("run_lane smoke") < controller.index(
+        "for lane_row in"
+    )
+    assert "summarize_submap_v1_2_screen.py" in controller
+    assert "no_metric_driven_retry=1" in controller
+    assert "artifacts/objectnav/submap_v1_2" in submitter
+    assert "artifacts/objectnav/submap_v1/manifests" in submitter
+    assert "/scratch/e1538633/liuyi/submap_v1_2" not in (
+        worker + controller + submitter
+    )
 
 
 def test_frozen_calibration_selection_is_episode_disjoint() -> None:
