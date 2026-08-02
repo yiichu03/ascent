@@ -1382,6 +1382,19 @@ def test_v1_2_harness_enables_both_bounded_mechanisms() -> None:
     )
     assert "summarize_submap_v1_2_screen.py" in controller
     assert "no_metric_driven_retry=1" in controller
+    assert (
+        "technical_retry_policy=one_fixed_retry_per_failed_unit"
+        in worker
+    )
+    assert (
+        'if [ "${#FAILED_UNITS[@]}" -gt 0 ]; then' in worker
+    )
+    assert "technical_retry_exhausted=B2" in worker
+    assert (
+        "placement_gate_technical_retry=one_fixed_per_failed_unit"
+        in controller
+    )
+    assert '"fixed_technical_retry_per_failed_unit": 1' in submitter
     assert "artifacts/objectnav/submap_v1_2" in submitter
     assert "artifacts/objectnav/submap_v1/manifests" in submitter
     assert "/scratch/e1538633/liuyi/submap_v1_2" not in (

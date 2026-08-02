@@ -162,7 +162,7 @@ done
 }
 
 {
-  echo schema=ascent_vo_submap_v1_2_lane_v1
+  echo schema=ascent_vo_submap_v1_2_lane_v2
   echo scientific_role=b2_only_method_screen
   echo pbs_jobid=${PBS_JOBID:-manual}
   echo host=$(hostname)
@@ -182,6 +182,7 @@ done
   echo evaluation_pose_source=habitat_ground_truth
   echo gt_policy_isolation=1
   echo no_metric_driven_retry=1
+  echo technical_retry_policy=one_fixed_retry_per_failed_unit
   echo method_version=submap_v1.2
   echo handoff_enabled=1
   echo exhaustion_recovery_enabled=1
@@ -339,6 +340,8 @@ run_unit() {
     echo max_actions=$SCREEN_MAX_ACTIONS
     echo expected_episodes=$expected
     echo no_metric_driven_retry=1
+    echo technical_retry_policy=one_fixed_retry_per_failed_unit
+    echo attempt_priority=$priority
   } > "$unit_dir/code_provenance.txt"
 
   echo "unit_start priority=$priority condition=B2 chunk=$chunk_id time=$(date -Is)" \
@@ -406,16 +409,17 @@ for encoded in "${CHUNK_ROWS[@]}"; do
   case "$result" in
     0) CONSECUTIVE_PROCESS_FAILURES=0 ;;
     42|44)
-      if [ "$MODE" = smoke ]; then exit "$result"; fi
       FAILED_UNITS+=("$encoded")
-      CONSECUTIVE_PROCESS_FAILURES=$((CONSECUTIVE_PROCESS_FAILURES + 1))
-      [ "$CONSECUTIVE_PROCESS_FAILURES" -lt "$MAX_CONSECUTIVE_PROCESS_FAILURES" ] || exit 42
+      if [ "$MODE" = full ]; then
+        CONSECUTIVE_PROCESS_FAILURES=$((CONSECUTIVE_PROCESS_FAILURES + 1))
+        [ "$CONSECUTIVE_PROCESS_FAILURES" -lt "$MAX_CONSECUTIVE_PROCESS_FAILURES" ] || exit 42
+      fi
       ;;
     *) exit "$result" ;;
   esac
 done
 
-if [ "$MODE" = full ]; then
+if [ "${#FAILED_UNITS[@]}" -gt 0 ]; then
   for failed in "${FAILED_UNITS[@]}"; do
     set +e
     run_unit 1 "$failed"
@@ -423,7 +427,10 @@ if [ "$MODE" = full ]; then
     set -e
     case "$result" in
       0) ;;
-      42|44) echo "recovery_incomplete=B2:$failed" ;;
+      42|44)
+        echo "technical_retry_exhausted=B2:$failed"
+        if [ "$MODE" = smoke ]; then exit "$result"; fi
+        ;;
       *) exit "$result" ;;
     esac
   done

@@ -175,6 +175,7 @@ BASE_PORT_ROOT=$(
   echo evaluation_gt_only=1
   echo historical_b1_read_only=1
   echo no_metric_driven_retry=1
+  echo placement_gate_technical_retry=one_fixed_per_failed_unit
   echo method_version=submap_v1.2
   echo handoff_enabled=1
   echo exhaustion_recovery_enabled=1

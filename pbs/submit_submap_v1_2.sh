@@ -135,6 +135,7 @@ print(json.dumps({
     "handoff_enabled": True,
     "exhaustion_recovery_enabled": True,
     "five_episode_gate_before_full": "$MODE" == "full",
+    "fixed_technical_retry_per_failed_unit": 1,
     "qsub_executed": False,
 }, indent=2, sort_keys=True))
 PY
