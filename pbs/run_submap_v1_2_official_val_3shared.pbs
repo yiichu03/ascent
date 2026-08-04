@@ -1,0 +1,460 @@
+#!/bin/bash
+#PBS -N v12offval
+#PBS -P CFP04-SF-109
+#PBS -q auto
+#PBS -l select=1:ncpus=24:ngpus=1:mem=384gb
+#PBS -l walltime=96:00:00
+#PBS -j oe
+
+# One hash-bound, three-lane official-val shard for frozen submap-v1.2.
+
+set -euo pipefail
+
+PROJECT=/scratch/e1538633/liuyi/drift-aware-submap-exploration
+SOURCE_ROOT=$PROJECT/external/ascent_vo_submap_v1_2
+RESOURCE_ROOT=$PROJECT/external/ascent
+POINTNAV_VO_ROOT=$PROJECT/external/PointNav-VO
+WORKER=$SOURCE_ROOT/pbs/run_submap_v1_2_lane.sh
+PREFLIGHT=$SOURCE_ROOT/scripts/preflight_submap_screen.py
+LOADING_CHECK=$SOURCE_ROOT/scripts/check_submap_habitat_loading.py
+TASK_RESET_CHECK=$SOURCE_ROOT/scripts/check_submap_task_reset.py
+SUMMARIZER=$SOURCE_ROOT/scripts/summarize_submap_v1_2_screen.py
+PORT_SELECTOR=$SOURCE_ROOT/scripts/select_submap_port_block.py
+
+CONFIG=${ASCENT_SUBMAP_V12_OFFVAL_CONFIG:?required}
+CONFIG_SHA256=${ASCENT_SUBMAP_V12_OFFVAL_CONFIG_SHA256:?required}
+SOURCE_COMMIT=${ASCENT_SUBMAP_V12_OFFVAL_SOURCE_COMMIT:?required}
+RESOURCE_COMMIT=${ASCENT_SUBMAP_V12_OFFVAL_RESOURCE_COMMIT:?required}
+POINTNAV_VO_COMMIT=${ASCENT_SUBMAP_V12_OFFVAL_POINTNAV_VO_COMMIT:?required}
+CONTROLLER_SHA256=${ASCENT_SUBMAP_V12_OFFVAL_CONTROLLER_SHA256:?required}
+WORKER_SHA256=${ASCENT_SUBMAP_V12_OFFVAL_WORKER_SHA256:?required}
+STAMP=${ASCENT_SUBMAP_V12_OFFVAL_STAMP:?required}
+
+SCRATCH_ROOT=/scratch/e1538633/liuyi
+ASCENT_ENV=$SCRATCH_ROOT/micromamba/envs/ascent_nav
+ASCENT_PYTHON=$ASCENT_ENV/bin/python
+SCENES_ROOT=$RESOURCE_ROOT/data/scene_datasets
+FORWARD_SHA256=6b571bb717366f7d80f61e919b33a45ac2f45925201c4e3011b3239a2c42e586
+TURN_SHA256=c469643f9ab35c9e1058f31fbb672a5fa3adf582987a4388bdd020dd89faf1d9
+LANE_COUNT=3
+GATE_EPISODES=5
+GATE_CHUNKS=1
+DEADLINE_OFFSET=$((90 * 3600))
+TASK_RESET_TIMEOUT_SECONDS=3600
+JOB_START_EPOCH=$(date +%s)
+DEADLINE_EPOCH=$((JOB_START_EPOCH + DEADLINE_OFFSET))
+
+for path in "$CONFIG" "$WORKER" "$PREFLIGHT" "$LOADING_CHECK" \
+  "$TASK_RESET_CHECK" "$SUMMARIZER" "$PORT_SELECTOR"; do
+  [ -f "$path" ] || { echo "missing_file=$path"; exit 21; }
+done
+check_hash() {
+  local path=$1 expected=$2 label=$3
+  [ "$(sha256sum "$path" | awk '{print $1}')" = "$expected" ] || {
+    echo "${label}_hash_mismatch"; exit 22;
+  }
+}
+check_hash "${BASH_SOURCE[0]}" "$CONTROLLER_SHA256" controller
+check_hash "$WORKER" "$WORKER_SHA256" worker
+check_hash "$CONFIG" "$CONFIG_SHA256" config
+
+mapfile -t CONFIG_VALUES < <(
+  "$ASCENT_PYTHON" - "$CONFIG" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["schema"] == "ascent_vo_submap_v1_2_official_val_job_v1"
+fields = (
+    "job_key", "dataset", "artifact_root", "manifest",
+    "manifest_sha256", "gate_manifest", "gate_manifest_sha256",
+    "selection", "selection_sha256", "baseline_csv",
+    "baseline_sha256", "preparation_audit",
+    "preparation_audit_sha256", "expected_episodes",
+    "expected_chunks", "scientific_start_index",
+    "scientific_stop_index_exclusive", "expected_official_total",
+)
+for field in fields:
+    print(value[field])
+PY
+)
+[ "${#CONFIG_VALUES[@]}" = 18 ] || { echo config_field_count; exit 22; }
+JOB_KEY=${CONFIG_VALUES[0]}
+DATASET=${CONFIG_VALUES[1]}
+ARTIFACT_ROOT=${CONFIG_VALUES[2]}
+MANIFEST=${CONFIG_VALUES[3]}
+MANIFEST_SHA256=${CONFIG_VALUES[4]}
+GATE_MANIFEST=${CONFIG_VALUES[5]}
+GATE_MANIFEST_SHA256=${CONFIG_VALUES[6]}
+SELECTION=${CONFIG_VALUES[7]}
+SELECTION_SHA256=${CONFIG_VALUES[8]}
+BASELINE_CSV=${CONFIG_VALUES[9]}
+BASELINE_SHA256=${CONFIG_VALUES[10]}
+PREPARATION_AUDIT=${CONFIG_VALUES[11]}
+PREPARATION_AUDIT_SHA256=${CONFIG_VALUES[12]}
+EXPECTED_EPISODES=${CONFIG_VALUES[13]}
+EXPECTED_CHUNKS=${CONFIG_VALUES[14]}
+SCIENTIFIC_START=${CONFIG_VALUES[15]}
+SCIENTIFIC_STOP=${CONFIG_VALUES[16]}
+EXPECTED_OFFICIAL_TOTAL=${CONFIG_VALUES[17]}
+case "$DATASET" in hm3d|mp3d) ;; *) echo invalid_dataset; exit 20 ;; esac
+for value in "$EXPECTED_EPISODES" "$EXPECTED_CHUNKS" \
+  "$SCIENTIFIC_START" "$SCIENTIFIC_STOP" "$EXPECTED_OFFICIAL_TOTAL"; do
+  [[ "$value" =~ ^[0-9]+$ ]] || { echo "invalid_integer=$value"; exit 20; }
+done
+
+for path in "$MANIFEST" "$GATE_MANIFEST" "$SELECTION" "$BASELINE_CSV" \
+  "$PREPARATION_AUDIT"; do
+  [ -f "$path" ] || { echo "missing_input=$path"; exit 21; }
+done
+check_hash "$MANIFEST" "$MANIFEST_SHA256" manifest
+check_hash "$GATE_MANIFEST" "$GATE_MANIFEST_SHA256" gate_manifest
+check_hash "$SELECTION" "$SELECTION_SHA256" selection
+check_hash "$BASELINE_CSV" "$BASELINE_SHA256" baseline
+check_hash "$PREPARATION_AUDIT" "$PREPARATION_AUDIT_SHA256" preparation_audit
+[ "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" = "$SOURCE_COMMIT" ] || {
+  echo source_commit_mismatch; exit 22;
+}
+[ -z "$(git -C "$SOURCE_ROOT" status --porcelain --untracked-files=all)" ] || {
+  echo source_worktree_not_clean; git -C "$SOURCE_ROOT" status --short; exit 23;
+}
+[ "$(git -C "$RESOURCE_ROOT" rev-parse HEAD)" = "$RESOURCE_COMMIT" ] || {
+  echo resource_commit_mismatch; exit 22;
+}
+[ "$(git -C "$POINTNAV_VO_ROOT" rev-parse HEAD)" = "$POINTNAV_VO_COMMIT" ] || {
+  echo pointnav_vo_commit_mismatch; exit 22;
+}
+
+RUN_ROOT=$ARTIFACT_ROOT/runs/submap_v1_2_official_val_${JOB_KEY}_${PBS_JOBID:-manual}_${STAMP}
+[ ! -e "$RUN_ROOT" ] || { echo "run_root_exists=$RUN_ROOT"; exit 24; }
+mkdir -p "$RUN_ROOT"/{checks,lanes,mpl_config,xdg_cache}
+
+export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1
+export LD_LIBRARY_PATH="$ASCENT_ENV/lib:$ASCENT_ENV/lib64:$ASCENT_ENV/lib/python3.9/site-packages/torch/lib:${LD_LIBRARY_PATH:-}"
+export PYTHONPATH="$SOURCE_ROOT:$SOURCE_ROOT/third_party/vlfm:$SOURCE_ROOT/third_party/habitat-lab/habitat-lab:$SOURCE_ROOT/third_party/habitat-lab/habitat-baselines:$SOURCE_ROOT/third_party/frontier_exploration:$SOURCE_ROOT/third_party/depth_camera_filtering:$SOURCE_ROOT/third_party/MobileSAM:$SOURCE_ROOT/third_party/GroundingDINO:$SOURCE_ROOT/third_party/D-FINE:$SOURCE_ROOT/third_party/recognize-anything:$SOURCE_ROOT/third_party/places365"
+export XDG_CACHE_HOME=$RUN_ROOT/xdg_cache
+export MPLCONFIGDIR=$RUN_ROOT/mpl_config
+
+"$ASCENT_PYTHON" - "$CONFIG" "$PREPARATION_AUDIT" "$SELECTION" \
+  "$BASELINE_CSV" "$MANIFEST" "$GATE_MANIFEST" \
+  "$RUN_ROOT/checks/scientific_identity.json" <<'PY'
+import csv, gzip, hashlib, json, sys
+from pathlib import Path
+
+config_path, audit_path, selection_path, baseline_path, manifest_path, gate_path, output_path = map(Path, sys.argv[1:])
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+def rows(path):
+    with path.open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+config = json.load(config_path.open(encoding="utf-8"))
+audit = json.load(audit_path.open(encoding="utf-8"))
+selection = rows(selection_path)
+baseline = rows(baseline_path)
+manifest = json.load(manifest_path.open(encoding="utf-8"))
+gate = json.load(gate_path.open(encoding="utf-8"))
+dataset = config["dataset"]
+expected = config["expected_episodes"]
+start = config["scientific_start_index"]
+stop = config["scientific_stop_index_exclusive"]
+ids = [row["logical_case_id"] for row in selection]
+assert config["schema"] == "ascent_vo_submap_v1_2_official_val_job_v1"
+assert config["scientific_split"] == "val"
+assert config["transport_split"] == "train"
+assert config["selection_rule"] == "canonical_official_val_contiguous_index_no_metric_filter"
+assert config["metrics_used_for_selection"] is False
+assert config["pose_source"] == "zhao_rgbd_2021"
+assert config["policy_gt_isolation"] is True
+assert config["evaluation_gt_only"] is True
+assert config["method_version"] == "submap_v1.2"
+assert config["fixed_technical_retry_per_failed_unit"] == 1
+assert config["metric_driven_retry"] is False
+assert config["gate_episodes"] == 5 and config["gate_chunks"] == 1
+assert config["lane_count"] == 3
+assert audit["schema"] == "ascent_vo_submap_v1_2_official_val_preparation_v1"
+assert audit["status"] == "PASS" and audit["metrics_used_for_selection"] is False
+assert audit["dataset"] == dataset and audit["split"] == "val"
+assert audit["selected_start_index"] == start
+assert audit["selected_stop_index_exclusive"] == stop
+assert stop - start == expected == len(selection) == len(baseline)
+assert [int(row["dataset_case_index"]) for row in selection] == list(range(start, stop))
+assert ids == [f"{dataset}_val_{index:04d}" for index in range(start, stop)]
+assert [row["logical_case_id"] for row in baseline] == ids
+assert all(row["dataset"] == dataset and row["split"] == "val" for row in selection)
+assert all(
+    row["dataset"] == dataset and row["arm"] == "A"
+    and row["map_pose_source"] == "vo" and row["control_pose_source"] == "vo"
+    for row in baseline
+)
+assert audit["selection_sha256"] == sha256(selection_path)
+assert audit["ascent_vo_baseline_sha256"] == sha256(baseline_path)
+transport_root = Path(audit["transport_root_file"])
+assert transport_root.is_file()
+assert audit["transport_root_file_sha256"] == sha256(transport_root)
+with gzip.open(transport_root, "rt", encoding="utf-8") as handle:
+    root_payload = json.load(handle)
+assert "content_scenes_path" not in root_payload
+assert root_payload["episodes"] == []
+assert manifest["dataset"] == dataset and manifest["split"] == "train"
+assert manifest["episode_count"] == expected
+assert len(manifest["chunks"]) == config["expected_chunks"]
+assert manifest["logical_case_ids"] == ids
+assert gate["dataset"] == dataset and gate["split"] == "train"
+assert gate["episode_count"] == 5 and len(gate["chunks"]) == 1
+assert gate["logical_case_ids"] == ids[:5]
+selection_by_id = {row["logical_case_id"]: row for row in selection}
+observed = []
+for chunk in manifest["chunks"]:
+    with gzip.open(chunk["content_file"], "rt", encoding="utf-8") as handle:
+        episodes = json.load(handle)["episodes"]
+    with Path(chunk["identity_path"]).open(newline="", encoding="utf-8") as handle:
+        identities = list(csv.DictReader(handle))
+    assert len(episodes) == len(identities) == int(chunk["episode_count"])
+    for episode, identity in zip(episodes, identities):
+        logical_id = identity["logical_case_id"]
+        assert str(episode["episode_id"]) == logical_id
+        assert str(episode["scene_id"]).replace("\\", "/") == selection_by_id[logical_id]["scene_id"].replace("\\", "/")
+        observed.append(logical_id)
+assert observed == ids
+result = {
+    "schema": "ascent_vo_submap_v1_2_official_val_identity_v1",
+    "status": "PASS",
+    "dataset": dataset,
+    "scientific_split": "val",
+    "transport_split": "train",
+    "start_index": start,
+    "stop_index_exclusive": stop,
+    "episode_count": len(ids),
+    "chunk_count": len(manifest["chunks"]),
+    "first_logical_case_id": ids[0],
+    "last_logical_case_id": ids[-1],
+    "selection_sha256": sha256(selection_path),
+    "baseline_sha256": sha256(baseline_path),
+    "manifest_sha256": sha256(manifest_path),
+    "gate_manifest_sha256": sha256(gate_path),
+}
+with output_path.open("x", encoding="utf-8") as handle:
+    json.dump(result, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+print(json.dumps(result, indent=2, sort_keys=True))
+PY
+
+run_static_checks() {
+  local label=$1 manifest=$2 expected_episodes=$3 expected_chunks=$4
+  "$ASCENT_PYTHON" "$PREFLIGHT" --manifest "$manifest" \
+    --scene-root "$SCENES_ROOT" --expected-dataset "$DATASET" \
+    --expected-episodes "$expected_episodes" --expected-chunks "$expected_chunks" \
+    --output-json "$RUN_ROOT/checks/${label}_preflight.json" \
+    > "$RUN_ROOT/checks/${label}_preflight.log"
+  "$ASCENT_PYTHON" "$LOADING_CHECK" --manifest "$manifest" \
+    --config-dir "$SOURCE_ROOT/experiments" --scene-root "$SCENES_ROOT" \
+    --output-json "$RUN_ROOT/checks/${label}_habitat_loading.json" \
+    > "$RUN_ROOT/checks/${label}_habitat_loading.log"
+}
+run_static_checks main "$MANIFEST" "$EXPECTED_EPISODES" "$EXPECTED_CHUNKS"
+run_static_checks placement_gate "$GATE_MANIFEST" "$GATE_EPISODES" "$GATE_CHUNKS"
+timeout --signal=TERM --kill-after=30s "${TASK_RESET_TIMEOUT_SECONDS}s" \
+  "$ASCENT_PYTHON" "$TASK_RESET_CHECK" --manifest "$GATE_MANIFEST" \
+  --config-dir "$SOURCE_ROOT/experiments" --scene-root "$SCENES_ROOT" \
+  --gpu-device-id 0 \
+  --output-json "$RUN_ROOT/checks/placement_gate_task_reset.json" \
+  > "$RUN_ROOT/checks/placement_gate_task_reset.log" 2>&1
+
+BASE_PORT_ROOT=$(
+  "$ASCENT_PYTHON" "$PORT_SELECTOR" \
+    --seed "${PBS_JOBID:-manual}:$STAMP" --lanes "$LANE_COUNT"
+)
+{
+  echo schema=ascent_vo_submap_v1_2_official_val_controller_v1
+  echo scientific_role=frozen_method_official_val_expansion
+  echo pbs_jobid=${PBS_JOBID:-manual}
+  echo host=$(hostname)
+  echo start_time=$(date -Is)
+  echo job_key=$JOB_KEY
+  echo dataset=$DATASET
+  echo scientific_split=val
+  echo transport_split=train
+  echo scientific_start_index=$SCIENTIFIC_START
+  echo scientific_stop_index_exclusive=$SCIENTIFIC_STOP
+  echo source_commit=$SOURCE_COMMIT
+  echo resource_commit=$RESOURCE_COMMIT
+  echo pointnav_vo_commit=$POINTNAV_VO_COMMIT
+  echo config=$CONFIG
+  echo config_sha256=$CONFIG_SHA256
+  echo manifest=$MANIFEST
+  echo manifest_sha256=$MANIFEST_SHA256
+  echo expected_chunks=$EXPECTED_CHUNKS
+  echo expected_episodes=$EXPECTED_EPISODES
+  echo lane_count=$LANE_COUNT
+  echo resource_contract=one_H200_up_to_three_independent_service_lanes
+  echo placement_contract=five_episode_method_gate_before_official_val_shard
+  echo pose_source=zhao_rgbd_2021
+  echo policy_gt_isolation=1
+  echo evaluation_gt_only=1
+  echo no_metric_driven_retry=1
+  echo technical_retry_policy=one_fixed_retry_per_failed_unit
+  echo method_version=submap_v1.2
+  echo handoff_enabled=1
+  echo exhaustion_recovery_enabled=1
+  echo base_port_root=$BASE_PORT_ROOT
+  echo deadline_epoch=$DEADLINE_EPOCH
+  qstat -f "${PBS_JOBID:-}" 2>/dev/null || true
+  nvidia-smi || true
+} > "$RUN_ROOT/controller_preflight.txt"
+
+ACTIVE_PIDS=()
+cleanup() {
+  local status=$?
+  set +e
+  local pid
+  for pid in "${ACTIVE_PIDS[@]:-}"; do kill "$pid" 2>/dev/null || true; done
+  for pid in "${ACTIVE_PIDS[@]:-}"; do wait "$pid" 2>/dev/null || true; done
+  if [ ! -e "$RUN_ROOT/terminal_status.txt" ]; then
+    printf 'controller_exit_status=%s stage=aborted time=%s\n' \
+      "$status" "$(date -Is)" > "$RUN_ROOT/terminal_status.txt"
+  fi
+  return "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' HUP INT TERM
+
+run_lane() {
+  local run_mode=$1 manifest=$2 manifest_sha=$3 lane_id=$4 lanes=$5
+  local expected_chunks=$6 expected_episodes=$7 stage_root=$8 base_port=$9
+  (
+    export ASCENT_SUBMAP_V12_DATASET=$DATASET
+    export ASCENT_SUBMAP_V12_MODE=$run_mode
+    export ASCENT_SUBMAP_V12_SCENES_ROOT=$SCENES_ROOT
+    export ASCENT_SUBMAP_V12_MANIFEST=$manifest
+    export ASCENT_SUBMAP_V12_MANIFEST_SHA256=$manifest_sha
+    export ASCENT_SUBMAP_V12_SOURCE_COMMIT=$SOURCE_COMMIT
+    export ASCENT_SUBMAP_V12_RESOURCE_COMMIT=$RESOURCE_COMMIT
+    export ASCENT_SUBMAP_V12_POINTNAV_VO_COMMIT=$POINTNAV_VO_COMMIT
+    export ASCENT_SUBMAP_V12_LANE_ID=$lane_id
+    export ASCENT_SUBMAP_V12_LANE_COUNT=$lanes
+    export ASCENT_SUBMAP_V12_LANE_EXPECTED_CHUNKS=$expected_chunks
+    export ASCENT_SUBMAP_V12_LANE_EXPECTED_EPISODES=$expected_episodes
+    export ASCENT_SUBMAP_V12_STAGE_ROOT=$stage_root
+    export ASCENT_SUBMAP_V12_BASE_PORT=$base_port
+    export ASCENT_SUBMAP_V12_DEADLINE_EPOCH=$DEADLINE_EPOCH
+    bash "$WORKER"
+  )
+}
+
+mkdir -p "$RUN_ROOT/placement_gate"
+run_lane smoke "$GATE_MANIFEST" "$GATE_MANIFEST_SHA256" \
+  0 1 1 "$GATE_EPISODES" "$RUN_ROOT/placement_gate" "$BASE_PORT_ROOT" \
+  > "$RUN_ROOT/placement_gate/lane_0.log" 2>&1
+printf 'lane_id,inventory\n0,%s\n' \
+  "$RUN_ROOT/placement_gate/lane_0/inventory.csv" \
+  > "$RUN_ROOT/placement_gate/registry.csv"
+"$ASCENT_PYTHON" "$SUMMARIZER" --manifest "$GATE_MANIFEST" \
+  --registry "$RUN_ROOT/placement_gate/registry.csv" --mode smoke \
+  --expected-dataset "$DATASET" --expected-episodes "$GATE_EPISODES" \
+  --source-commit "$SOURCE_COMMIT" \
+  --forward-checkpoint-sha256 "$FORWARD_SHA256" \
+  --turn-checkpoint-sha256 "$TURN_SHA256" \
+  --output-dir "$RUN_ROOT/placement_gate/final_gate" \
+  > "$RUN_ROOT/placement_gate/final_gate.log" 2>&1
+[ "$("$ASCENT_PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["technical_status"])' "$RUN_ROOT/placement_gate/final_gate/summary.json")" = PASS ] || {
+  echo placement_gate_failed; exit 46;
+}
+
+mapfile -t LANE_ROWS < <(
+  "$ASCENT_PYTHON" - "$MANIFEST" "$LANE_COUNT" <<'PY'
+import json, sys
+from collections import Counter
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+lanes = int(sys.argv[2])
+chunks, episodes = Counter(), Counter()
+for index, chunk in enumerate(manifest["chunks"]):
+    lane = index % lanes
+    chunks[lane] += 1
+    episodes[lane] += int(chunk["episode_count"])
+for lane in range(lanes):
+    print(f"{lane}\t{chunks[lane]}\t{episodes[lane]}")
+PY
+)
+
+PIDS=()
+LANE_IDS=()
+LANE_LOGS=()
+for lane_row in "${LANE_ROWS[@]}"; do
+  IFS=$'\t' read -r lane_id lane_chunks lane_episodes <<< "$lane_row"
+  lane_log=$RUN_ROOT/lanes/lane_${lane_id}.log
+  run_lane full "$MANIFEST" "$MANIFEST_SHA256" \
+    "$lane_id" "$LANE_COUNT" "$lane_chunks" "$lane_episodes" \
+    "$RUN_ROOT/lanes" "$((BASE_PORT_ROOT + lane_id * 20))" \
+    > "$lane_log" 2>&1 &
+  PIDS+=("$!")
+  ACTIVE_PIDS+=("$!")
+  LANE_IDS+=("$lane_id")
+  LANE_LOGS+=("$lane_log")
+done
+
+printf 'lane_id,pid,exit_status,lane_log,inventory\n' > "$RUN_ROOT/lane_status.csv"
+WORKER_STATUS=0
+for index in "${!PIDS[@]}"; do
+  set +e
+  wait "${PIDS[$index]}"
+  status=$?
+  set -e
+  lane_id=${LANE_IDS[$index]}
+  printf '%s,%s,%s,%s,%s\n' "$lane_id" "${PIDS[$index]}" "$status" \
+    "${LANE_LOGS[$index]}" "$RUN_ROOT/lanes/lane_${lane_id}/inventory.csv" \
+    >> "$RUN_ROOT/lane_status.csv"
+  [ "$status" = 0 ] || WORKER_STATUS=$status
+done
+ACTIVE_PIDS=()
+
+REGISTRY=$RUN_ROOT/evidence_registry.csv
+printf 'lane_id,inventory\n' > "$REGISTRY"
+for lane_id in "${LANE_IDS[@]}"; do
+  printf '%s,%s\n' "$lane_id" "$RUN_ROOT/lanes/lane_${lane_id}/inventory.csv" \
+    >> "$REGISTRY"
+done
+
+SUMMARY_DIR=$RUN_ROOT/final_gate
+set +e
+"$ASCENT_PYTHON" "$SUMMARIZER" --manifest "$MANIFEST" \
+  --registry "$REGISTRY" --mode full --expected-dataset "$DATASET" \
+  --expected-episodes "$EXPECTED_EPISODES" --source-commit "$SOURCE_COMMIT" \
+  --forward-checkpoint-sha256 "$FORWARD_SHA256" \
+  --turn-checkpoint-sha256 "$TURN_SHA256" \
+  --baseline-episodes-csv "$BASELINE_CSV" --output-dir "$SUMMARY_DIR" \
+  > "$RUN_ROOT/final_gate.log" 2>&1
+SUMMARY_STATUS=$?
+set -e
+
+[ "$WORKER_STATUS" -eq 0 ] || { echo "worker_failure=$WORKER_STATUS"; exit "$WORKER_STATUS"; }
+[ "$SUMMARY_STATUS" -eq 0 ] || { echo "summary_gate_failure=$SUMMARY_STATUS"; exit 46; }
+read -r TECHNICAL_STATUS VALID BASELINE_MATCHED MECHANISM PERFORMANCE < <(
+  "$ASCENT_PYTHON" - "$SUMMARY_DIR/summary.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+print(value["technical_status"], value["b2_valid_episodes"],
+      value["historical_b1_matched_episodes"], value["mechanism_exposure"],
+      value["performance_verdict"])
+PY
+)
+[ "$TECHNICAL_STATUS" = PASS ] || exit 46
+[ "$VALID" = "$EXPECTED_EPISODES" ] || exit 46
+[ "$BASELINE_MATCHED" = "$EXPECTED_EPISODES" ] || exit 46
+check_hash "${BASH_SOURCE[0]}" "$CONTROLLER_SHA256" controller_at_close
+check_hash "$WORKER" "$WORKER_SHA256" worker_at_close
+check_hash "$CONFIG" "$CONFIG_SHA256" config_at_close
+[ "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" = "$SOURCE_COMMIT" ] || exit 47
+[ -z "$(git -C "$SOURCE_ROOT" status --porcelain --untracked-files=all)" ] || {
+  echo source_changed_during_run; exit 47;
+}
+printf 'controller_exit_status=0 stage=complete job_key=%s dataset=%s scientific_split=val transport_split=train start=%s stop=%s b2_valid=%s baseline_matched=%s technical_status=%s mechanism_exposure=%s performance_verdict=%s time=%s\n' \
+  "$JOB_KEY" "$DATASET" "$SCIENTIFIC_START" "$SCIENTIFIC_STOP" "$VALID" \
+  "$BASELINE_MATCHED" "$TECHNICAL_STATUS" "$MECHANISM" "$PERFORMANCE" \
+  "$(date -Is)" > "$RUN_ROOT/terminal_status.txt"
+trap - EXIT
+exit 0
