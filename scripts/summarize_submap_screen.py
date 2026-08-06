@@ -189,7 +189,11 @@ def validate_submap_metadata(
         errors.append("submap_metadata:enabled")
         return errors
     method_version = metadata.get("method_version")
-    if method_version in {"submap_v1.1", "submap_v1.2"}:
+    if method_version in {
+        "submap_v1.1",
+        "submap_v1.2",
+        "submap_v1.3",
+    }:
         v1_1_expected = {
             "split_contract": "vo_anchor_and_rgbd_overlap_joint",
             "fallback_contract": "ascent_local_first_persistent_route",
@@ -217,14 +221,19 @@ def validate_submap_metadata(
                     f"submap_metadata:fixed_config:{key}:"
                     f"{config.get(key)!r}:{value!r}"
                 )
-        if method_version == "submap_v1.2":
+        if method_version in {"submap_v1.2", "submap_v1.3"}:
             v1_2_expected = {
                 "handoff_enabled": True,
                 "exhaustion_recovery_enabled": True,
                 "continuity_contract": (
                     "single_connected_handoff_and_one_shot_360_recovery"
+                    if method_version == "submap_v1.2"
+                    else "single_connected_handoff_one_shot_360_recovery_"
+                    "and_one_boundary_live_regrounded_target_relay"
                 ),
             }
+            if method_version == "submap_v1.3":
+                v1_2_expected["target_relay_enabled"] = True
             for key, value in v1_2_expected.items():
                 if metadata.get(key) != value:
                     errors.append(
@@ -445,6 +454,7 @@ def parse_attempt(
             if submap_method_version in {
                 "submap_v1.1",
                 "submap_v1.2",
+                "submap_v1.3",
             }:
                 selected_candidates = Counter(
                     str(item.get("candidate_key"))
@@ -496,7 +506,10 @@ def parse_attempt(
                     ):
                         local_errors.append("joint_split_contract")
                         break
-            if submap_method_version == "submap_v1.2":
+            if submap_method_version in {
+                "submap_v1.2",
+                "submap_v1.3",
+            }:
                 if events["submap_exhaustion_recovery"] > 1:
                     local_errors.append("recovery_repeated")
                 if events["exhaustion_recovery_started"] > 1:
@@ -535,6 +548,127 @@ def parse_attempt(
                         or not 1 <= replayed <= 4
                     ):
                         local_errors.append("handoff_creation_schema")
+                        break
+            if submap_method_version == "submap_v1.3":
+                created_relay = [
+                    item
+                    for item in episode_submap_events
+                    if item.get("event") == "target_relay_created"
+                ]
+                finished_relay = [
+                    item
+                    for item in episode_submap_events
+                    if item.get("event") == "target_relay_finished"
+                ]
+                relay_candidates = Counter(
+                    str(item.get("candidate_key"))
+                    for item in created_relay
+                )
+                if any(
+                    candidate in {"", "None"} or count > 1
+                    for candidate, count in relay_candidates.items()
+                ):
+                    local_errors.append("target_relay_candidate_reused")
+                allowed_outcomes = {
+                    "target_reacquired",
+                    "action_budget_exhausted",
+                    "scan_exhausted",
+                    "left_connected_free_space",
+                    "no_progress",
+                    "waypoint_action_limit",
+                    "second_submap_boundary",
+                    "stair_logic_priority",
+                }
+                for item in created_relay:
+                    waypoint = item.get("waypoint_local")
+                    source_target = item.get("source_target_local_xy")
+                    rough_direction = item.get(
+                        "rough_direction_local_xy"
+                    )
+                    replayed = item.get("replayed_depth_frames")
+                    strong_evidence = bool(
+                        item.get("live_detection_at_split")
+                    ) or bool(item.get("double_checked_at_split"))
+                    if (
+                        not isinstance(waypoint, list)
+                        or len(waypoint) != 2
+                        or any(
+                            finite_float(value) is None
+                            for value in waypoint
+                        )
+                        or not isinstance(source_target, list)
+                        or len(source_target) != 2
+                        or any(
+                            finite_float(value) is None
+                            for value in source_target
+                        )
+                        or not isinstance(rough_direction, list)
+                        or len(rough_direction) != 2
+                        or any(
+                            finite_float(value) is None
+                            for value in rough_direction
+                        )
+                        or not isinstance(replayed, int)
+                        or not 1 <= replayed <= 4
+                        or not strong_evidence
+                        or item.get("old_coordinate_stop_authority")
+                        is not False
+                        or not item.get("target_class")
+                        or item.get("source_submap_id")
+                        == item.get("destination_submap_id")
+                    ):
+                        local_errors.append(
+                            "target_relay_creation_schema"
+                        )
+                        break
+                created_keys = set(relay_candidates)
+                for item in finished_relay:
+                    if (
+                        str(item.get("candidate_key"))
+                        not in created_keys
+                        or str(item.get("outcome"))
+                        not in allowed_outcomes
+                    ):
+                        local_errors.append(
+                            "target_relay_finish_contract"
+                        )
+                        break
+                scan_started = Counter(
+                    str(item.get("candidate_key"))
+                    for item in episode_submap_events
+                    if item.get("event") == "target_relay_scan_started"
+                )
+                scan_actions = Counter(
+                    str(item.get("candidate_key"))
+                    for item in episode_submap_events
+                    if item.get("event") == "target_relay_scan_action"
+                )
+                if any(
+                    key not in created_keys or count > 1
+                    for key, count in scan_started.items()
+                ) or any(
+                    key not in created_keys or count > 4
+                    for key, count in scan_actions.items()
+                ):
+                    local_errors.append("target_relay_scan_budget")
+                if any(
+                    item.get("event")
+                    in {
+                        "target_relay_action",
+                        "target_relay_scan_action",
+                    }
+                    and int(item.get("action", 0)) == 0
+                    for item in episode_submap_events
+                ):
+                    local_errors.append("target_relay_issued_stop")
+                for item in finished_relay:
+                    if item.get("outcome") != "scan_exhausted":
+                        continue
+                    key = str(item.get("candidate_key"))
+                    if scan_started[key] != 1 or scan_actions[key] != 4:
+                        local_errors.append(
+                            "target_relay_full_scan_contract"
+                        )
                         break
         else:
             events = Counter()
@@ -590,6 +724,24 @@ def parse_attempt(
             ],
             "exhaustion_recovery_target_reacquired_count": events[
                 "exhaustion_recovery_target_reacquired"
+            ],
+            "target_relay_created_count": events[
+                "target_relay_created"
+            ],
+            "target_relay_action_count": events[
+                "target_relay_action"
+            ],
+            "target_relay_scan_started_count": events[
+                "target_relay_scan_started"
+            ],
+            "target_relay_scan_action_count": events[
+                "target_relay_scan_action"
+            ],
+            "target_relay_finished_count": events[
+                "target_relay_finished"
+            ],
+            "target_relay_skipped_count": events[
+                "target_relay_skipped"
             ],
             "submap_revisit_count": events["submap_revisit"],
             "gateway_route_action_count": events["gateway_route_action"],
@@ -656,6 +808,20 @@ def parse_attempt(
                     for item in episode_submap_events
                     if item.get("event")
                     == "exhaustion_recovery_skipped"
+                )
+            ),
+            "target_relay_outcomes": dict(
+                Counter(
+                    str(item.get("outcome"))
+                    for item in episode_submap_events
+                    if item.get("event") == "target_relay_finished"
+                )
+            ),
+            "target_relay_skip_reasons": dict(
+                Counter(
+                    str(item.get("reason"))
+                    for item in episode_submap_events
+                    if item.get("event") == "target_relay_skipped"
                 )
             ),
             "evidence_vo_diagnostics": str(vo_path),

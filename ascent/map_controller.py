@@ -61,6 +61,7 @@ class Map_Controller:
         self.target_detection_list: List[Any] = [None] * self._num_envs
         self.coco_detection_list: List[Any] = [None] * self._num_envs
         self.non_coco_detection_list: List[Any] = [None] * self._num_envs
+        self.target_detected_this_step: List[bool] = [False] * self._num_envs
         text_prompt_channels = len(self._text_prompt.split(PROMPT_SEPARATOR)) if hasattr(self, '_text_prompt') else 1 # 确保 _text_prompt 已初始化
         self._coco_threshold = coco_threshold
         self._non_coco_threshold = non_coco_threshold
@@ -179,6 +180,7 @@ class Map_Controller:
         self.target_detection_list[env] = None
         self.coco_detection_list[env] = None
         self.non_coco_detection_list[env] = None
+        self.target_detected_this_step[env] = False
 
         # 找目标状态
         self._double_check_goal[env] = False
@@ -848,6 +850,12 @@ class Map_Controller:
         self._person_masks = np.zeros((self._num_envs, height, width), dtype=bool)
         self._stair_masks = np.zeros((self._num_envs, height, width), dtype=bool)
 
+        # This signal is intentionally frame-local.  The point-cloud map is
+        # persistent, so ``has_object`` alone cannot distinguish a fresh
+        # observation from stale evidence at a submap boundary.
+        for env in range(self._num_envs):
+            self.target_detected_this_step[env] = False
+
         for env in range(self._num_envs):
             # 步骤检查，如果不需要处理此环境则跳过，并且如果到了新的楼层，因为一上来就初始化，所以也不需要存
             if self._obstacle_map[env]._floor_num_steps == 0: #  and num_steps[env] == 0
@@ -865,6 +873,9 @@ class Map_Controller:
             # 获取目标、COCO 和非COCO检测结果
             target_detections, coco_detections, non_coco_detections = \
                 self._get_object_detections_with_stair_and_person(rgb, non_coco_caption, env)
+            self.target_detected_this_step[env] = bool(
+                target_detections.num_detections > 0
+            )
 
             # --- 封装：更新当前步骤的对象和房间信息 ---
             self._update_current_step_scene_info(env, rgb)

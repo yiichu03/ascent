@@ -15,6 +15,7 @@ from ascent.submaps import (
     MapPayload,
     SubmapLifecycleConfig,
     SubmapManager,
+    TargetIntentRelay,
     select_connected_handoff_waypoint,
     transform_camera_to_destination,
     waypoint_in_robot_component,
@@ -152,6 +153,37 @@ def test_exhaustion_recovery_is_one_shot_and_counts_first_turn() -> None:
             total_turns=12,
             turns_already_issued=1,
         )
+
+
+def test_target_intent_relay_counts_only_progress_toward_waypoint() -> None:
+    state = TargetIntentRelay(
+        waypoint_local=np.array([2.0, 0.0]),
+        source_target_local_xy=np.array([3.0, 0.0]),
+        source_submap_id="old",
+        destination_submap_id="new",
+        target_class="chair",
+        candidate_key="semantic:old:chair",
+        created_step=10,
+        reference_distance_m=2.0,
+        live_detection_at_split=True,
+        double_checked_at_split=False,
+    )
+    assert state.observe_distance(
+        2.4,
+        progress_threshold_m=0.3,
+        max_stagnation_decisions=20,
+        max_waypoint_actions=20,
+    ) is None
+    assert state.stagnation_decisions == 1
+    assert state.reference_distance_m == 2.0
+    assert state.observe_distance(
+        1.6,
+        progress_threshold_m=0.3,
+        max_stagnation_decisions=20,
+        max_waypoint_actions=20,
+    ) is None
+    assert state.stagnation_decisions == 0
+    assert state.reference_distance_m == 1.6
 
 
 def test_manager_exhaustion_boundary_is_explicit_and_same_floor() -> None:

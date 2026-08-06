@@ -83,6 +83,88 @@ class BoundaryHandoff:
 
 
 @dataclass
+class TargetIntentRelay:
+    """One-boundary semantic intent with no authority to stop the robot."""
+
+    waypoint_local: np.ndarray
+    source_target_local_xy: np.ndarray
+    source_submap_id: str
+    destination_submap_id: str
+    target_class: str
+    candidate_key: str
+    created_step: int
+    reference_distance_m: float
+    live_detection_at_split: bool
+    double_checked_at_split: bool
+    waypoint_action_count: int = 0
+    stagnation_decisions: int = 0
+    scanning: bool = False
+    scan_action_cursor: int = 0
+
+    def __post_init__(self) -> None:
+        waypoint = np.asarray(self.waypoint_local, dtype=np.float64)
+        source_target = np.asarray(
+            self.source_target_local_xy, dtype=np.float64
+        )
+        if waypoint.shape != (2,) or not np.isfinite(waypoint).all():
+            raise ValueError("target relay waypoint must be finite XY")
+        if (
+            source_target.shape != (2,)
+            or not np.isfinite(source_target).all()
+        ):
+            raise ValueError("source target must be finite XY")
+        if not self.target_class or not self.candidate_key:
+            raise ValueError("target relay semantic identity must be nonempty")
+        self.waypoint_local = waypoint.copy()
+        self.source_target_local_xy = source_target.copy()
+
+    def observe_distance(
+        self,
+        distance_m: float,
+        *,
+        progress_threshold_m: float,
+        max_stagnation_decisions: int,
+        max_waypoint_actions: int,
+    ) -> Optional[str]:
+        """Return a bounded failure reason while approaching verification."""
+
+        distance = float(distance_m)
+        if not np.isfinite(distance) or distance < 0.0:
+            raise ValueError("target relay distance must be finite and nonnegative")
+        self.waypoint_action_count += 1
+        if (
+            self.reference_distance_m - distance
+            >= progress_threshold_m
+        ):
+            self.reference_distance_m = distance
+            self.stagnation_decisions = 0
+        else:
+            self.stagnation_decisions += 1
+        if self.stagnation_decisions >= int(max_stagnation_decisions):
+            return "no_progress"
+        if self.waypoint_action_count >= int(max_waypoint_actions):
+            return "waypoint_action_limit"
+        return None
+
+    def begin_scan(self) -> None:
+        if self.scanning:
+            raise RuntimeError("target relay scan already started")
+        self.scanning = True
+        self.scan_action_cursor = 0
+
+    def issue_scan_action(self, total_actions: int) -> Optional[int]:
+        """Return the next scan index, or ``None`` after the fixed sweep."""
+
+        if not self.scanning:
+            raise RuntimeError("target relay scan has not started")
+        if self.scan_action_cursor >= int(total_actions):
+            return None
+        index = self.scan_action_cursor
+        self.scan_action_cursor += 1
+        return index
+
+
+@dataclass
 class ExhaustionRecovery:
     """Per-episode one-shot no-frontier recovery state."""
 

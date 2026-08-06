@@ -16,6 +16,7 @@ from ascent.submaps import (
     SubmapLifecycleConfig,
     SubmapManager,
     SubmapQueryView,
+    TargetIntentRelay,
     ViewOverlapConfig,
     estimate_view_overlap,
     relative_pose,
@@ -633,8 +634,21 @@ class _ValueMapStub:
 
 
 class _ObjectMapStub:
+    def __init__(self, target=None, cloud=None):
+        self.target = target
+        self.cloud = (
+            np.asarray(cloud, dtype=np.float64)
+            if cloud is not None
+            else np.empty((0, 3), dtype=np.float64)
+        )
+
     def has_object(self, target):
-        return False
+        return target == self.target
+
+    def get_target_cloud(self, target):
+        if not self.has_object(target):
+            return np.empty((0, 3), dtype=np.float64)
+        return self.cloud.copy()
 
 
 class _PointNavStub:
@@ -650,6 +664,10 @@ class _ControllerStub:
         self.payload = initial
         self.replacement = replacement
         self._obstacle_map = [initial.obstacle_map]
+        self._object_map = [initial.object_map]
+        self._target_object = ["chair"]
+        self._double_check_goal = [False]
+        self.target_detected_this_step = [False]
         self._policy_floor_id = [0]
         self._cur_floor_index = [0]
         self._climb_stair_over = [True]
@@ -671,6 +689,7 @@ class _ControllerStub:
     def install_map_payload(self, env, payload):
         self.payload = payload
         self._obstacle_map[env] = payload.obstacle_map
+        self._object_map[env] = payload.object_map
 
     def reset_submap_local_navigation_state(
         self, env, *, initialize_new_floor
@@ -722,8 +741,11 @@ def test_policy_action_end_swaps_to_fresh_active_payload() -> None:
     policy._submap_depth_frames = [[]]
     policy._submap_handoff_enabled = False
     policy._submap_exhaustion_recovery_enabled = False
+    policy._submap_target_relay_enabled = False
     policy._submap_handoff = [None]
+    policy._submap_target_relay = [None]
     policy._submap_exhaustion_recovery = [ExhaustionRecovery()]
+    policy._submap_attempted_semantics = [set()]
     policy._submap_diagnostics = None
     policy._submap_episode_sequence = [0]
     policy._submap_event_cursor = [0]
@@ -810,12 +832,18 @@ def _boundary_policy(
     policy._last_goal = [np.array([3.0, 0.0])]
     policy._try_to_navigate_step = [0]
     policy._try_to_navigate = [False]
+    policy._called_stop = [False]
     policy._last_frontier_distance = [2.0]
     policy.min_distance_xy = [np.inf]
     policy.cur_frontier = [np.array([3.0, 0.0])]
     policy._submap_remote_route = [None]
     policy._submap_handoff = [None]
+    policy._submap_target_relay = [None]
     policy._submap_exhaustion_recovery = [ExhaustionRecovery()]
+    policy._submap_attempted_semantics = [set()]
+    policy._submap_target_relay_enabled = False
+    policy.max_episode_steps = 500
+    policy._num_steps = [20]
     policy._pitch_angle = [0]
     policy.llm_planner = SimpleNamespace(
         _last_frontier=[np.array([3.0, 0.0])],
@@ -882,6 +910,193 @@ def test_low_overlap_handoff_rejects_a_stale_current_frontier() -> None:
     assert policy._policy_info[0][
         "submap_boundary_replayed_depth_frames"
     ] == 0
+
+
+@pytest.mark.parametrize(
+    ("live_detection", "double_checked"),
+    [(True, False), (False, True)],
+)
+def test_low_overlap_target_relay_regrounds_strong_intent_only(
+    live_detection: bool, double_checked: bool
+) -> None:
+    config = SubmapLifecycleConfig(
+        enabled=True,
+        min_action_endpoints=1,
+        min_anchor_displacement_m=0.5,
+        overlap_threshold=0.5,
+        low_overlap_consecutive=1,
+    )
+    initial = _runtime_payload()
+    replacement = _runtime_payload()
+    initial.object_map = _ObjectMapStub(
+        "chair", [[3.0, 0.0, 0.5]]
+    )
+    manager = SubmapManager(1, config)
+    old = manager.start(0, [0.0, 0.0, 0.0], 0, initial, 0)
+    policy, controller, pointnav = _boundary_policy(
+        initial, replacement, manager
+    )
+    policy._submap_handoff_enabled = True
+    policy._submap_exhaustion_recovery_enabled = True
+    policy._submap_target_relay_enabled = True
+    policy._observations_cache[0]["policy_mode"] = "navigate"
+    policy._try_to_navigate[0] = True
+    controller.target_detected_this_step[0] = live_detection
+    controller._double_check_goal[0] = double_checked
+
+    policy._finish_submap_action(env=0, action_step=20)
+
+    relay = policy._submap_target_relay[0]
+    assert relay is not None
+    assert relay.target_class == "chair"
+    assert relay.source_submap_id == old.submap_id
+    assert relay.destination_submap_id == manager.active_bundle(0).submap_id
+    assert relay.live_detection_at_split is live_detection
+    assert relay.double_checked_at_split is double_checked
+    assert relay.candidate_key in policy._submap_attempted_semantics[0]
+    assert policy._submap_handoff[0] is None
+    assert pointnav.reset_count == 1
+    np.testing.assert_allclose(policy._last_goal[0], np.zeros(2))
+    assert not replacement.object_map.has_object("chair")
+    assert policy._policy_info[0]["submap_target_relay_active"]
+    assert policy._policy_info[0][
+        "submap_boundary_replayed_depth_frames"
+    ] == 4
+
+
+def test_low_overlap_target_relay_rejects_stale_map_evidence() -> None:
+    config = SubmapLifecycleConfig(
+        enabled=True,
+        min_action_endpoints=1,
+        min_anchor_displacement_m=0.5,
+        overlap_threshold=0.5,
+        low_overlap_consecutive=1,
+    )
+    initial = _runtime_payload()
+    replacement = _runtime_payload()
+    initial.object_map = _ObjectMapStub(
+        "chair", [[3.0, 0.0, 0.5]]
+    )
+    manager = SubmapManager(1, config)
+    manager.start(0, [0.0, 0.0, 0.0], 0, initial, 0)
+    policy, _, pointnav = _boundary_policy(
+        initial, replacement, manager
+    )
+    policy._submap_handoff_enabled = True
+    policy._submap_exhaustion_recovery_enabled = True
+    policy._submap_target_relay_enabled = True
+    policy._observations_cache[0]["policy_mode"] = "navigate"
+    policy._try_to_navigate[0] = True
+
+    policy._finish_submap_action(env=0, action_step=20)
+
+    assert policy._submap_target_relay[0] is None
+    assert policy._submap_attempted_semantics[0] == set()
+    assert pointnav.reset_count == 1
+
+
+def test_target_relay_is_one_shot_for_each_source_semantic() -> None:
+    initial = _runtime_payload()
+    replacement = _runtime_payload()
+    initial.object_map = _ObjectMapStub(
+        "chair", [[3.0, 0.0, 0.5]]
+    )
+    manager = SubmapManager(
+        1, SubmapLifecycleConfig(enabled=True)
+    )
+    manager.start(0, [0.0, 0.0, 0.0], 0, initial, 0)
+    policy, controller, _ = _boundary_policy(
+        initial, replacement, manager
+    )
+    policy._submap_target_relay_enabled = True
+    policy._observations_cache[0]["policy_mode"] = "navigate"
+    policy._try_to_navigate[0] = True
+    controller.target_detected_this_step[0] = True
+    candidate = (
+        f"semantic:{manager.active_bundle(0).submap_id}:chair"
+    )
+    policy._submap_attempted_semantics[0].add(candidate)
+
+    evidence, reason = policy._target_relay_before_split(
+        0, "low_overlap"
+    )
+
+    assert evidence is None
+    assert reason == "semantic_evidence_already_attempted"
+
+
+def test_target_relay_never_supersedes_an_already_issued_native_stop() -> None:
+    initial = _runtime_payload()
+    replacement = _runtime_payload()
+    initial.object_map = _ObjectMapStub(
+        "chair", [[3.0, 0.0, 0.5]]
+    )
+    manager = SubmapManager(
+        1, SubmapLifecycleConfig(enabled=True)
+    )
+    manager.start(0, [0.0, 0.0, 0.0], 0, initial, 0)
+    policy, controller, _ = _boundary_policy(
+        initial, replacement, manager
+    )
+    policy._submap_target_relay_enabled = True
+    policy._observations_cache[0]["policy_mode"] = "navigate"
+    policy._try_to_navigate[0] = True
+    policy._called_stop[0] = True
+    controller.target_detected_this_step[0] = True
+
+    evidence, reason = policy._target_relay_before_split(
+        0, "low_overlap"
+    )
+
+    assert evidence is None
+    assert reason == "native_stop_already_issued"
+
+
+def test_target_relay_scan_is_directional_bounded_and_never_stops() -> None:
+    obstacle = _runtime_payload().obstacle_map
+    robot = np.zeros(2, dtype=np.float64)
+    robot_px = obstacle._xy_to_px(robot.reshape(1, 2))[0]
+    x, y = int(robot_px[0]), int(robot_px[1])
+    obstacle.explored_area[y - 1 : y + 2, x - 1 : x + 2] = True
+    obstacle._strict_navigable_map[
+        y - 1 : y + 2, x - 1 : x + 2
+    ] = True
+    relay = TargetIntentRelay(
+        waypoint_local=robot.copy(),
+        source_target_local_xy=np.array([2.0, 0.0]),
+        source_submap_id="old",
+        destination_submap_id="new",
+        target_class="chair",
+        candidate_key="semantic:old:chair",
+        created_step=20,
+        reference_distance_m=0.0,
+        live_detection_at_split=True,
+        double_checked_at_split=False,
+    )
+    policy = object.__new__(Ascent_Policy)
+    policy._submap_target_relay = [relay]
+    policy._observations_cache = [{"robot_xy": robot}]
+    policy._map_controller = SimpleNamespace(_obstacle_map=[obstacle])
+    policy._pointnav_policy = [_PointNavStub()]
+    policy._last_goal = [np.ones(2)]
+    policy._try_to_navigate = [False]
+    policy._try_to_navigate_step = [0]
+    policy.min_distance_xy = [np.inf]
+    policy._pointnav_stop_radius = 0.9
+    policy.max_episode_steps = 500
+    policy._num_steps = [20]
+    policy._record_submap_policy_event = lambda *args, **kwargs: None
+    masks = torch.ones((1, 1), dtype=torch.bool)
+
+    actions = []
+    for _ in range(4):
+        action = policy._execute_target_relay({}, 0, masks)
+        assert action is not None
+        actions.append(int(action.item()))
+    assert actions == [2, 3, 3, 2]
+    assert all(action != 0 for action in actions)
+    assert policy._execute_target_relay({}, 0, masks) is None
+    assert policy._submap_target_relay[0] is None
 
 
 def test_no_frontier_request_commits_one_clean_recovery_submap() -> None:

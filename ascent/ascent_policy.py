@@ -42,6 +42,7 @@ from ascent.submaps import (
     SubmapDiagnosticsWriter,
     SubmapLifecycleConfig,
     SubmapManager,
+    TargetIntentRelay,
     RemoteRoute,
     ViewOverlapConfig,
     estimate_view_overlap,
@@ -90,6 +91,21 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
 
     _RECOVERY_SCAN_TURNS = 12
     _RECOVERY_MIN_REMAINING_ACTIONS = 13
+    # At a 30-degree action step and 79-degree RGB-D HFOV this fixed sweep
+    # covers the expected target bearing plus/minus roughly 70 degrees, then
+    # restores the original heading.  It is deliberately not a 360 scan.
+    _TARGET_RELAY_SCAN_ACTIONS = (
+        TURN_LEFT,
+        TURN_RIGHT,
+        TURN_RIGHT,
+        TURN_LEFT,
+    )
+    _TARGET_RELAY_MAX_WAYPOINT_ACTIONS = STICKY_FRONTIER_STEP_THRESHOLD
+    _TARGET_RELAY_MIN_REMAINING_ACTIONS = (
+        _TARGET_RELAY_MAX_WAYPOINT_ACTIONS
+        + len(_TARGET_RELAY_SCAN_ACTIONS)
+        + 1
+    )
 
     @classmethod
     def from_config(cls, config: DictConfig, *args_unused: Any, **kwargs_unused: Any) -> "Ascent_Policy":
@@ -282,9 +298,16 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             ),
             "exhaustion_recovery_enabled",
         )
+        self._submap_target_relay_enabled = _as_config_bool(
+            _submap_config_value(
+                config, "target_relay_enabled", False
+            ),
+            "target_relay_enabled",
+        )
         if (
             self._submap_handoff_enabled
             or self._submap_exhaustion_recovery_enabled
+            or self._submap_target_relay_enabled
         ) and not self._submap_enabled:
             raise RuntimeError(
                 "ASCENT submap continuity features require "
@@ -352,6 +375,9 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         self._submap_handoff: List[Optional[BoundaryHandoff]] = [
             None for _ in range(self._num_envs)
         ]
+        self._submap_target_relay: List[
+            Optional[TargetIntentRelay]
+        ] = [None for _ in range(self._num_envs)]
         self._submap_exhaustion_recovery: List[ExhaustionRecovery] = [
             ExhaustionRecovery() for _ in range(self._num_envs)
         ]
@@ -380,7 +406,9 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     "pose_source": "zhao_rgbd_2021",
                     "policy_gt_isolation": True,
                     "method_version": (
-                        "submap_v1.2"
+                        "submap_v1.3"
+                        if self._submap_target_relay_enabled
+                        else "submap_v1.2"
                         if (
                             self._submap_handoff_enabled
                             or self._submap_exhaustion_recovery_enabled
@@ -393,8 +421,12 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     "exhaustion_recovery_enabled": (
                         self._submap_exhaustion_recovery_enabled
                     ),
+                    "target_relay_enabled": (
+                        self._submap_target_relay_enabled
+                    ),
                     "continuity_contract": (
-                        "single_connected_handoff_and_one_shot_360_recovery"
+                        "single_connected_handoff_one_shot_360_recovery_"
+                        "and_one_boundary_live_regrounded_target_relay"
                     ),
                     "config": {
                         key: getattr(self._submap_config, key)
@@ -451,6 +483,7 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             self._submap_boundary_frames[env] = []
             self._submap_depth_frames[env] = []
             self._submap_handoff[env] = None
+            self._submap_target_relay[env] = None
             self._submap_exhaustion_recovery[env] = ExhaustionRecovery()
             self.llm_planner.reset_submap_local_state(env)
             if self._submap_diagnostics is not None:
@@ -745,6 +778,7 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             if (
                 self._submap_handoff_enabled
                 or self._submap_exhaustion_recovery_enabled
+                or self._submap_target_relay_enabled
             ):
                 self._submap_depth_frames[env].append(
                     DepthGeometryFrame(
@@ -918,6 +952,92 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             return None, "frontier_not_current"
         return frontier.copy(), "eligible"
 
+    def _target_relay_before_split(
+        self, env: int, split_reason: Optional[str]
+    ) -> Tuple[Optional[Dict[str, object]], str]:
+        """Capture strong semantic intent without granting metric authority."""
+
+        if not getattr(self, "_submap_target_relay_enabled", False):
+            return None, "feature_disabled"
+        if split_reason != "low_overlap":
+            return None, "not_low_overlap"
+        cache = self._observations_cache[env]
+        if cache.get("policy_mode") != "navigate":
+            return None, "not_navigate_mode"
+        if not bool(self._try_to_navigate[env]):
+            return None, "object_navigation_inactive"
+        if bool(self._called_stop[env]):
+            return None, "native_stop_already_issued"
+        if self._submap_remote_route[env] is not None:
+            return None, "remote_route_active"
+        if self._submap_handoff[env] is not None:
+            return None, "frontier_handoff_active"
+        if self._submap_target_relay[env] is not None:
+            return None, "target_relay_active"
+        if self._submap_exhaustion_recovery[env].active:
+            return None, "exhaustion_recovery_active"
+        if (
+            not bool(self._map_controller._climb_stair_over[env])
+            or int(self._map_controller._climb_stair_flag[env]) != 0
+            or bool(
+                self._map_controller._obstacle_map[
+                    env
+                ]._look_for_downstair_flag
+            )
+            or int(self._pitch_angle[env]) != 0
+        ):
+            return None, "stair_action_active"
+        if self.max_episode_steps is None:
+            return None, "missing_episode_budget"
+        remaining = int(self.max_episode_steps) - int(
+            self._num_steps[env]
+        )
+        if remaining < self._TARGET_RELAY_MIN_REMAINING_ACTIONS:
+            return None, "insufficient_action_budget"
+
+        target = self._map_controller._target_object[env]
+        if not target:
+            return None, "missing_target_class"
+        object_map = self._map_controller._object_map[env]
+        if not object_map.has_object(target):
+            return None, "target_not_in_active_object_map"
+        source_target = np.asarray(
+            self._last_goal[env], dtype=np.float64
+        )
+        if (
+            source_target.shape != (2,)
+            or not np.isfinite(source_target).all()
+        ):
+            return None, "invalid_active_target"
+
+        live_detection = bool(
+            self._map_controller.target_detected_this_step[env]
+        )
+        double_checked = bool(
+            self._map_controller._double_check_goal[env]
+        )
+        if not live_detection and not double_checked:
+            return None, "stale_semantic_evidence_only"
+
+        source_submap_id = self._submap_manager.active_bundle(
+            env
+        ).submap_id
+        candidate_key = f"semantic:{source_submap_id}:{target}"
+        if candidate_key in self._submap_attempted_semantics[env]:
+            return None, "semantic_evidence_already_attempted"
+        return (
+            {
+                "source_target_local_xy": source_target.copy(),
+                "source_submap_id": source_submap_id,
+                "target_class": str(target),
+                "candidate_key": candidate_key,
+                "live_detection_at_split": live_detection,
+                "double_checked_at_split": double_checked,
+                "remaining_actions": remaining,
+            },
+            "eligible",
+        )
+
     def _eligible_frontiers(self, payload: object) -> np.ndarray:
         """Filter frozen frontier evidence through ASCENT's hard disable set."""
 
@@ -945,6 +1065,138 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             stagnation_decisions=int(handoff.stagnation_decisions),
         )
         self._submap_handoff[env] = None
+
+    def _finish_target_relay(self, env: int, outcome: str) -> None:
+        relay = self._submap_target_relay[env]
+        if relay is None:
+            return
+        self._record_submap_policy_event(
+            env,
+            "target_relay_finished",
+            outcome=str(outcome),
+            source_submap_id=relay.source_submap_id,
+            destination_submap_id=relay.destination_submap_id,
+            target_class=relay.target_class,
+            candidate_key=relay.candidate_key,
+            waypoint_action_count=int(relay.waypoint_action_count),
+            scan_actions_issued=int(relay.scan_action_cursor),
+        )
+        self._submap_target_relay[env] = None
+        if outcome != "target_reacquired":
+            self._pointnav_policy[env].reset()
+            self._last_goal[env] = np.zeros(2, dtype=np.float64)
+            self._try_to_navigate[env] = False
+            self._try_to_navigate_step[env] = 0
+            self.min_distance_xy[env] = np.inf
+
+    def _execute_target_relay(
+        self,
+        observations: Union[Dict[str, Tensor], "TensorDict"],
+        env: int,
+        masks: Tensor,
+    ) -> Optional[Tensor]:
+        """Verify one inherited bearing; never issue STOP from old evidence."""
+
+        relay = self._submap_target_relay[env]
+        if relay is None:
+            return None
+        if self.max_episode_steps is not None:
+            remaining = int(self.max_episode_steps) - int(
+                self._num_steps[env]
+            )
+            pending_scan = (
+                len(self._TARGET_RELAY_SCAN_ACTIONS)
+                - int(relay.scan_action_cursor)
+                if relay.scanning
+                else len(self._TARGET_RELAY_SCAN_ACTIONS)
+            )
+            if remaining < pending_scan + 1:
+                self._finish_target_relay(
+                    env, "action_budget_exhausted"
+                )
+                return None
+
+        if relay.scanning:
+            scan_index = relay.issue_scan_action(
+                len(self._TARGET_RELAY_SCAN_ACTIONS)
+            )
+            if scan_index is None:
+                self._finish_target_relay(env, "scan_exhausted")
+                return None
+            action_id = self._TARGET_RELAY_SCAN_ACTIONS[scan_index]
+            self._observations_cache[env][
+                "submap_target_relay_scan_action"
+            ] = True
+            self._record_submap_policy_event(
+                env,
+                "target_relay_scan_action",
+                destination_submap_id=relay.destination_submap_id,
+                target_class=relay.target_class,
+                candidate_key=relay.candidate_key,
+                scan_action_index=int(scan_index + 1),
+                scan_action_total=len(self._TARGET_RELAY_SCAN_ACTIONS),
+                action=int(action_id),
+            )
+            return get_action_tensor(action_id, device=masks.device)
+
+        robot_xy = np.asarray(
+            self._observations_cache[env]["robot_xy"],
+            dtype=np.float64,
+        )
+        obstacle_map = self._map_controller._obstacle_map[env]
+        if not waypoint_in_robot_component(
+            obstacle_map,
+            robot_xy=robot_xy,
+            waypoint_xy=relay.waypoint_local,
+        ):
+            self._finish_target_relay(
+                env, "left_connected_free_space"
+            )
+            return None
+        distance = float(np.linalg.norm(relay.waypoint_local - robot_xy))
+        if distance <= self._pointnav_stop_radius:
+            relay.begin_scan()
+            self._record_submap_policy_event(
+                env,
+                "target_relay_scan_started",
+                destination_submap_id=relay.destination_submap_id,
+                target_class=relay.target_class,
+                candidate_key=relay.candidate_key,
+                final_distance_m=distance,
+                scan_action_total=len(self._TARGET_RELAY_SCAN_ACTIONS),
+            )
+            return self._execute_target_relay(observations, env, masks)
+
+        failure = relay.observe_distance(
+            distance,
+            progress_threshold_m=STICKY_FRONTIER_DISTANCE_THRESHOLD,
+            max_stagnation_decisions=STICKY_FRONTIER_STEP_THRESHOLD,
+            max_waypoint_actions=self._TARGET_RELAY_MAX_WAYPOINT_ACTIONS,
+        )
+        if failure is not None:
+            self._finish_target_relay(env, failure)
+            return None
+        action = self._pointnav(
+            observations,
+            relay.waypoint_local,
+            stop=False,
+            env=env,
+            stop_radius=self._pointnav_stop_radius,
+        )
+        if action.item() == STOP:
+            action.fill_(MOVE_FORWARD)
+        self._record_submap_policy_event(
+            env,
+            "target_relay_action",
+            destination_submap_id=relay.destination_submap_id,
+            target_class=relay.target_class,
+            candidate_key=relay.candidate_key,
+            distance_m=distance,
+            waypoint_action_count=int(relay.waypoint_action_count),
+            stagnation_decisions=int(relay.stagnation_decisions),
+            action=int(action.item()),
+        )
+        return action
 
     def _execute_handoff(
         self,
@@ -1141,12 +1393,25 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             decision.should_split or recovery_requested
         ):
             self._cancel_handoff(env, "second_submap_boundary")
+        if self._submap_target_relay[env] is not None and (
+            decision.should_split or recovery_requested
+        ):
+            self._finish_target_relay(env, "second_submap_boundary")
+
+        target_relay_evidence, target_relay_reason = (
+            self._target_relay_before_split(env, decision.reason)
+            if decision.should_split
+            else (None, "no_split")
+        )
 
         handoff_frontier, handoff_reason = (
             self._handoff_frontier_before_split(env, decision.reason)
             if decision.should_split
             else (None, "no_split")
         )
+        if target_relay_evidence is not None:
+            handoff_frontier = None
+            handoff_reason = "target_relay_priority"
         new_bundle = None
         split_reason = None
         boundary_kind = None
@@ -1232,6 +1497,122 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     replayed_depth_frames=replayed_frames,
                     turns_remaining=state.turns_remaining,
                 )
+            elif target_relay_evidence is not None:
+                replayed_frames = replay_depth_geometry(
+                    self._submap_depth_frames[env],
+                    source_anchor_world=old_bundle.anchor_pose_world,
+                    destination_anchor_world=new_bundle.anchor_pose_world,
+                    obstacle_map=new_bundle.payload.obstacle_map,
+                )
+                source_target = np.asarray(
+                    target_relay_evidence[
+                        "source_target_local_xy"
+                    ],
+                    dtype=np.float64,
+                )
+                transformed_target = transform_points_xy(
+                    source_target,
+                    old_bundle.anchor_pose_world,
+                    new_bundle.anchor_pose_world,
+                )
+                waypoint = select_connected_handoff_waypoint(
+                    new_bundle.payload.obstacle_map,
+                    robot_xy=np.zeros(2, dtype=np.float64),
+                    old_frontier_direction_xy=transformed_target,
+                )
+                self._reset_submap_coordinate_state(
+                    env,
+                    initialize_new_floor=False,
+                    preserve_pointnav=False,
+                )
+                candidate_key = str(
+                    target_relay_evidence["candidate_key"]
+                )
+                self._submap_attempted_semantics[env].add(
+                    candidate_key
+                )
+                if waypoint is not None:
+                    self._submap_target_relay[env] = TargetIntentRelay(
+                        waypoint_local=waypoint,
+                        source_target_local_xy=source_target,
+                        source_submap_id=str(
+                            target_relay_evidence[
+                                "source_submap_id"
+                            ]
+                        ),
+                        destination_submap_id=new_bundle.submap_id,
+                        target_class=str(
+                            target_relay_evidence["target_class"]
+                        ),
+                        candidate_key=candidate_key,
+                        created_step=action_step,
+                        reference_distance_m=float(
+                            np.linalg.norm(waypoint)
+                        ),
+                        live_detection_at_split=bool(
+                            target_relay_evidence[
+                                "live_detection_at_split"
+                            ]
+                        ),
+                        double_checked_at_split=bool(
+                            target_relay_evidence[
+                                "double_checked_at_split"
+                            ]
+                        ),
+                    )
+                    self._record_submap_policy_event(
+                        env,
+                        "target_relay_created",
+                        source_submap_id=str(
+                            target_relay_evidence[
+                                "source_submap_id"
+                            ]
+                        ),
+                        destination_submap_id=new_bundle.submap_id,
+                        target_class=str(
+                            target_relay_evidence["target_class"]
+                        ),
+                        candidate_key=candidate_key,
+                        source_target_local_xy=source_target.tolist(),
+                        rough_direction_local_xy=(
+                            transformed_target.tolist()
+                        ),
+                        waypoint_local=waypoint.tolist(),
+                        live_detection_at_split=bool(
+                            target_relay_evidence[
+                                "live_detection_at_split"
+                            ]
+                        ),
+                        double_checked_at_split=bool(
+                            target_relay_evidence[
+                                "double_checked_at_split"
+                            ]
+                        ),
+                        remaining_actions_at_split=int(
+                            target_relay_evidence[
+                                "remaining_actions"
+                            ]
+                        ),
+                        replayed_depth_frames=replayed_frames,
+                        old_coordinate_stop_authority=False,
+                    )
+                else:
+                    self._record_submap_policy_event(
+                        env,
+                        "target_relay_skipped",
+                        reason="no_connected_waypoint",
+                        source_submap_id=str(
+                            target_relay_evidence[
+                                "source_submap_id"
+                            ]
+                        ),
+                        destination_submap_id=new_bundle.submap_id,
+                        target_class=str(
+                            target_relay_evidence["target_class"]
+                        ),
+                        candidate_key=candidate_key,
+                        replayed_depth_frames=replayed_frames,
+                    )
             elif handoff_frontier is not None:
                 replayed_frames = replay_depth_geometry(
                     self._submap_depth_frames[env],
@@ -1296,6 +1677,18 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                         reason=handoff_reason,
                         replayed_depth_frames=0,
                     )
+                if (
+                    getattr(
+                        self, "_submap_target_relay_enabled", False
+                    )
+                    and decision.reason == "low_overlap"
+                ):
+                    self._record_submap_policy_event(
+                        env,
+                        "target_relay_skipped",
+                        reason=target_relay_reason,
+                        replayed_depth_frames=0,
+                    )
             self._submap_boundary_frames[env] = []
             self._submap_depth_frames[env] = []
 
@@ -1312,6 +1705,9 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 "submap_boundary_replayed_depth_frames": replayed_frames,
                 "submap_handoff_active": (
                     self._submap_handoff[env] is not None
+                ),
+                "submap_target_relay_active": (
+                    self._submap_target_relay[env] is not None
                 ),
                 "submap_exhaustion_recovery_active": (
                     self._submap_exhaustion_recovery[env].active
@@ -1689,6 +2085,7 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             mode = "unknown" # 明确初始化 mode 变量
             recovery_scan_active = False
             recovery_target_reacquired = False
+            target_relay_reacquired = False
             recovery_state = self._submap_exhaustion_recovery[env]
             if recovery_state.active:
                 if goal is not None:
@@ -1709,6 +2106,25 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                         submap_id=recovery_state.submap_id,
                     )
 
+            target_relay = self._submap_target_relay[env]
+            if target_relay is not None:
+                if goal is not None:
+                    self._finish_target_relay(
+                        env, "target_reacquired"
+                    )
+                    target_relay_reacquired = True
+                elif (
+                    not self._map_controller._climb_stair_over[env]
+                    or self._map_controller._climb_stair_flag[env] != 0
+                    or self._map_controller._obstacle_map[
+                        env
+                    ]._look_for_downstair_flag
+                    or self._pitch_angle[env] != 0
+                ):
+                    self._finish_target_relay(
+                        env, "stair_logic_priority"
+                    )
+
             if self._submap_handoff[env] is not None:
                 if goal is not None:
                     self._cancel_handoff(env, "target_detected")
@@ -1723,7 +2139,17 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     self._cancel_handoff(env, "stair_logic_priority")
 
             # 楼梯状态判断与动作逻辑
-            if recovery_target_reacquired:
+            if target_relay_reacquired:
+                mode = "navigate_after_target_relay"
+                self._try_to_navigate[env] = True
+                pointnav_action = self._navigate(
+                    observations,
+                    goal[:2],
+                    stop=True,
+                    env=env,
+                    ori_masks=masks,
+                )
+            elif recovery_target_reacquired:
                 mode = "navigate_after_exhaustion_recovery"
                 self._try_to_navigate[env] = True
                 pointnav_action = self._navigate(
@@ -1865,6 +2291,16 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     if self._map_controller._obstacle_map[env]._look_for_downstair_flag:
                         mode = "look_for_downstair"
                         pointnav_action = self._look_for_downstair(observations, env, masks)
+                    elif self._submap_target_relay[env] is not None:
+                        mode = "submap_target_relay"
+                        pointnav_action = self._execute_target_relay(
+                            observations, env, masks
+                        )
+                        if pointnav_action is None:
+                            mode = "explore_after_target_relay"
+                            pointnav_action = self._explore(
+                                observations, env, masks
+                            )
                     elif self._submap_handoff[env] is not None:
                         mode = "submap_handoff"
                         pointnav_action = self._execute_handoff(
@@ -1931,6 +2367,8 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     action in [2, 3] for action in self.history_action[env]
                 ) and not self._observations_cache[env].get(
                     "submap_recovery_scan_action", False
+                ) and not self._observations_cache[env].get(
+                    "submap_target_relay_scan_action", False
                 ):
                     action_numpy = 1 # Force forward
                     pointnav_action = torch.tensor([[action_numpy]], dtype=torch.int64, device=masks.device)
