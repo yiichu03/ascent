@@ -27,6 +27,10 @@ RESOURCE_COMMIT=${ASCENT_SUBMAP_V12_OFFVAL_RESOURCE_COMMIT:?required}
 CONTROLLER_SHA256=${ASCENT_SUBMAP_V12_OFFVAL_CONTROLLER_SHA256:?required}
 WORKER_SHA256=${ASCENT_SUBMAP_V12_OFFVAL_WORKER_SHA256:?required}
 STAMP=${ASCENT_SUBMAP_V12_OFFVAL_STAMP:?required}
+SMOKE_ONLY=${ASCENT_GT_SUBMAP_V12_SMOKE_ONLY:-0}
+[ "$SMOKE_ONLY" = 0 ] || [ "$SMOKE_ONLY" = 1 ] || {
+  echo invalid_smoke_only; exit 20;
+}
 
 SCRATCH_ROOT=/scratch/e1538633/liuyi
 ASCENT_ENV=$SCRATCH_ROOT/micromamba/envs/ascent_nav
@@ -294,6 +298,7 @@ BASE_PORT_ROOT=$(
   echo lane_count=$LANE_COUNT
   echo resource_contract=one_H200_up_to_three_independent_service_lanes
   echo placement_contract=five_episode_method_gate_before_official_val_shard
+  echo smoke_only=$SMOKE_ONLY
   echo pose_source=habitat_ground_truth
   echo policy_gt_isolation=0
   echo auxiliary_vo_sensors=0
@@ -368,6 +373,17 @@ printf 'lane_id,inventory\n0,%s\n' \
 [ "$("$ASCENT_PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["technical_status"])' "$RUN_ROOT/placement_gate/final_gate/summary.json")" = PASS ] || {
   echo placement_gate_failed; exit 46;
 }
+if [ "$SMOKE_ONLY" = 1 ]; then
+  check_hash "${BASH_SOURCE[0]}" "$CONTROLLER_SHA256" controller_at_close
+  check_hash "$WORKER" "$WORKER_SHA256" worker_at_close
+  check_hash "$CONFIG" "$CONFIG_SHA256" config_at_close
+  [ "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" = "$SOURCE_COMMIT" ] || exit 47
+  [ -z "$(git -C "$SOURCE_ROOT" status --porcelain --untracked-files=all)" ] || exit 47
+  printf 'controller_exit_status=0 stage=smoke_only_complete job_key=%s dataset=%s smoke_valid=5 technical_status=PASS time=%s\n' \
+    "$JOB_KEY" "$DATASET" "$(date -Is)" > "$RUN_ROOT/terminal_status.txt"
+  trap - EXIT
+  exit 0
+fi
 
 mapfile -t LANE_ROWS < <(
   "$ASCENT_PYTHON" - "$MANIFEST" "$LANE_COUNT" <<'PY'

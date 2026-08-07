@@ -8,6 +8,10 @@ CONFIG=${1:?usage: $USAGE}
 QUEUE=${2:?usage: $USAGE}
 STAMP=${3:?usage: $USAGE}
 NO_QSUB=${ASCENT_SUBMAP_V12_OFFVAL_NO_QSUB:-0}
+SMOKE_ONLY=${ASCENT_GT_SUBMAP_V12_SMOKE_ONLY:-0}
+[ "$SMOKE_ONLY" = 0 ] || [ "$SMOKE_ONLY" = 1 ] || {
+  echo invalid_smoke_only; exit 20;
+}
 
 PROJECT=/scratch/e1538633/liuyi/drift-aware-submap-exploration
 SOURCE_ROOT=$PROJECT/external/ascent_gt_submap_v1_2
@@ -187,7 +191,7 @@ PY
 DRY_RUN_JSON=$(
   "$ASCENT_PYTHON" - "$CONFIG" "$CONFIG_SHA256" "$QUEUE" "$STAMP" \
     "$SOURCE_COMMIT" "$RESOURCE_COMMIT" \
-    "$CONTROLLER_SHA256" "$WORKER_SHA256" <<'PY'
+    "$CONTROLLER_SHA256" "$WORKER_SHA256" "$SMOKE_ONLY" <<'PY'
 import json, sys
 config = json.load(open(sys.argv[1], encoding="utf-8"))
 print(json.dumps({
@@ -222,6 +226,7 @@ print(json.dumps({
     "fixed_technical_retry_per_failed_unit": 1,
     "metric_driven_retry": False,
     "five_episode_gate_before_shard": True,
+    "smoke_only": bool(int(sys.argv[9])),
     "qsub_executed": False,
 }, indent=2, sort_keys=True))
 PY
@@ -248,7 +253,8 @@ ASCENT_SUBMAP_V12_OFFVAL_SOURCE_COMMIT=$SOURCE_COMMIT,\
 ASCENT_SUBMAP_V12_OFFVAL_RESOURCE_COMMIT=$RESOURCE_COMMIT,\
 ASCENT_SUBMAP_V12_OFFVAL_CONTROLLER_SHA256=$CONTROLLER_SHA256,\
 ASCENT_SUBMAP_V12_OFFVAL_WORKER_SHA256=$WORKER_SHA256,\
-ASCENT_SUBMAP_V12_OFFVAL_STAMP=$STAMP")
+ASCENT_SUBMAP_V12_OFFVAL_STAMP=$STAMP,\
+ASCENT_GT_SUBMAP_V12_SMOKE_ONLY=$SMOKE_ONLY")
 
 JOB_ID=$(
   qsub -q "$QUEUE" -N "$JOB_NAME" -l walltime=96:00:00 \

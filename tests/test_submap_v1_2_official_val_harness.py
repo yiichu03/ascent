@@ -49,6 +49,7 @@ def test_controller_enforces_scientific_and_technical_boundaries() -> None:
         'config["evaluation_gt_only"] is True',
         'config["metric_driven_retry"] is False',
         "placement_gate_failed",
+        "ASCENT_GT_SUBMAP_V12_SMOKE_ONLY",
         "historical_b1_matched_episodes",
         "source_worktree_not_clean",
     ):
@@ -64,6 +65,7 @@ def test_submitter_is_fail_closed_and_supports_no_qsub() -> None:
         "canonical_official_val_prefix_no_metric_filter",
         "metrics_used_for_selection",
         '"pose_source": "habitat_ground_truth"',
+        '"smoke_only"',
         "qsub_executed",
     ):
         assert contract in text
