@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Strict B2-only submap-v1.2 gate against frozen pose-factorial arm A."""
+"""Strict submap-v1.2 gate with an explicit policy-pose contract."""
 
 from __future__ import annotations
 
@@ -85,6 +85,14 @@ def main() -> int:
     parser.add_argument("--forward-checkpoint-sha256", required=True)
     parser.add_argument("--turn-checkpoint-sha256", required=True)
     parser.add_argument(
+        "--policy-pose-source",
+        choices=("zhao_rgbd_2021", "habitat_ground_truth"),
+        default="zhao_rgbd_2021",
+    )
+    parser.add_argument(
+        "--gt-policy-isolation", choices=("0", "1"), default="1"
+    )
+    parser.add_argument(
         "--baseline-episodes-csv",
         type=Path,
         action="append",
@@ -92,6 +100,12 @@ def main() -> int:
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
+    gt_policy_isolation = args.gt_policy_isolation == "1"
+    submap_condition = (
+        "GT_SUBMAP"
+        if args.policy_pose_source == "habitat_ground_truth"
+        else "B2"
+    )
 
     chunks, logical_order, strict_errors = load_manifest(
         args.manifest, args.expected_episodes, args.expected_dataset
@@ -108,7 +122,7 @@ def main() -> int:
                 continue
             condition = row.get("condition")
             chunk_id = row.get("chunk_id", "")
-            if condition != "B2" or chunk_id not in chunks:
+            if condition != submap_condition or chunk_id not in chunks:
                 strict_errors.append(
                     f"unexpected_inventory:{condition}:{chunk_id}"
                 )
@@ -121,6 +135,9 @@ def main() -> int:
                 forward_sha256=args.forward_checkpoint_sha256,
                 turn_sha256=args.turn_checkpoint_sha256,
                 calibration=None,
+                policy_pose_source=args.policy_pose_source,
+                gt_policy_isolation=gt_policy_isolation,
+                submap_condition=submap_condition,
             )
             strict_errors.extend(errors)
             for logical_id, episode in accepted.items():
@@ -289,7 +306,9 @@ def main() -> int:
     sr_delta = (
         None if b1_sr is None or b2_sr is None else b2_sr - b1_sr
     )
-    if args.mode != "full" or sr_delta is None:
+    if args.policy_pose_source == "habitat_ground_truth":
+        performance_verdict = "CONTROL_ONLY_GT_SUBMAP_VS_VO_REFERENCE"
+    elif args.mode != "full" or sr_delta is None:
         performance_verdict = "ENGINEERING_ONLY"
     elif sr_delta >= 0.02:
         performance_verdict = "SCREEN_POSITIVE"
@@ -300,7 +319,13 @@ def main() -> int:
 
     selected_episodes = list(selected.values())
     summary = {
-        "schema": "ascent_vo_submap_v1_2_b2_screen_v1",
+        "schema": (
+            "ascent_gt_submap_v1_2_screen_v1"
+            if args.policy_pose_source == "habitat_ground_truth"
+            else "ascent_vo_submap_v1_2_b2_screen_v1"
+        ),
+        "policy_pose_source": args.policy_pose_source,
+        "gt_policy_isolation": gt_policy_isolation,
         "dataset": args.expected_dataset,
         "mode": args.mode,
         "technical_status": technical_status,

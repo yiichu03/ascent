@@ -3,6 +3,8 @@ defaults:
   - /benchmark/nav/objectnav: objectnav_mp3d
   - /habitat/task/lab_sensors:
       - base_explorer
+      - compass_sensor
+      - gps_sensor
       - heading_sensor
       - frontier_sensor
   - /habitat/task/measurements:
@@ -13,9 +15,9 @@ defaults:
 
 ascent_vo:
   enabled: true
-  provider: "zhao_rgbd_2021"
+  provider: "habitat_ground_truth"
   checkpoint_dir: ${oc.env:ASCENT_VO_CHECKPOINT_DIR,../PointNav-VO/pretrained_ckpts/vo}
-  diagnostics_path: ${oc.env:ASCENT_VO_DIAGNOSTICS_PATH,debug/ascent_vo_mp3d_diagnostics.jsonl}
+  diagnostics_path: ${oc.env:ASCENT_VO_DIAGNOSTICS_PATH,debug/ascent_gt_submap_mp3d_pose_diagnostics.jsonl}
 
 ascent_submaps:
   enabled: ${oc.env:ASCENT_SUBMAP_ENABLED,false}

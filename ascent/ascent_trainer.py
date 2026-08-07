@@ -39,8 +39,13 @@ from habitat_baselines.rl.ppo.evaluator import pause_envs ## For Habitat 3.0
 from gym import spaces
 import time
 from ascent.vo.diagnostics import VODiagnosticsWriter
-from ascent.vo.habitat_extensions import configure_gt_isolated_vo
-from ascent.vo.pose_provider import VOInferenceError, ZhaoRGBDPoseProvider
+from ascent.vo.habitat_extensions import configure_policy_pose_source
+from ascent.vo.pose_provider import (
+    GTPoseProviderError,
+    HabitatGTPoseProvider,
+    VOInferenceError,
+    ZhaoRGBDPoseProvider,
+)
 from ascent.vo.zhao_model import (
     DEPTH_INVALID_POLICY,
     FORWARD_CHECKPOINT_SHA256,
@@ -99,7 +104,7 @@ class AscentTrainer(PPOTrainer):
 
         with read_write(config):
             config.habitat.dataset.split = config.habitat_baselines.eval.split
-        configure_gt_isolated_vo(config)
+        configure_policy_pose_source(config)
         if config.habitat_baselines.num_environments != 1:
             raise RuntimeError(
                 "ASCENT-VO requires one Habitat environment per 3-shared lane"
@@ -135,52 +140,72 @@ class AscentTrainer(PPOTrainer):
 
         if self._agent.actor_critic.should_load_agent_state:
             self._agent.load_state_dict(ckpt_dict)
-        if config.ascent_vo.provider != "zhao_rgbd_2021":
-            raise RuntimeError(
-                f"Unsupported pose provider {config.ascent_vo.provider}"
+        pose_provider = str(config.ascent_vo.provider)
+        diagnostics_metadata = {
+            "provider": pose_provider,
+            "run_id": os.environ.get(
+                "ASCENT_VO_RUN_ID", "unrecorded"
+            ),
+            "ascent_source_commit": os.environ.get(
+                "ASCENT_VO_SOURCE_COMMIT", "unrecorded"
+            ),
+            "dataset": (
+                "hm3d"
+                if "hm3d" in config.habitat.dataset.data_path
+                else "mp3d"
+            ),
+            "seed": int(config.habitat.seed),
+            "evaluation_pose_source": "habitat_ground_truth",
+            "policy_pose_source": pose_provider,
+            "gt_policy_isolation": pose_provider != "habitat_ground_truth",
+        }
+        if pose_provider == "zhao_rgbd_2021":
+            vo_depth_config = get_agent_config(
+                config.habitat.simulator
+            ).sim_sensors.vo_depth_sensor
+            self._vo_pose_provider = ZhaoRGBDPoseProvider(
+                num_envs=self.envs.num_envs,
+                device=self.device,
+                checkpoint_dir=Path(config.ascent_vo.checkpoint_dir),
+                source_min_depth=float(vo_depth_config.min_depth),
+                source_max_depth=float(vo_depth_config.max_depth),
+                source_hfov_degrees=float(vo_depth_config.hfov),
             )
-        vo_depth_config = get_agent_config(
-            config.habitat.simulator
-        ).sim_sensors.vo_depth_sensor
-        self._vo_pose_provider = ZhaoRGBDPoseProvider(
-            num_envs=self.envs.num_envs,
-            device=self.device,
-            checkpoint_dir=Path(config.ascent_vo.checkpoint_dir),
-            source_min_depth=float(vo_depth_config.min_depth),
-            source_max_depth=float(vo_depth_config.max_depth),
-            source_hfov_degrees=float(vo_depth_config.hfov),
-        )
+            diagnostics_metadata.update(
+                {
+                    "checkpoint_dir": str(
+                        Path(config.ascent_vo.checkpoint_dir).resolve()
+                    ),
+                    "pointnav_vo_source_commit": POINTNAV_VO_SOURCE_COMMIT,
+                    "forward_checkpoint_sha256": FORWARD_CHECKPOINT_SHA256,
+                    "turn_checkpoint_sha256": TURN_CHECKPOINT_SHA256,
+                    "source_hfov_degrees": float(vo_depth_config.hfov),
+                    "checkpoint_hfov_degrees": 70.0,
+                    "action_contract": "native_0.25m_or_30deg_single_pair",
+                    "pose_initialization": "episode_local_zero_se2",
+                    "depth_invalid_policy": DEPTH_INVALID_POLICY,
+                    "checkpoint_invalid_depth_value": 0.0,
+                    "depth_validity_schema": "depth_validity_v1",
+                }
+            )
+        elif pose_provider == "habitat_ground_truth":
+            self._vo_pose_provider = HabitatGTPoseProvider(
+                num_envs=self.envs.num_envs
+            )
+            diagnostics_metadata.update(
+                {
+                    "pose_contract": (
+                        "original_ascent_gps_x_neg_y_compass_with_heading"
+                    ),
+                    "auxiliary_vo_sensors": False,
+                    "zhao_checkpoint_loaded": False,
+                }
+            )
+        else:
+            raise RuntimeError(f"Unsupported pose provider {pose_provider}")
         self._vo_diagnostics = VODiagnosticsWriter(
             Path(config.ascent_vo.diagnostics_path),
-            metadata={
-                "provider": "zhao_rgbd_2021",
-                "run_id": os.environ.get(
-                    "ASCENT_VO_RUN_ID", "unrecorded"
-                ),
-                "ascent_source_commit": os.environ.get(
-                    "ASCENT_VO_SOURCE_COMMIT", "unrecorded"
-                ),
-                "dataset": (
-                    "hm3d"
-                    if "hm3d" in config.habitat.dataset.data_path
-                    else "mp3d"
-                ),
-                "seed": int(config.habitat.seed),
-                "checkpoint_dir": str(
-                    Path(config.ascent_vo.checkpoint_dir).resolve()
-                ),
-                "pointnav_vo_source_commit": POINTNAV_VO_SOURCE_COMMIT,
-                "forward_checkpoint_sha256": FORWARD_CHECKPOINT_SHA256,
-                "turn_checkpoint_sha256": TURN_CHECKPOINT_SHA256,
-                "source_hfov_degrees": float(vo_depth_config.hfov),
-                "checkpoint_hfov_degrees": 70.0,
-                "action_contract": "native_0.25m_or_30deg_single_pair",
-                "pose_initialization": "episode_local_zero_se2",
-                "gt_policy_isolation": True,
-                "depth_invalid_policy": DEPTH_INVALID_POLICY,
-                "checkpoint_invalid_depth_value": 0.0,
-                "depth_validity_schema": "depth_validity_v1",
-            },
+            metadata=diagnostics_metadata,
         )
         # 环境 reset：取得第一帧 observation 这是 episode 真正开始的位置。 1. Habitat 原始 observation
         observations = self.envs.reset()
@@ -347,7 +372,7 @@ class AscentTrainer(PPOTrainer):
                 pose_updates = self._vo_pose_provider.update_batch(
                     observations, executed_action_ids, dones
                 )
-            except VOInferenceError as exc:
+            except (VOInferenceError, GTPoseProviderError) as exc:
                 for i, action_id in enumerate(executed_action_ids):
                     self._vo_diagnostics.record_error(
                         dataset=vo_dataset,

@@ -39,6 +39,15 @@ POLICY_VISIBLE_RAW_OBSERVATION_KEYS = (
     VO_DEPTH_KEY,
 )
 
+GT_TRAINER_VISIBLE_RAW_OBSERVATION_KEYS = (
+    "rgb",
+    "depth",
+    "objectgoal",
+    "gps",
+    "compass",
+    "heading",
+)
+
 
 @registry.register_sensor
 class VOHabitatSimRGBSensor(HabitatSimRGBSensor):
@@ -199,3 +208,61 @@ def configure_gt_isolated_vo(config) -> None:
             "missing internal ASCENT compatibility sensors: "
             f"{sorted(missing_internal)}"
         )
+
+
+def configure_habitat_gt_policy_pose(config) -> None:
+    """Expose original ASCENT GT pose only to the trainer-side boundary."""
+
+    if not bool(config.ascent_vo.enabled):
+        raise RuntimeError("ASCENT pose-provider config is not enabled")
+    if str(config.ascent_vo.provider) != "habitat_ground_truth":
+        raise RuntimeError(
+            "GT policy-pose configuration requires habitat_ground_truth"
+        )
+
+    agent_config = get_agent_config(config.habitat.simulator)
+    with read_write(config):
+        with open_dict(config.habitat.task.measurements):
+            config.habitat.task.measurements.gt_start_aligned_pose = (
+                GTStartAlignedPoseMeasurementConfig()
+            )
+        # GPS/compass/heading terminate in HabitatGTPoseProvider.  They are
+        # deliberately absent from the batched policy observation.
+        config.habitat.gym.obs_keys = list(
+            GT_TRAINER_VISIBLE_RAW_OBSERVATION_KEYS
+        )
+
+    auxiliary = {
+        name
+        for name in agent_config.sim_sensors
+        if name in ("vo_rgb_sensor", "vo_depth_sensor")
+    }
+    if auxiliary:
+        raise RuntimeError(
+            f"GT arm unexpectedly contains auxiliary VO sensors: {sorted(auxiliary)}"
+        )
+    required = {
+        "gps_sensor",
+        "compass_sensor",
+        "heading_sensor",
+        "base_explorer",
+        "frontier_sensor",
+    }
+    missing = required.difference(config.habitat.task.lab_sensors)
+    if missing:
+        raise RuntimeError(
+            "missing original ASCENT GT/internal sensors: "
+            f"{sorted(missing)}"
+        )
+
+
+def configure_policy_pose_source(config) -> None:
+    """Configure exactly one trainer-side pose source before env creation."""
+
+    provider = str(config.ascent_vo.provider)
+    if provider == "zhao_rgbd_2021":
+        configure_gt_isolated_vo(config)
+    elif provider == "habitat_ground_truth":
+        configure_habitat_gt_policy_pose(config)
+    else:
+        raise RuntimeError(f"Unsupported pose provider {provider}")

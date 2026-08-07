@@ -27,6 +27,9 @@ LOOK_DOWN = 5
 
 VO_RGB_KEY = "vo_rgb"
 VO_DEPTH_KEY = "vo_depth"
+POLICY_POSE_KEY = "estimated_pose"
+POLICY_START_YAW_KEY = "policy_start_yaw"
+RAW_GT_POSE_KEYS = frozenset({"gps", "compass", "heading"})
 FORBIDDEN_POLICY_OBSERVATION_KEYS = frozenset(
     {
         "gps",
@@ -43,6 +46,10 @@ FORBIDDEN_POLICY_OBSERVATION_KEYS = frozenset(
 
 class VOInferenceError(RuntimeError):
     """A fail-closed VO input, model, or composition failure."""
+
+
+class GTPoseProviderError(RuntimeError):
+    """A fail-closed malformed Habitat ground-truth pose observation."""
 
 
 def wrap_angle(angle: float) -> float:
@@ -195,9 +202,10 @@ class ZhaoRGBDPoseProvider:
                 raise VOInferenceError(
                     f"policy observation still contains forbidden keys: {sorted(forbidden)}"
                 )
-            observation["estimated_pose"] = self._poses[env].astype(
+            observation[POLICY_POSE_KEY] = self._poses[env].astype(
                 np.float32
             )
+            observation[POLICY_START_YAW_KEY] = np.float32(0.0)
 
     def _reset_env(
         self, observation: Dict[str, Any], env: int
@@ -319,6 +327,170 @@ class ZhaoRGBDPoseProvider:
                 f"missing auxiliary VO sensor {exc.args[0]}"
             ) from exc
         return rgb, depth
+
+
+def original_ascent_gt_pose(gps: Any, compass: Any) -> np.ndarray:
+    """Reproduce ASCENT@20f0025's GPS/compass conversion exactly."""
+
+    gps_array = np.asarray(gps, dtype=np.float64)
+    compass_array = np.asarray(compass, dtype=np.float64)
+    if gps_array.shape != (2,):
+        raise GTPoseProviderError(
+            f"Habitat GPS must have shape (2,), got {gps_array.shape}"
+        )
+    if compass_array.size != 1:
+        raise GTPoseProviderError(
+            "Habitat compass must contain exactly one value, got "
+            f"shape {compass_array.shape}"
+        )
+    if not np.isfinite(gps_array).all() or not np.isfinite(
+        compass_array
+    ).all():
+        raise GTPoseProviderError("raw Habitat GT pose is non-finite")
+    return np.array(
+        [gps_array[0], -gps_array[1], compass_array.reshape(-1)[0]],
+        dtype=np.float64,
+    )
+
+
+class HabitatGTPoseProvider:
+    """Trainer-side boundary for the exact pose used by original ASCENT.
+
+    Raw Habitat GPS/compass/heading values are consumed here and never reach
+    the policy.  The policy receives the same single pose interface as the VO
+    arm, making pose source the only intervention while leaving submap-v1.2
+    behavior untouched.
+    """
+
+    def __init__(self, *, num_envs: int) -> None:
+        if num_envs <= 0:
+            raise ValueError("num_envs must be positive")
+        self.num_envs = int(num_envs)
+        self._poses = [
+            np.zeros(3, dtype=np.float64) for _ in range(self.num_envs)
+        ]
+        self._start_yaws = [0.0 for _ in range(self.num_envs)]
+
+    @property
+    def poses(self) -> List[np.ndarray]:
+        return [pose.copy() for pose in self._poses]
+
+    @property
+    def start_yaws(self) -> List[float]:
+        return list(self._start_yaws)
+
+    def reset_batch(
+        self, observations: List[Dict[str, Any]]
+    ) -> List[PoseUpdate]:
+        self._validate_batch(observations)
+        updates = []
+        for env, observation in enumerate(observations):
+            pose, start_yaw = self._consume_gt_pose(observation, env)
+            self._poses[env] = pose
+            self._start_yaws[env] = start_yaw
+            updates.append(
+                PoseUpdate(
+                    env=env,
+                    action=STOP,
+                    status="habitat_gt_episode_reset",
+                    pose_before=tuple(map(float, pose)),
+                    pose_after=tuple(map(float, pose)),
+                    local_deltas=(),
+                    vo_inferences=0,
+                    next_episode_reset=True,
+                    current_frame_role="episode_reset",
+                )
+            )
+        return updates
+
+    def update_batch(
+        self,
+        observations: List[Dict[str, Any]],
+        actions: Sequence[int],
+        dones: Sequence[bool],
+    ) -> List[PoseUpdate]:
+        self._validate_batch(observations)
+        if len(actions) != self.num_envs or len(dones) != self.num_envs:
+            raise GTPoseProviderError(
+                "GT pose batch lengths do not match num_envs"
+            )
+        updates = []
+        for env, observation in enumerate(observations):
+            pose_before = self._poses[env].copy()
+            next_pose, start_yaw = self._consume_gt_pose(observation, env)
+            self._poses[env] = next_pose
+            self._start_yaws[env] = start_yaw
+            done = bool(dones[env])
+            # Habitat VectorEnv returns the next episode's reset observation
+            # when done=True.  Keep the prior pose in the terminal audit; the
+            # newly stored pose is only exposed to the next policy decision.
+            audited_after = pose_before if done else next_pose
+            updates.append(
+                PoseUpdate(
+                    env=env,
+                    action=int(actions[env]),
+                    status=(
+                        "terminal_no_policy_successor_then_autoreset"
+                        if done
+                        else "habitat_gt_update"
+                    ),
+                    pose_before=tuple(map(float, pose_before)),
+                    pose_after=tuple(map(float, audited_after)),
+                    local_deltas=(),
+                    vo_inferences=0,
+                    next_episode_reset=done,
+                    current_frame_role=(
+                        "next_episode_reset" if done else "action_successor"
+                    ),
+                )
+            )
+        return updates
+
+    def inject_estimated_pose(
+        self, observations: List[Dict[str, Any]]
+    ) -> None:
+        self._validate_batch(observations)
+        for env, observation in enumerate(observations):
+            forbidden = FORBIDDEN_POLICY_OBSERVATION_KEYS.intersection(
+                observation
+            )
+            if forbidden:
+                raise GTPoseProviderError(
+                    "raw pose fields survived the trainer boundary: "
+                    f"{sorted(forbidden)}"
+                )
+            observation[POLICY_POSE_KEY] = self._poses[env].astype(
+                np.float32
+            )
+            observation[POLICY_START_YAW_KEY] = np.float32(
+                self._start_yaws[env]
+            )
+
+    def _validate_batch(self, observations: List[Dict[str, Any]]) -> None:
+        if len(observations) != self.num_envs:
+            raise GTPoseProviderError(
+                f"expected {self.num_envs} observations, got "
+                f"{len(observations)}"
+            )
+
+    @staticmethod
+    def _consume_gt_pose(
+        observation: Dict[str, Any], env: int
+    ) -> tuple[np.ndarray, float]:
+        missing = RAW_GT_POSE_KEYS.difference(observation)
+        if missing:
+            raise GTPoseProviderError(
+                f"environment {env} is missing raw GT keys {sorted(missing)}"
+            )
+        pose = original_ascent_gt_pose(
+            observation.pop("gps"), observation.pop("compass")
+        )
+        heading = np.asarray(observation.pop("heading"), dtype=np.float64)
+        if heading.size != 1 or not np.isfinite(heading).all():
+            raise GTPoseProviderError(
+                f"environment {env} has invalid heading {heading.shape}"
+            )
+        return pose, float(heading.reshape(-1)[0])
 
 
 def _frame_depth_validity(

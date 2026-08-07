@@ -129,6 +129,7 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         # 添加你需要的额外参数
         kwargs["full_config"] = config
         kwargs["num_envs"] = config.habitat_baselines.num_environments
+        kwargs["policy_pose_source"] = str(config.ascent_vo.provider)
         
         return cls(**kwargs)
     def __init__(
@@ -147,6 +148,7 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
 
         self._action_space = kwargs["action_space"]
         self._policy_info = {}
+        self._policy_pose_source = str(kwargs["policy_pose_source"])
         self._pointnav_stop_radius = kwargs["pointnav_stop_radius"]
         self._visualize = kwargs["visualize"]
 
@@ -377,8 +379,10 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     "ascent_source_commit": os.environ.get(
                         "ASCENT_SUBMAP_SOURCE_COMMIT", "unrecorded"
                     ),
-                    "pose_source": "zhao_rgbd_2021",
-                    "policy_gt_isolation": True,
+                    "pose_source": self._policy_pose_source,
+                    "policy_gt_isolation": (
+                        self._policy_pose_source != "habitat_ground_truth"
+                    ),
                     "method_version": (
                         "submap_v1.2"
                         if (
@@ -387,7 +391,12 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                         )
                         else "submap_v1.1"
                     ),
-                    "split_contract": "vo_anchor_and_rgbd_overlap_joint",
+                    "split_contract": (
+                        "pose_anchor_and_rgbd_overlap_joint"
+                        if self._policy_pose_source
+                        == "habitat_ground_truth"
+                        else "vo_anchor_and_rgbd_overlap_joint"
+                    ),
                     "fallback_contract": "ascent_local_first_persistent_route",
                     "handoff_enabled": self._submap_handoff_enabled,
                     "exhaustion_recovery_enabled": (
@@ -535,10 +544,10 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             "fx": self._fx,
             "fy": self._fy,
             "camera_fov": self._camera_fov,
-            # The estimated episodic frame is initialized at yaw zero and
-            # never aligned to Habitat's world/start heading.
-            "habitat_start_yaw": 0.0,
-            "pose_source": "zhao_rgbd_2021",
+            "habitat_start_yaw": float(
+                observations["policy_start_yaw"][env].cpu().item()
+            ),
+            "pose_source": self._policy_pose_source,
             "world_pose_vo": world_pose_vo.copy(),
             "submap_id": submap_id,
             "policy_floor_id": self._map_controller._policy_floor_id[env],

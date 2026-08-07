@@ -16,6 +16,15 @@ class VODiagnosticsWriter:
         path = path.resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
+        self.policy_pose_source = str(
+            metadata.get("policy_pose_source", metadata.get("provider", "unknown"))
+        )
+        self.gt_policy_isolation = bool(
+            metadata.get(
+                "gt_policy_isolation",
+                self.policy_pose_source != "habitat_ground_truth",
+            )
+        )
         self._stream = path.open("x", encoding="utf-8", buffering=1)
         self._write({"record_type": "run_metadata", **dict(metadata)})
 
@@ -34,14 +43,26 @@ class VODiagnosticsWriter:
         update: PoseUpdate,
         gt_pose: Mapping[str, Any] | None,
     ) -> None:
+        update_fields = update.as_dict()
+        if self.policy_pose_source == "habitat_ground_truth":
+            for key in (
+                "depth_invalid_policy",
+                "previous_depth_validity",
+                "current_depth_validity",
+            ):
+                update_fields.pop(key, None)
         record = {
-            "record_type": "vo_step",
+            "record_type": (
+                "gt_policy_pose_step"
+                if self.policy_pose_source == "habitat_ground_truth"
+                else "vo_step"
+            ),
             "dataset": dataset,
             "scene_id": scene_id,
             "episode_id": str(episode_id),
             "seed": int(seed),
             "action_step": int(action_step),
-            **update.as_dict(),
+            **update_fields,
         }
         if gt_pose is not None:
             gt = np.array(
@@ -80,7 +101,11 @@ class VODiagnosticsWriter:
     ) -> None:
         self._write(
             {
-                "record_type": "vo_technical_error",
+                "record_type": (
+                    "gt_policy_pose_technical_error"
+                    if self.policy_pose_source == "habitat_ground_truth"
+                    else "vo_technical_error"
+                ),
                 "dataset": dataset,
                 "scene_id": scene_id,
                 "episode_id": str(episode_id),
@@ -125,8 +150,8 @@ class VODiagnosticsWriter:
                 "action_steps": int(action_steps),
                 "native_metrics": metrics,
                 "evaluation_pose_source": "habitat_ground_truth",
-                "policy_pose_source": "zhao_rgbd_2021",
-                "gt_policy_isolation": True,
+                "policy_pose_source": self.policy_pose_source,
+                "gt_policy_isolation": self.gt_policy_isolation,
             }
         )
 

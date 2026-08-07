@@ -151,16 +151,34 @@ def validate_vo_metadata(
     source_commit: str,
     forward_sha256: str,
     turn_sha256: str,
+    policy_pose_source: str = "zhao_rgbd_2021",
+    gt_policy_isolation: bool = True,
 ) -> list[str]:
-    expected = {
-        "provider": "zhao_rgbd_2021",
+    expected: Dict[str, Any] = {
+        "provider": policy_pose_source,
         "ascent_source_commit": source_commit,
-        "forward_checkpoint_sha256": forward_sha256,
-        "turn_checkpoint_sha256": turn_sha256,
-        "action_contract": "native_0.25m_or_30deg_single_pair",
-        "pose_initialization": "episode_local_zero_se2",
-        "gt_policy_isolation": True,
+        "gt_policy_isolation": gt_policy_isolation,
     }
+    if policy_pose_source == "zhao_rgbd_2021":
+        expected.update(
+            {
+                "forward_checkpoint_sha256": forward_sha256,
+                "turn_checkpoint_sha256": turn_sha256,
+                "action_contract": "native_0.25m_or_30deg_single_pair",
+                "pose_initialization": "episode_local_zero_se2",
+            }
+        )
+    elif policy_pose_source == "habitat_ground_truth":
+        expected.update(
+            {
+                "pose_contract": (
+                    "original_ascent_gps_x_neg_y_compass_with_heading"
+                ),
+                "policy_pose_source": policy_pose_source,
+                "auxiliary_vo_sensors": False,
+                "zhao_checkpoint_loaded": False,
+            }
+        )
     return [
         f"vo_metadata:{key}:{metadata.get(key)!r}"
         for key, value in expected.items()
@@ -174,12 +192,14 @@ def validate_submap_metadata(
     mode: str,
     source_commit: str,
     calibration: Optional[Mapping[str, Any]],
+    policy_pose_source: str = "zhao_rgbd_2021",
+    gt_policy_isolation: bool = True,
 ) -> list[str]:
     errors = []
     expected = {
         "ascent_source_commit": source_commit,
-        "pose_source": "zhao_rgbd_2021",
-        "policy_gt_isolation": True,
+        "pose_source": policy_pose_source,
+        "policy_gt_isolation": gt_policy_isolation,
     }
     for key, value in expected.items():
         if metadata.get(key) != value:
@@ -191,7 +211,11 @@ def validate_submap_metadata(
     method_version = metadata.get("method_version")
     if method_version in {"submap_v1.1", "submap_v1.2"}:
         v1_1_expected = {
-            "split_contract": "vo_anchor_and_rgbd_overlap_joint",
+            "split_contract": (
+                "pose_anchor_and_rgbd_overlap_joint"
+                if policy_pose_source == "habitat_ground_truth"
+                else "vo_anchor_and_rgbd_overlap_joint"
+            ),
             "fallback_contract": "ascent_local_first_persistent_route",
         }
         for key, value in v1_1_expected.items():
@@ -272,6 +296,9 @@ def parse_attempt(
     forward_sha256: str,
     turn_sha256: str,
     calibration: Optional[Mapping[str, Any]],
+    policy_pose_source: str = "zhao_rgbd_2021",
+    gt_policy_isolation: bool = True,
+    submap_condition: str = "B2",
 ) -> tuple[Dict[str, Dict[str, Any]], list[str]]:
     condition = row["condition"]
     errors = []
@@ -295,18 +322,30 @@ def parse_attempt(
                 source_commit=source_commit,
                 forward_sha256=forward_sha256,
                 turn_sha256=turn_sha256,
+                policy_pose_source=policy_pose_source,
+                gt_policy_isolation=gt_policy_isolation,
             )
         )
-    if counts["vo_technical_error"]:
+    step_record_type = (
+        "gt_policy_pose_step"
+        if policy_pose_source == "habitat_ground_truth"
+        else "vo_step"
+    )
+    error_record_type = (
+        "gt_policy_pose_technical_error"
+        if policy_pose_source == "habitat_ground_truth"
+        else "vo_technical_error"
+    )
+    if counts[error_record_type]:
         errors.append(
-            f"{condition}:{row['chunk_id']}:vo_technical_errors:"
-            f"{counts['vo_technical_error']}"
+            f"{condition}:{row['chunk_id']}:pose_technical_errors:"
+            f"{counts[error_record_type]}"
         )
     unknown_vo = set(counts) - {
         "run_metadata",
-        "vo_step",
+        step_record_type,
         "episode_end",
-        "vo_technical_error",
+        error_record_type,
     }
     if unknown_vo:
         errors.append(
@@ -317,7 +356,7 @@ def parse_attempt(
     episode_sequences: Dict[str, list[int]] = defaultdict(list)
     for record in vo_records:
         kind = record.get("record_type")
-        if kind == "vo_step":
+        if kind == step_record_type:
             steps[str(record.get("episode_id"))].append(record)
         elif kind == "episode_end":
             runtime_id = str(record.get("episode_id"))
@@ -334,7 +373,7 @@ def parse_attempt(
             errors.append(
                 f"B1:{row['chunk_id']}:unexpected_submap_diagnostics"
             )
-    elif condition == "B2":
+    elif condition == submap_condition:
         submap_path = Path(submap_path_text).resolve()
         submap_records, submap_errors = read_jsonl(submap_path)
         errors.extend(submap_errors)
@@ -365,6 +404,8 @@ def parse_attempt(
                     mode=mode,
                     source_commit=source_commit,
                     calibration=calibration,
+                    policy_pose_source=policy_pose_source,
+                    gt_policy_isolation=gt_policy_isolation,
                 )
             )
         grouped: Dict[int, Dict[str, Any]] = defaultdict(
@@ -397,8 +438,8 @@ def parse_attempt(
             local_errors.append("scene")
         if (
             end.get("evaluation_pose_source") != "habitat_ground_truth"
-            or end.get("policy_pose_source") != "zhao_rgbd_2021"
-            or end.get("gt_policy_isolation") is not True
+            or end.get("policy_pose_source") != policy_pose_source
+            or end.get("gt_policy_isolation") is not gt_policy_isolation
         ):
             local_errors.append("pose_contract")
         metrics = end.get("native_metrics")

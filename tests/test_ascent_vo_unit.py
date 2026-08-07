@@ -17,6 +17,8 @@ from ascent.vo import pose_provider as pose_provider_module
 from ascent.vo.diagnostics import VODiagnosticsWriter
 from ascent.vo.habitat_extensions import _VOFixedLookAction
 from ascent.vo.pose_provider import (
+    GTPoseProviderError,
+    HabitatGTPoseProvider,
     LOOK_DOWN,
     LOOK_UP,
     MOVE_FORWARD,
@@ -27,6 +29,7 @@ from ascent.vo.pose_provider import (
     VOInferenceError,
     ZhaoRGBDPoseProvider,
     compose_zhao_delta,
+    original_ascent_gt_pose,
     wrap_angle,
 )
 from ascent.vo.zhao_model import (
@@ -452,6 +455,57 @@ def test_provider_autoreset_never_infers_across_episodes(
     np.testing.assert_array_equal(
         reset_after_done["estimated_pose"], np.zeros(3, dtype=np.float32)
     )
+
+
+def _gt_observation(
+    gps=(1.5, -2.25), compass=(0.4,), heading=(1.2,)
+) -> dict:
+    return {
+        "rgb": np.zeros((8, 10, 3), dtype=np.uint8),
+        "depth": np.ones((8, 10, 1), dtype=np.float32),
+        "objectgoal": np.array([1], dtype=np.int64),
+        "gps": np.asarray(gps, dtype=np.float32),
+        "compass": np.asarray(compass, dtype=np.float32),
+        "heading": np.asarray(heading, dtype=np.float32),
+    }
+
+
+def test_habitat_gt_provider_matches_original_ascent_and_closes_boundary() -> None:
+    provider = HabitatGTPoseProvider(num_envs=1)
+    observation = _gt_observation()
+    update = provider.reset_batch([observation])[0]
+    np.testing.assert_allclose(
+        update.pose_after,
+        original_ascent_gt_pose([1.5, -2.25], [0.4]),
+    )
+    assert not {"gps", "compass", "heading"}.intersection(observation)
+    provider.inject_estimated_pose([observation])
+    np.testing.assert_allclose(
+        observation["estimated_pose"], [1.5, 2.25, 0.4]
+    )
+    assert float(observation["policy_start_yaw"]) == pytest.approx(1.2)
+
+    successor = _gt_observation(
+        gps=(2.0, -3.0), compass=(0.5,), heading=(1.2,)
+    )
+    update = provider.update_batch([successor], [MOVE_FORWARD], [False])[0]
+    np.testing.assert_allclose(update.pose_after, [2.0, 3.0, 0.5])
+    provider.inject_estimated_pose([successor])
+    assert not {"gps", "compass", "heading"}.intersection(successor)
+
+
+@pytest.mark.parametrize(
+    "observation",
+    [
+        {"gps": [0.0, 0.0], "compass": [0.0]},
+        _gt_observation(gps=(0.0, np.nan)),
+        _gt_observation(heading=(np.inf,)),
+    ],
+)
+def test_habitat_gt_provider_fails_closed(observation: dict) -> None:
+    provider = HabitatGTPoseProvider(num_envs=1)
+    with pytest.raises(GTPoseProviderError):
+        provider.reset_batch([observation])
 
 
 @pytest.mark.parametrize(
@@ -919,6 +973,51 @@ def test_config_keeps_internal_heading_behind_policy_boundary() -> None:
     GlobalHydra.instance().clear()
 
 
+def test_gt_config_uses_original_sensors_without_auxiliary_vo() -> None:
+    import hydra
+    from hydra.core.global_hydra import GlobalHydra
+
+    from habitat.config.default import patch_config
+    from habitat.config.default_structured_configs import register_hydra_plugin
+    from habitat_baselines.config.default_structured_configs import (
+        HabitatBaselinesConfigPlugin,
+    )
+
+    import ascent.run  # noqa: F401
+    from ascent.vo.habitat_extensions import configure_policy_pose_source
+
+    GlobalHydra.instance().clear()
+    register_hydra_plugin(HabitatBaselinesConfigPlugin)
+    with hydra.initialize_config_dir(
+        version_base=None,
+        config_dir=str((REPO_ROOT / "experiments").resolve()),
+    ):
+        config = patch_config(
+            hydra.compose(config_name="eval_ascent_hm3d.yaml")
+        )
+    original_look_up = config.habitat.task.actions.look_up.type
+    original_look_down = config.habitat.task.actions.look_down.type
+    configure_policy_pose_source(config)
+    assert str(config.ascent_vo.provider) == "habitat_ground_truth"
+    assert config.habitat.task.actions.look_up.type == original_look_up
+    assert config.habitat.task.actions.look_down.type == original_look_down
+    assert {"gps_sensor", "compass_sensor", "heading_sensor"}.issubset(
+        config.habitat.task.lab_sensors
+    )
+    assert config.habitat.gym.obs_keys == [
+        "rgb",
+        "depth",
+        "objectgoal",
+        "gps",
+        "compass",
+        "heading",
+    ]
+    sensors = config.habitat.simulator.agents.main_agent.sim_sensors
+    assert "vo_rgb_sensor" not in sensors
+    assert "vo_depth_sensor" not in sensors
+    GlobalHydra.instance().clear()
+
+
 def _pose_update(
     status: str = "ok", *, pose_after: tuple[float, float, float] = (1, 2, 0.3)
 ) -> PoseUpdate:
@@ -953,7 +1052,7 @@ def test_diagnostics_are_append_only_and_gt_is_evaluation_only(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "vo.jsonl"
-    writer = VODiagnosticsWriter(path, {"provider": "test"})
+    writer = VODiagnosticsWriter(path, {"provider": "zhao_rgbd_2021"})
     writer.record_step(
         dataset="hm3d",
         scene_id="scene",
@@ -1009,6 +1108,41 @@ def test_diagnostics_are_append_only_and_gt_is_evaluation_only(
     assert records[3]["policy_pose_source"] == "zhao_rgbd_2021"
     with pytest.raises(FileExistsError):
         VODiagnosticsWriter(path, {"provider": "must_not_overwrite"})
+
+
+def test_gt_policy_pose_diagnostics_are_explicit(tmp_path: Path) -> None:
+    path = tmp_path / "gt_pose.jsonl"
+    writer = VODiagnosticsWriter(
+        path,
+        {
+            "provider": "habitat_ground_truth",
+            "policy_pose_source": "habitat_ground_truth",
+            "gt_policy_isolation": False,
+        },
+    )
+    writer.record_step(
+        dataset="hm3d",
+        scene_id="scene",
+        episode_id="ep",
+        seed=100,
+        action_step=1,
+        update=_pose_update(pose_after=(1.0, 2.0, 0.3)),
+        gt_pose={"x": 1.0, "y": 2.0, "yaw": 0.3, "height": 0.0},
+    )
+    writer.record_episode_end(
+        dataset="hm3d",
+        scene_id="scene",
+        episode_id="ep",
+        seed=100,
+        action_steps=1,
+        native_metrics={"success": 1.0, "spl": 0.5},
+    )
+    writer.close()
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert records[1]["record_type"] == "gt_policy_pose_step"
+    assert "depth_invalid_policy" not in records[1]
+    assert records[2]["policy_pose_source"] == "habitat_ground_truth"
+    assert records[2]["gt_policy_isolation"] is False
 
 
 def test_terminal_no_successor_has_no_misleading_localization_error(
@@ -1174,6 +1308,7 @@ def test_checkpoint_missing_and_hash_mismatch_fail_closed(
 def test_policy_pose_source_has_no_direct_gt_observation_reads() -> None:
     source = (REPO_ROOT / "ascent" / "ascent_policy.py").read_text()
     assert 'observations["estimated_pose"]' in source
+    assert 'observations["policy_start_yaw"]' in source
     for key in ("gps", "compass", "heading"):
         assert f'observations["{key}"]' not in source
         assert f"observations['{key}']" not in source

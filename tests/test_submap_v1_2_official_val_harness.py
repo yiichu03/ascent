@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PREPARER = ROOT / "scripts" / "prepare_submap_v1_2_official_val_expansion.py"
+PREPARER = ROOT / "scripts" / "prepare_gt_submap_v1_2_hm3d_prefix1000.py"
 CONTROLLER = ROOT / "pbs" / "run_submap_v1_2_official_val_3shared.pbs"
 SUBMITTER = ROOT / "pbs" / "submit_submap_v1_2_official_val.sh"
 
@@ -20,20 +20,22 @@ def load_preparer():
     return module
 
 
-def test_fixed_official_val_shard_sizes() -> None:
-    module = load_preparer()
-    assert module.shard_sizes(2195, 3) == [732, 732, 731]
-    assert module.shard_sizes(1000, 1) == [1000]
+def test_preparer_reuses_frozen_prefix_without_copying_transport() -> None:
+    text = PREPARER.read_text(encoding="utf-8")
+    for contract in (
+        '"expected_episodes": 1000',
+        '"expected_chunks": 50',
+        '"pose_source": "habitat_ground_truth"',
+        '"transport_files_copied": False',
+        '"metrics_used_for_selection": False',
+    ):
+        assert contract in text
 
 
-def test_canonical_official_val_identity() -> None:
+def test_preparer_is_importable() -> None:
     module = load_preparer()
-    ids = module.canonical_ids("hm3d", 2000)
-    assert ids[999:1002] == [
-        "hm3d_val_0999",
-        "hm3d_val_1000",
-        "hm3d_val_1001",
-    ]
+    assert callable(module.sha256)
+    assert callable(module.main)
 
 
 def test_controller_enforces_scientific_and_technical_boundaries() -> None:
@@ -41,7 +43,9 @@ def test_controller_enforces_scientific_and_technical_boundaries() -> None:
     for contract in (
         'config["scientific_split"] == "val"',
         'config["transport_split"] == "train"',
-        'config["policy_gt_isolation"] is True',
+        'config["pose_source"] == "habitat_ground_truth"',
+        'config["policy_gt_isolation"] is False',
+        'config["auxiliary_vo_sensors"] is False',
         'config["evaluation_gt_only"] is True',
         'config["metric_driven_retry"] is False',
         "placement_gate_failed",
@@ -57,8 +61,9 @@ def test_submitter_is_fail_closed_and_supports_no_qsub() -> None:
         "ASCENT_SUBMAP_V12_OFFVAL_NO_QSUB",
         "source_commit_not_pushed",
         "queue_must_be_auto_or_autox",
-        "canonical_official_val_contiguous_index_no_metric_filter",
+        "canonical_official_val_prefix_no_metric_filter",
         "metrics_used_for_selection",
+        '"pose_source": "habitat_ground_truth"',
         "qsub_executed",
     ):
         assert contract in text

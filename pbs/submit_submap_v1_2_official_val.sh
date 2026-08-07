@@ -1,5 +1,5 @@
 #!/bin/bash
-# Submit one hash-bound official-val shard for frozen submap-v1.2.
+# Submit one hash-bound GT-pose + frozen submap-v1.2 official-val shard.
 
 set -euo pipefail
 
@@ -10,14 +10,13 @@ STAMP=${3:?usage: $USAGE}
 NO_QSUB=${ASCENT_SUBMAP_V12_OFFVAL_NO_QSUB:-0}
 
 PROJECT=/scratch/e1538633/liuyi/drift-aware-submap-exploration
-SOURCE_ROOT=$PROJECT/external/ascent_vo_submap_v1_2
+SOURCE_ROOT=$PROJECT/external/ascent_gt_submap_v1_2
 RESOURCE_ROOT=$PROJECT/external/ascent
-POINTNAV_VO_ROOT=$PROJECT/external/PointNav-VO
 CONTROLLER=$SOURCE_ROOT/pbs/run_submap_v1_2_official_val_3shared.pbs
 WORKER=$SOURCE_ROOT/pbs/run_submap_v1_2_lane.sh
 SCRATCH_ROOT=/scratch/e1538633/liuyi
 ASCENT_PYTHON=$SCRATCH_ROOT/micromamba/envs/ascent_nav/bin/python
-EXPECTED_ARTIFACT_ROOT=$PROJECT/artifacts/objectnav/submap_v1_2
+EXPECTED_ARTIFACT_ROOT=$PROJECT/artifacts/objectnav/gt_submap_v1_2
 
 case "$QUEUE" in auto|autox) ;; *) echo queue_must_be_auto_or_autox; exit 20 ;; esac
 [[ "$STAMP" =~ ^[A-Za-z0-9._-]+$ ]] || { echo invalid_stamp; exit 20; }
@@ -30,7 +29,7 @@ mapfile -t CONFIG_VALUES < <(
   "$ASCENT_PYTHON" - "$CONFIG" <<'PY'
 import json, sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))
-assert value["schema"] == "ascent_vo_submap_v1_2_official_val_job_v1"
+assert value["schema"] == "ascent_gt_submap_v1_2_official_val_job_v1"
 for field in (
     "job_key", "job_name", "dataset", "artifact_root", "manifest",
     "manifest_sha256", "gate_manifest", "gate_manifest_sha256",
@@ -99,7 +98,6 @@ git -C "$SOURCE_ROOT" merge-base --is-ancestor "$SOURCE_COMMIT" "$UPSTREAM" || {
   echo source_commit_not_pushed; exit 23;
 }
 RESOURCE_COMMIT=$(git -C "$RESOURCE_ROOT" rev-parse HEAD)
-POINTNAV_VO_COMMIT=$(git -C "$POINTNAV_VO_ROOT" rev-parse HEAD)
 CONTROLLER_SHA256=$(sha256sum "$CONTROLLER" | awk '{print $1}')
 WORKER_SHA256=$(sha256sum "$WORKER" | awk '{print $1}')
 
@@ -117,13 +115,18 @@ def sha256(path):
             digest.update(block)
     return digest.hexdigest()
 
-assert value["schema"] == "ascent_vo_submap_v1_2_official_val_job_v1"
+assert value["schema"] == "ascent_gt_submap_v1_2_official_val_job_v1"
 assert value["scientific_split"] == "val"
 assert value["transport_split"] == "train"
-assert value["selection_rule"] == "canonical_official_val_contiguous_index_no_metric_filter"
+assert value["selection_rule"] in {
+    "canonical_official_val_contiguous_index_no_metric_filter",
+    "canonical_official_val_prefix_no_metric_filter",
+}
 assert value["metrics_used_for_selection"] is False
-assert value["pose_source"] == "zhao_rgbd_2021"
-assert value["policy_gt_isolation"] is True
+assert value["pose_source"] == "habitat_ground_truth"
+assert value["policy_gt_isolation"] is False
+assert value["auxiliary_vo_sensors"] is False
+assert value["zhao_checkpoint_loaded"] is False
 assert value["evaluation_gt_only"] is True
 assert value["method_version"] == "submap_v1.2"
 assert value["fixed_technical_retry_per_failed_unit"] == 1
@@ -168,8 +171,11 @@ assert gate["episode_count"] == 5 and len(gate["chunks"]) == 1
 
 audit = json.load(open(value["preparation_audit"], encoding="utf-8"))
 assert audit["status"] == "PASS" and audit["metrics_used_for_selection"] is False
-assert audit["selected_start_index"] == start
-assert audit["selected_stop_index_exclusive"] == stop
+if "selected_start_index" in audit:
+    assert audit["selected_start_index"] == start
+    assert audit["selected_stop_index_exclusive"] == stop
+else:
+    assert start == 0 and audit["selected_episode_count"] == stop
 transport = Path(audit["transport_root_file"])
 assert sha256(transport) == audit["transport_root_file_sha256"]
 with gzip.open(transport, "rt", encoding="utf-8") as handle:
@@ -180,12 +186,12 @@ PY
 
 DRY_RUN_JSON=$(
   "$ASCENT_PYTHON" - "$CONFIG" "$CONFIG_SHA256" "$QUEUE" "$STAMP" \
-    "$SOURCE_COMMIT" "$RESOURCE_COMMIT" "$POINTNAV_VO_COMMIT" \
+    "$SOURCE_COMMIT" "$RESOURCE_COMMIT" \
     "$CONTROLLER_SHA256" "$WORKER_SHA256" <<'PY'
 import json, sys
 config = json.load(open(sys.argv[1], encoding="utf-8"))
 print(json.dumps({
-    "schema": "ascent_vo_submap_v1_2_official_val_submission_preflight_v1",
+    "schema": "ascent_gt_submap_v1_2_official_val_submission_preflight_v1",
     "status": "PASS",
     "job_key": config["job_key"],
     "job_name": config["job_name"],
@@ -200,16 +206,17 @@ print(json.dumps({
     "stamp": sys.argv[4],
     "source_commit": sys.argv[5],
     "resource_commit": sys.argv[6],
-    "pointnav_vo_commit": sys.argv[7],
     "config": sys.argv[1],
     "config_sha256": sys.argv[2],
-    "controller_sha256": sys.argv[8],
-    "worker_sha256": sys.argv[9],
+    "controller_sha256": sys.argv[7],
+    "worker_sha256": sys.argv[8],
     "artifact_root": config["artifact_root"],
     "selection_rule": config["selection_rule"],
     "metrics_used_for_selection": False,
-    "pose_source": "zhao_rgbd_2021",
-    "policy_gt_isolation": True,
+    "pose_source": "habitat_ground_truth",
+    "policy_gt_isolation": False,
+    "auxiliary_vo_sensors": False,
+    "zhao_checkpoint_loaded": False,
     "evaluation_gt_only": True,
     "method_version": "submap_v1.2",
     "fixed_technical_retry_per_failed_unit": 1,
@@ -227,8 +234,8 @@ fi
 LOG_ROOT=$ARTIFACT_ROOT/pbs_logs
 SUBMISSION_ROOT=$ARTIFACT_ROOT/submissions
 mkdir -p "$LOG_ROOT" "$SUBMISSION_ROOT"
-PBS_LOG=$LOG_ROOT/submap_v1_2_official_val_${JOB_KEY}_${STAMP}.pbs.log
-SUBMISSION_JSON=$SUBMISSION_ROOT/submap_v1_2_official_val_${JOB_KEY}_${STAMP}.json
+PBS_LOG=$LOG_ROOT/gt_submap_v1_2_official_val_${JOB_KEY}_${STAMP}.pbs.log
+SUBMISSION_JSON=$SUBMISSION_ROOT/gt_submap_v1_2_official_val_${JOB_KEY}_${STAMP}.json
 [ ! -e "$PBS_LOG" ] || { echo "pbs_log_exists=$PBS_LOG"; exit 24; }
 [ ! -e "$SUBMISSION_JSON" ] || {
   echo "submission_record_exists=$SUBMISSION_JSON"; exit 24;
@@ -239,7 +246,6 @@ ENVIRONMENT=$(IFS=,; echo \
 ASCENT_SUBMAP_V12_OFFVAL_CONFIG_SHA256=$CONFIG_SHA256,\
 ASCENT_SUBMAP_V12_OFFVAL_SOURCE_COMMIT=$SOURCE_COMMIT,\
 ASCENT_SUBMAP_V12_OFFVAL_RESOURCE_COMMIT=$RESOURCE_COMMIT,\
-ASCENT_SUBMAP_V12_OFFVAL_POINTNAV_VO_COMMIT=$POINTNAV_VO_COMMIT,\
 ASCENT_SUBMAP_V12_OFFVAL_CONTROLLER_SHA256=$CONTROLLER_SHA256,\
 ASCENT_SUBMAP_V12_OFFVAL_WORKER_SHA256=$WORKER_SHA256,\
 ASCENT_SUBMAP_V12_OFFVAL_STAMP=$STAMP")
@@ -253,7 +259,7 @@ printf '%s\n' "$JOB_ID"
 import json, sys
 output = json.loads('''$DRY_RUN_JSON''')
 output.update({
-    "schema": "ascent_vo_submap_v1_2_official_val_submission_v1",
+    "schema": "ascent_gt_submap_v1_2_official_val_submission_v1",
     "job_id": sys.argv[2],
     "pbs_log": sys.argv[3],
     "qsub_executed": True,

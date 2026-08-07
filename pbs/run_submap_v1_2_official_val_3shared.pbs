@@ -6,14 +6,13 @@
 #PBS -l walltime=96:00:00
 #PBS -j oe
 
-# One hash-bound, three-lane official-val shard for frozen submap-v1.2.
+# One hash-bound GT-pose + frozen submap-v1.2 official-val shard.
 
 set -euo pipefail
 
 PROJECT=/scratch/e1538633/liuyi/drift-aware-submap-exploration
-SOURCE_ROOT=$PROJECT/external/ascent_vo_submap_v1_2
+SOURCE_ROOT=$PROJECT/external/ascent_gt_submap_v1_2
 RESOURCE_ROOT=$PROJECT/external/ascent
-POINTNAV_VO_ROOT=$PROJECT/external/PointNav-VO
 WORKER=$SOURCE_ROOT/pbs/run_submap_v1_2_lane.sh
 PREFLIGHT=$SOURCE_ROOT/scripts/preflight_submap_screen.py
 LOADING_CHECK=$SOURCE_ROOT/scripts/check_submap_habitat_loading.py
@@ -25,7 +24,6 @@ CONFIG=${ASCENT_SUBMAP_V12_OFFVAL_CONFIG:?required}
 CONFIG_SHA256=${ASCENT_SUBMAP_V12_OFFVAL_CONFIG_SHA256:?required}
 SOURCE_COMMIT=${ASCENT_SUBMAP_V12_OFFVAL_SOURCE_COMMIT:?required}
 RESOURCE_COMMIT=${ASCENT_SUBMAP_V12_OFFVAL_RESOURCE_COMMIT:?required}
-POINTNAV_VO_COMMIT=${ASCENT_SUBMAP_V12_OFFVAL_POINTNAV_VO_COMMIT:?required}
 CONTROLLER_SHA256=${ASCENT_SUBMAP_V12_OFFVAL_CONTROLLER_SHA256:?required}
 WORKER_SHA256=${ASCENT_SUBMAP_V12_OFFVAL_WORKER_SHA256:?required}
 STAMP=${ASCENT_SUBMAP_V12_OFFVAL_STAMP:?required}
@@ -34,8 +32,8 @@ SCRATCH_ROOT=/scratch/e1538633/liuyi
 ASCENT_ENV=$SCRATCH_ROOT/micromamba/envs/ascent_nav
 ASCENT_PYTHON=$ASCENT_ENV/bin/python
 SCENES_ROOT=$RESOURCE_ROOT/data/scene_datasets
-FORWARD_SHA256=6b571bb717366f7d80f61e919b33a45ac2f45925201c4e3011b3239a2c42e586
-TURN_SHA256=c469643f9ab35c9e1058f31fbb672a5fa3adf582987a4388bdd020dd89faf1d9
+FORWARD_SHA256=not_used_by_habitat_ground_truth
+TURN_SHA256=not_used_by_habitat_ground_truth
 LANE_COUNT=3
 GATE_EPISODES=5
 GATE_CHUNKS=1
@@ -62,7 +60,7 @@ mapfile -t CONFIG_VALUES < <(
   "$ASCENT_PYTHON" - "$CONFIG" <<'PY'
 import json, sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))
-assert value["schema"] == "ascent_vo_submap_v1_2_official_val_job_v1"
+assert value["schema"] == "ascent_gt_submap_v1_2_official_val_job_v1"
 fields = (
     "job_key", "dataset", "artifact_root", "manifest",
     "manifest_sha256", "gate_manifest", "gate_manifest_sha256",
@@ -119,11 +117,8 @@ check_hash "$PREPARATION_AUDIT" "$PREPARATION_AUDIT_SHA256" preparation_audit
 [ "$(git -C "$RESOURCE_ROOT" rev-parse HEAD)" = "$RESOURCE_COMMIT" ] || {
   echo resource_commit_mismatch; exit 22;
 }
-[ "$(git -C "$POINTNAV_VO_ROOT" rev-parse HEAD)" = "$POINTNAV_VO_COMMIT" ] || {
-  echo pointnav_vo_commit_mismatch; exit 22;
-}
 
-RUN_ROOT=$ARTIFACT_ROOT/runs/submap_v1_2_official_val_${JOB_KEY}_${PBS_JOBID:-manual}_${STAMP}
+RUN_ROOT=$ARTIFACT_ROOT/runs/gt_submap_v1_2_official_val_${JOB_KEY}_${PBS_JOBID:-manual}_${STAMP}
 [ ! -e "$RUN_ROOT" ] || { echo "run_root_exists=$RUN_ROOT"; exit 24; }
 mkdir -p "$RUN_ROOT"/{checks,lanes,mpl_config,xdg_cache}
 
@@ -163,24 +158,31 @@ expected = config["expected_episodes"]
 start = config["scientific_start_index"]
 stop = config["scientific_stop_index_exclusive"]
 ids = [row["logical_case_id"] for row in selection]
-assert config["schema"] == "ascent_vo_submap_v1_2_official_val_job_v1"
+assert config["schema"] == "ascent_gt_submap_v1_2_official_val_job_v1"
 assert config["scientific_split"] == "val"
 assert config["transport_split"] == "train"
-assert config["selection_rule"] == "canonical_official_val_contiguous_index_no_metric_filter"
+assert config["selection_rule"] in {
+    "canonical_official_val_contiguous_index_no_metric_filter",
+    "canonical_official_val_prefix_no_metric_filter",
+}
 assert config["metrics_used_for_selection"] is False
-assert config["pose_source"] == "zhao_rgbd_2021"
-assert config["policy_gt_isolation"] is True
+assert config["pose_source"] == "habitat_ground_truth"
+assert config["policy_gt_isolation"] is False
+assert config["auxiliary_vo_sensors"] is False
+assert config["zhao_checkpoint_loaded"] is False
 assert config["evaluation_gt_only"] is True
 assert config["method_version"] == "submap_v1.2"
 assert config["fixed_technical_retry_per_failed_unit"] == 1
 assert config["metric_driven_retry"] is False
 assert config["gate_episodes"] == 5 and config["gate_chunks"] == 1
 assert config["lane_count"] == 3
-assert audit["schema"] == "ascent_vo_submap_v1_2_official_val_preparation_v1"
 assert audit["status"] == "PASS" and audit["metrics_used_for_selection"] is False
 assert audit["dataset"] == dataset and audit["split"] == "val"
-assert audit["selected_start_index"] == start
-assert audit["selected_stop_index_exclusive"] == stop
+if "selected_start_index" in audit:
+    assert audit["selected_start_index"] == start
+    assert audit["selected_stop_index_exclusive"] == stop
+else:
+    assert start == 0 and audit["selected_episode_count"] == stop
 assert stop - start == expected == len(selection) == len(baseline)
 assert [int(row["dataset_case_index"]) for row in selection] == list(range(start, stop))
 assert ids == [f"{dataset}_val_{index:04d}" for index in range(start, stop)]
@@ -222,7 +224,7 @@ for chunk in manifest["chunks"]:
         observed.append(logical_id)
 assert observed == ids
 result = {
-    "schema": "ascent_vo_submap_v1_2_official_val_identity_v1",
+    "schema": "ascent_gt_submap_v1_2_official_val_identity_v1",
     "status": "PASS",
     "dataset": dataset,
     "scientific_split": "val",
@@ -270,8 +272,8 @@ BASE_PORT_ROOT=$(
     --seed "${PBS_JOBID:-manual}:$STAMP" --lanes "$LANE_COUNT"
 )
 {
-  echo schema=ascent_vo_submap_v1_2_official_val_controller_v1
-  echo scientific_role=frozen_method_official_val_expansion
+  echo schema=ascent_gt_submap_v1_2_official_val_controller_v1
+  echo scientific_role=gt_submap_localization_specificity_control
   echo pbs_jobid=${PBS_JOBID:-manual}
   echo host=$(hostname)
   echo start_time=$(date -Is)
@@ -283,7 +285,6 @@ BASE_PORT_ROOT=$(
   echo scientific_stop_index_exclusive=$SCIENTIFIC_STOP
   echo source_commit=$SOURCE_COMMIT
   echo resource_commit=$RESOURCE_COMMIT
-  echo pointnav_vo_commit=$POINTNAV_VO_COMMIT
   echo config=$CONFIG
   echo config_sha256=$CONFIG_SHA256
   echo manifest=$MANIFEST
@@ -293,8 +294,10 @@ BASE_PORT_ROOT=$(
   echo lane_count=$LANE_COUNT
   echo resource_contract=one_H200_up_to_three_independent_service_lanes
   echo placement_contract=five_episode_method_gate_before_official_val_shard
-  echo pose_source=zhao_rgbd_2021
-  echo policy_gt_isolation=1
+  echo pose_source=habitat_ground_truth
+  echo policy_gt_isolation=0
+  echo auxiliary_vo_sensors=0
+  echo zhao_checkpoint_loaded=0
   echo evaluation_gt_only=1
   echo no_metric_driven_retry=1
   echo technical_retry_policy=one_fixed_retry_per_failed_unit
@@ -334,7 +337,6 @@ run_lane() {
     export ASCENT_SUBMAP_V12_MANIFEST_SHA256=$manifest_sha
     export ASCENT_SUBMAP_V12_SOURCE_COMMIT=$SOURCE_COMMIT
     export ASCENT_SUBMAP_V12_RESOURCE_COMMIT=$RESOURCE_COMMIT
-    export ASCENT_SUBMAP_V12_POINTNAV_VO_COMMIT=$POINTNAV_VO_COMMIT
     export ASCENT_SUBMAP_V12_LANE_ID=$lane_id
     export ASCENT_SUBMAP_V12_LANE_COUNT=$lanes
     export ASCENT_SUBMAP_V12_LANE_EXPECTED_CHUNKS=$expected_chunks
@@ -359,6 +361,8 @@ printf 'lane_id,inventory\n0,%s\n' \
   --source-commit "$SOURCE_COMMIT" \
   --forward-checkpoint-sha256 "$FORWARD_SHA256" \
   --turn-checkpoint-sha256 "$TURN_SHA256" \
+  --policy-pose-source habitat_ground_truth \
+  --gt-policy-isolation 0 \
   --output-dir "$RUN_ROOT/placement_gate/final_gate" \
   > "$RUN_ROOT/placement_gate/final_gate.log" 2>&1
 [ "$("$ASCENT_PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["technical_status"])' "$RUN_ROOT/placement_gate/final_gate/summary.json")" = PASS ] || {
@@ -426,6 +430,8 @@ set +e
   --expected-episodes "$EXPECTED_EPISODES" --source-commit "$SOURCE_COMMIT" \
   --forward-checkpoint-sha256 "$FORWARD_SHA256" \
   --turn-checkpoint-sha256 "$TURN_SHA256" \
+  --policy-pose-source habitat_ground_truth \
+  --gt-policy-isolation 0 \
   --baseline-episodes-csv "$BASELINE_CSV" --output-dir "$SUMMARY_DIR" \
   > "$RUN_ROOT/final_gate.log" 2>&1
 SUMMARY_STATUS=$?

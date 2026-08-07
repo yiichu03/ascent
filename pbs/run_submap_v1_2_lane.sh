@@ -1,13 +1,11 @@
 #!/bin/bash
-# One B2-only ASCENT-VO submap-v1.2 lane with independent services.
+# One ASCENT-GT + frozen submap-v1.2 lane with independent services.
 
 set -euo pipefail
 
 PROJECT=/scratch/e1538633/liuyi/drift-aware-submap-exploration
-SOURCE_ROOT=$PROJECT/external/ascent_vo_submap_v1_2
+SOURCE_ROOT=$PROJECT/external/ascent_gt_submap_v1_2
 RESOURCE_ROOT=$PROJECT/external/ascent
-POINTNAV_VO_ROOT=$PROJECT/external/PointNav-VO
-CHECKPOINT_DIR=$POINTNAV_VO_ROOT/pretrained_ckpts/vo
 HEALTH_CHECK=$SOURCE_ROOT/scripts/check_submap_services.py
 
 DATASET=${ASCENT_SUBMAP_V12_DATASET:?required}
@@ -17,7 +15,6 @@ MANIFEST=${ASCENT_SUBMAP_V12_MANIFEST:?required}
 MANIFEST_SHA256=${ASCENT_SUBMAP_V12_MANIFEST_SHA256:?required}
 SOURCE_COMMIT=${ASCENT_SUBMAP_V12_SOURCE_COMMIT:?required}
 RESOURCE_COMMIT=${ASCENT_SUBMAP_V12_RESOURCE_COMMIT:?required}
-POINTNAV_VO_COMMIT=${ASCENT_SUBMAP_V12_POINTNAV_VO_COMMIT:?required}
 LANE_ID=${ASCENT_SUBMAP_V12_LANE_ID:?required}
 LANE_COUNT=${ASCENT_SUBMAP_V12_LANE_COUNT:?required}
 EXPECTED_CHUNKS=${ASCENT_SUBMAP_V12_LANE_EXPECTED_CHUNKS:?required}
@@ -26,8 +23,6 @@ STAGE_ROOT=${ASCENT_SUBMAP_V12_STAGE_ROOT:?required}
 BASE_PORT=${ASCENT_SUBMAP_V12_BASE_PORT:?required}
 DEADLINE_EPOCH=${ASCENT_SUBMAP_V12_DEADLINE_EPOCH:?required}
 
-FORWARD_SHA256=6b571bb717366f7d80f61e919b33a45ac2f45925201c4e3011b3239a2c42e586
-TURN_SHA256=c469643f9ab35c9e1058f31fbb672a5fa3adf582987a4388bdd020dd89faf1d9
 SCRATCH_ROOT=/scratch/e1538633/liuyi
 ASCENT_ENV=$SCRATCH_ROOT/micromamba/envs/ascent_nav
 ASCENT_PYTHON=$ASCENT_ENV/bin/python
@@ -58,20 +53,12 @@ for path in \
   "$SOURCE_ROOT/pretrained_weights/rednet_semmap_mp3d_40.pth" \
   "$SOURCE_ROOT/pretrained_weights/resnet50_places365.pth.tar" \
   "$SOURCE_ROOT/third_party/vlfm/data/pointnav_weights.pth" \
-  "$CHECKPOINT_DIR/act_forward.pth" \
-  "$CHECKPOINT_DIR/act_left_right_inv_joint.pth" \
   "$SCENES_ROOT/$DATASET"; do
   [ -e "$path" ] || { echo "missing_required_resource=$path"; exit 21; }
 done
 command -v timeout >/dev/null || { echo missing_timeout; exit 21; }
 [ "$(sha256sum "$MANIFEST" | awk '{print $1}')" = "$MANIFEST_SHA256" ] || {
   echo manifest_hash_mismatch; exit 22;
-}
-[ "$(sha256sum "$CHECKPOINT_DIR/act_forward.pth" | awk '{print $1}')" = "$FORWARD_SHA256" ] || {
-  echo forward_checkpoint_hash_mismatch; exit 22;
-}
-[ "$(sha256sum "$CHECKPOINT_DIR/act_left_right_inv_joint.pth" | awk '{print $1}')" = "$TURN_SHA256" ] || {
-  echo turn_checkpoint_hash_mismatch; exit 22;
 }
 [ "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" = "$SOURCE_COMMIT" ] || {
   echo source_commit_mismatch; exit 22;
@@ -83,9 +70,6 @@ command -v timeout >/dev/null || { echo missing_timeout; exit 21; }
 }
 [ "$(git -C "$RESOURCE_ROOT" rev-parse HEAD)" = "$RESOURCE_COMMIT" ] || {
   echo resource_commit_mismatch; exit 22;
-}
-[ "$(git -C "$POINTNAV_VO_ROOT" rev-parse HEAD)" = "$POINTNAV_VO_COMMIT" ] || {
-  echo pointnav_vo_commit_mismatch; exit 22;
 }
 
 read -r SCENE_DATASET_CONFIG SCENE_DATASET_CONFIG_SHA256 < <(
@@ -125,7 +109,6 @@ export ASCENT_REQUEST_TIMEOUT_SECONDS=60
 export ASCENT_SERVER_WAIT_SECONDS=1200
 export HYDRA_FULL_ERROR=1 PYTHONFAULTHANDLER=1
 export TORCH_SHOW_CPP_STACKTRACES=1 HABITAT_ENV_DEBUG=1
-export ASCENT_VO_CHECKPOINT_DIR=$CHECKPOINT_DIR
 export QWEN2_5_PORT=$BASE_PORT
 export BLIP2ITM_PORT=$((BASE_PORT + 1))
 export SAM_PORT=$((BASE_PORT + 2))
@@ -162,8 +145,8 @@ done
 }
 
 {
-  echo schema=ascent_vo_submap_v1_2_lane_v2
-  echo scientific_role=b2_only_method_screen
+  echo schema=ascent_gt_submap_v1_2_lane_v1
+  echo scientific_role=gt_submap_localization_specificity_control
   echo pbs_jobid=${PBS_JOBID:-manual}
   echo host=$(hostname)
   echo mode=$MODE
@@ -172,15 +155,16 @@ done
   echo lane_count=$LANE_COUNT
   echo source_commit=$SOURCE_COMMIT
   echo resource_commit=$RESOURCE_COMMIT
-  echo pointnav_vo_commit=$POINTNAV_VO_COMMIT
   echo manifest=$MANIFEST
   echo manifest_sha256=$MANIFEST_SHA256
   echo expected_chunks=$EXPECTED_CHUNKS
   echo expected_episodes=$EXPECTED_EPISODES
   echo screen_max_actions=$SCREEN_MAX_ACTIONS
-  echo pose_source=zhao_rgbd_2021
+  echo pose_source=habitat_ground_truth
   echo evaluation_pose_source=habitat_ground_truth
-  echo gt_policy_isolation=1
+  echo gt_policy_isolation=0
+  echo auxiliary_vo_sensors=0
+  echo zhao_checkpoint_loaded=0
   echo no_metric_driven_retry=1
   echo technical_retry_policy=one_fixed_retry_per_failed_unit
   echo method_version=submap_v1.2
@@ -253,9 +237,11 @@ if path.is_file():
             continue
         counts[str(record.get("record_type"))] += 1
 if family == "vo":
-    known = {"run_metadata", "vo_step", "episode_end", "vo_technical_error"}
-    values = (counts["run_metadata"], counts["vo_step"], counts["episode_end"],
-              counts["vo_technical_error"], parse,
+    known = {"run_metadata", "gt_policy_pose_step", "episode_end",
+             "gt_policy_pose_technical_error"}
+    values = (counts["run_metadata"], counts["gt_policy_pose_step"],
+              counts["episode_end"],
+              counts["gt_policy_pose_technical_error"], parse,
               sum(v for k, v in counts.items() if k not in known))
 else:
     known = {"submap_run_metadata", "submap_episode_reset",
@@ -281,7 +267,7 @@ run_unit() {
   timeout_seconds=$SUBRUN_TIMEOUT_SECONDS
   [ "$timeout_seconds" -le "$remaining" ] || timeout_seconds=$remaining
   ATTEMPT_SEQUENCE=$((ATTEMPT_SEQUENCE + 1))
-  local attempt_name=p${priority}_${ATTEMPT_SEQUENCE}_B2
+  local attempt_name=p${priority}_${ATTEMPT_SEQUENCE}_GT_SUBMAP
   local unit_dir=$RUN_ROOT/attempts/$attempt_name/$chunk_id
   [ ! -e "$unit_dir" ] || { echo "unit_exists=$unit_dir"; return 24; }
   mkdir -p "$unit_dir"/{video,tb,mpl_config,xdg_cache}
@@ -290,7 +276,7 @@ run_unit() {
 
   local vo_diagnostics=$unit_dir/vo_diagnostics.jsonl
   local submap_diagnostics=$unit_dir/submap_diagnostics.jsonl
-  local run_id=${MODE}__screen__B2__${attempt_name}__${chunk_id}
+  local run_id=${MODE}__gt_submap_v1_2__${attempt_name}__${chunk_id}
   local cmd=(
     "$ASCENT_PYTHON" -u -m ascent.run
     "--config-name=eval_ascent_${DATASET}.yaml"
@@ -333,7 +319,9 @@ run_unit() {
   {
     echo source_commit=$SOURCE_COMMIT
     echo manifest_sha256=$MANIFEST_SHA256
-    echo condition=B2
+    echo condition=GT_SUBMAP
+    echo policy_pose_source=habitat_ground_truth
+    echo zhao_checkpoint_loaded=0
     echo method_version=submap_v1.2
     echo handoff_enabled=1
     echo exhaustion_recovery_enabled=1
@@ -344,7 +332,7 @@ run_unit() {
     echo attempt_priority=$priority
   } > "$unit_dir/code_provenance.txt"
 
-  echo "unit_start priority=$priority condition=B2 chunk=$chunk_id time=$(date -Is)" \
+  echo "unit_start priority=$priority condition=GT_SUBMAP chunk=$chunk_id time=$(date -Is)" \
     | tee -a "$RUN_ROOT/driver.log"
   local status
   if (
@@ -384,12 +372,12 @@ run_unit() {
   elif [ "$ve" -ne "$expected" ]; then
     terminal_class=incomplete_diagnostics
   fi
-  printf '%s,screen,B2,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+  printf '%s,screen,GT_SUBMAP,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
     "$priority" "$chunk_id" "$expected" "$status" "$post_health" \
     "$terminal_class" "$vm" "$vs" "$ve" "$vt" "$vp" "$vu" \
     "$sm" "$sr" "$se" "$sv" "$sp" "$su" "$vo_diagnostics" \
     "$submap_diagnostics" "$identity_path" "$unit_dir/run.log" >> "$INVENTORY"
-  echo "unit_end priority=$priority condition=B2 chunk=$chunk_id status=$status class=$terminal_class ends=$ve time=$(date -Is)" \
+  echo "unit_end priority=$priority condition=GT_SUBMAP chunk=$chunk_id status=$status class=$terminal_class ends=$ve time=$(date -Is)" \
     | tee -a "$RUN_ROOT/driver.log"
   case "$terminal_class" in
     complete) return 0 ;;
@@ -428,7 +416,7 @@ if [ "${#FAILED_UNITS[@]}" -gt 0 ]; then
     case "$result" in
       0) ;;
       42|44)
-        echo "technical_retry_exhausted=B2:$failed"
+        echo "technical_retry_exhausted=GT_SUBMAP:$failed"
         if [ "$MODE" = smoke ]; then exit "$result"; fi
         ;;
       *) exit "$result" ;;

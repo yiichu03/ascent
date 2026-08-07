@@ -1363,12 +1363,16 @@ def test_v1_1_harness_is_b2_only_fixed_and_placement_gated() -> None:
 def test_v1_2_harness_enables_both_bounded_mechanisms() -> None:
     worker = (ROOT / "pbs" / "run_submap_v1_2_lane.sh").read_text()
     controller = (
-        ROOT / "pbs" / "run_submap_v1_2_3shared.pbs"
+        ROOT / "pbs" / "run_submap_v1_2_official_val_3shared.pbs"
     ).read_text()
-    submitter = (ROOT / "pbs" / "submit_submap_v1_2.sh").read_text()
+    submitter = (
+        ROOT / "pbs" / "submit_submap_v1_2_official_val.sh"
+    ).read_text()
 
-    assert "external/ascent_vo_submap_v1_2" in worker
-    assert "condition=B2" in worker and "condition=B1" not in worker
+    assert "external/ascent_gt_submap_v1_2" in worker
+    assert "condition=GT_SUBMAP" in worker and "condition=B1" not in worker
+    assert "pose_source=habitat_ground_truth" in worker
+    assert "zhao_checkpoint_loaded=0" in worker
     assert '"ascent_submaps.handoff_enabled=true"' in worker
     assert (
         '"ascent_submaps.exhaustion_recovery_enabled=true"' in worker
@@ -1389,14 +1393,13 @@ def test_v1_2_harness_enables_both_bounded_mechanisms() -> None:
     assert (
         'if [ "${#FAILED_UNITS[@]}" -gt 0 ]; then' in worker
     )
-    assert "technical_retry_exhausted=B2" in worker
+    assert "technical_retry_exhausted=GT_SUBMAP" in worker
     assert (
-        "placement_gate_technical_retry=one_fixed_per_failed_unit"
+        "technical_retry_policy=one_fixed_retry_per_failed_unit"
         in controller
     )
     assert '"fixed_technical_retry_per_failed_unit": 1' in submitter
-    assert "artifacts/objectnav/submap_v1_2" in submitter
-    assert "artifacts/objectnav/submap_v1/manifests" in submitter
+    assert "artifacts/objectnav/gt_submap_v1_2" in submitter
     assert "/scratch/e1538633/liuyi/submap_v1_2" not in (
         worker + controller + submitter
     )
