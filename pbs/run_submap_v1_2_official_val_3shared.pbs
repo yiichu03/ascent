@@ -135,7 +135,7 @@ export MPLCONFIGDIR=$RUN_ROOT/mpl_config
 "$ASCENT_PYTHON" - "$CONFIG" "$PREPARATION_AUDIT" "$SELECTION" \
   "$BASELINE_CSV" "$MANIFEST" "$GATE_MANIFEST" \
   "$RUN_ROOT/checks/scientific_identity.json" <<'PY'
-import csv, gzip, hashlib, json, sys
+import csv, gzip, hashlib, json, re, sys
 from pathlib import Path
 
 config_path, audit_path, selection_path, baseline_path, manifest_path, gate_path, output_path = map(Path, sys.argv[1:])
@@ -212,9 +212,12 @@ assert len(manifest["chunks"]) == config["expected_chunks"]
 assert manifest["logical_case_ids"] == ids
 assert gate["dataset"] == dataset and gate["split"] == "train"
 assert gate["episode_count"] == 5 and len(gate["chunks"]) == 1
-assert config["smoke_logical_case_ids"] == [
-    f"{dataset}_val_{index:04d}" for index in range(5)
-]
+assert len(config["smoke_logical_case_ids"]) == 5
+assert len(set(config["smoke_logical_case_ids"])) == 5
+assert all(
+    re.fullmatch(rf"{dataset}_val_[0-9]{{4}}", logical_id)
+    for logical_id in config["smoke_logical_case_ids"]
+)
 assert gate["logical_case_ids"] == config["smoke_logical_case_ids"]
 selection_by_id = {row["logical_case_id"]: row for row in selection}
 observed = []

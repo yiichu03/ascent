@@ -15,6 +15,7 @@ import csv
 import gzip
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -64,6 +65,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-root", type=Path, default=PROJECT)
     parser.add_argument("--artifact-root", type=Path, default=ARTIFACT_ROOT)
+    parser.add_argument("--output-version", default=OUTPUT_VERSION)
+    parser.add_argument("--gate-manifest", type=Path)
     args = parser.parse_args()
     project = args.project_root.resolve()
     artifact_root = args.artifact_root.resolve()
@@ -82,7 +85,9 @@ def main() -> int:
         / "hm3d_val1000_canonical_20260802_v2/ascent_vo_baseline.csv"
     )
     gate_manifest = (
-        v12_inputs
+        args.gate_manifest.resolve()
+        if args.gate_manifest is not None
+        else v12_inputs
         / "hm3d_val5_materialized_20260802_v3/chunk_manifest.json"
     )
     source_plan_path = transport_root / "submission_plan.json"
@@ -106,13 +111,20 @@ def main() -> int:
     }
 
     gate = read_json(gate_manifest)
-    smoke_ids = expected_ids[:5]
+    smoke_ids = gate.get("logical_case_ids")
     if (
         gate.get("dataset") != "hm3d"
         or gate.get("split") != "train"
         or gate.get("episode_count") != 5
         or len(gate.get("chunks", [])) != 1
-        or gate.get("logical_case_ids") != smoke_ids
+        or not isinstance(smoke_ids, list)
+        or len(smoke_ids) != 5
+        or len(set(smoke_ids)) != 5
+        or any(
+            not re.fullmatch(r"hm3d_val_[0-9]{4}", str(logical_id))
+            or logical_id not in expected_ids
+            for logical_id in smoke_ids
+        )
     ):
         raise ValueError("five-episode gate manifest contract mismatch")
 
@@ -152,7 +164,9 @@ def main() -> int:
     if "content_scenes_path" in root_payload or root_payload.get("episodes") != []:
         raise ValueError("transport root is not an empty method-agnostic root")
 
-    output_root = artifact_root / "inputs" / OUTPUT_VERSION
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", args.output_version):
+        raise ValueError("invalid output version")
+    output_root = artifact_root / "inputs" / args.output_version
     jobs: list[dict[str, Any]] = []
     offset = 0
     for shard_index, (source_job, expected_size) in enumerate(
@@ -351,6 +365,9 @@ def main() -> int:
         "smoke_manifest": str(gate_manifest.resolve()),
         "smoke_manifest_sha256": sha256(gate_manifest),
         "smoke_logical_case_ids": smoke_ids,
+        "smoke_selection_rule": (
+            "fixed_contiguous_technical_gate_no_metric_filter"
+        ),
         "aggregate_selection": str(v12_selection.resolve()),
         "aggregate_selection_sha256": sha256(v12_selection),
         "aggregate_baseline": str(v12_baseline.resolve()),

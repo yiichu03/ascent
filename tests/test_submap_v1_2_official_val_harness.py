@@ -28,6 +28,7 @@ def test_preparer_reuses_frozen_prefix_without_copying_transport() -> None:
         '"pose_source": "habitat_ground_truth"',
         '"transport_files_copied": False',
         '"metrics_used_for_selection": False',
+        '"fixed_contiguous_technical_gate_no_metric_filter"',
     ):
         assert contract in text
 

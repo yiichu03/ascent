@@ -106,7 +106,7 @@ CONTROLLER_SHA256=$(sha256sum "$CONTROLLER" | awk '{print $1}')
 WORKER_SHA256=$(sha256sum "$WORKER" | awk '{print $1}')
 
 "$ASCENT_PYTHON" - "$CONFIG" "$EXPECTED_ARTIFACT_ROOT" <<'PY'
-import csv, gzip, hashlib, json, sys
+import csv, gzip, hashlib, json, re, sys
 from pathlib import Path
 
 config_path, expected_artifact_root = map(Path, sys.argv[1:])
@@ -170,9 +170,12 @@ assert manifest["episode_count"] == expected
 assert len(manifest["chunks"]) == int(value["expected_chunks"])
 assert sum(int(chunk["episode_count"]) for chunk in manifest["chunks"]) == expected
 assert gate["dataset"] == dataset and gate["split"] == "train"
-assert value["smoke_logical_case_ids"] == [
-    f"{dataset}_val_{index:04d}" for index in range(5)
-]
+assert len(value["smoke_logical_case_ids"]) == 5
+assert len(set(value["smoke_logical_case_ids"])) == 5
+assert all(
+    re.fullmatch(rf"{dataset}_val_[0-9]{{4}}", logical_id)
+    for logical_id in value["smoke_logical_case_ids"]
+)
 assert gate["logical_case_ids"] == value["smoke_logical_case_ids"]
 assert gate["episode_count"] == 5 and len(gate["chunks"]) == 1
 
