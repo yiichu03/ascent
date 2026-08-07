@@ -212,7 +212,10 @@ assert len(manifest["chunks"]) == config["expected_chunks"]
 assert manifest["logical_case_ids"] == ids
 assert gate["dataset"] == dataset and gate["split"] == "train"
 assert gate["episode_count"] == 5 and len(gate["chunks"]) == 1
-assert gate["logical_case_ids"] == ids[:5]
+assert config["smoke_logical_case_ids"] == [
+    f"{dataset}_val_{index:04d}" for index in range(5)
+]
+assert gate["logical_case_ids"] == config["smoke_logical_case_ids"]
 selection_by_id = {row["logical_case_id"]: row for row in selection}
 observed = []
 for chunk in manifest["chunks"]:

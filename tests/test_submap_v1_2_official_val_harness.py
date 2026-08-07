@@ -23,8 +23,8 @@ def load_preparer():
 def test_preparer_reuses_frozen_prefix_without_copying_transport() -> None:
     text = PREPARER.read_text(encoding="utf-8")
     for contract in (
-        '"expected_episodes": 1000',
-        '"expected_chunks": 50',
+        "SHARD_SIZES = (334, 333, 333)",
+        '"expected_episodes": expected_size',
         '"pose_source": "habitat_ground_truth"',
         '"transport_files_copied": False',
         '"metrics_used_for_selection": False',
@@ -50,6 +50,7 @@ def test_controller_enforces_scientific_and_technical_boundaries() -> None:
         'config["metric_driven_retry"] is False',
         "placement_gate_failed",
         "ASCENT_GT_SUBMAP_V12_SMOKE_ONLY",
+        'config["smoke_logical_case_ids"]',
         "historical_b1_matched_episodes",
         "source_worktree_not_clean",
     ):
@@ -65,6 +66,7 @@ def test_submitter_is_fail_closed_and_supports_no_qsub() -> None:
         "canonical_official_val_prefix_no_metric_filter",
         "metrics_used_for_selection",
         '"pose_source": "habitat_ground_truth"',
+        'value["smoke_logical_case_ids"]',
         '"smoke_only"',
         "qsub_executed",
     ):

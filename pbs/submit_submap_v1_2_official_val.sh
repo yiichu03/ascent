@@ -170,7 +170,10 @@ assert manifest["episode_count"] == expected
 assert len(manifest["chunks"]) == int(value["expected_chunks"])
 assert sum(int(chunk["episode_count"]) for chunk in manifest["chunks"]) == expected
 assert gate["dataset"] == dataset and gate["split"] == "train"
-assert gate["logical_case_ids"] == ids[:5]
+assert value["smoke_logical_case_ids"] == [
+    f"{dataset}_val_{index:04d}" for index in range(5)
+]
+assert gate["logical_case_ids"] == value["smoke_logical_case_ids"]
 assert gate["episode_count"] == 5 and len(gate["chunks"]) == 1
 
 audit = json.load(open(value["preparation_audit"], encoding="utf-8"))
