@@ -37,6 +37,7 @@ from ascent.llm_planner import Ascent_LLM_Planner
 from ascent.map_controller import Map_Controller
 from ascent.submaps import (
     BoundaryHandoff,
+    confirm_handoff_with_live_frontiers,
     DepthGeometryFrame,
     ExhaustionRecovery,
     SubmapDiagnosticsWriter,
@@ -276,6 +277,16 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             _submap_config_value(config, "handoff_enabled", False),
             "handoff_enabled",
         )
+        self._submap_handoff_live_frontier_confirmation_enabled = (
+            _as_config_bool(
+                _submap_config_value(
+                    config,
+                    "handoff_live_frontier_confirmation_enabled",
+                    False,
+                ),
+                "handoff_live_frontier_confirmation_enabled",
+            )
+        )
         self._submap_exhaustion_recovery_enabled = _as_config_bool(
             _submap_config_value(
                 config, "exhaustion_recovery_enabled", False
@@ -285,10 +296,19 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         if (
             self._submap_handoff_enabled
             or self._submap_exhaustion_recovery_enabled
+            or self._submap_handoff_live_frontier_confirmation_enabled
         ) and not self._submap_enabled:
             raise RuntimeError(
                 "ASCENT submap continuity features require "
                 "ascent_submaps.enabled=true"
+            )
+        if (
+            self._submap_handoff_live_frontier_confirmation_enabled
+            and not self._submap_handoff_enabled
+        ):
+            raise RuntimeError(
+                "live-frontier confirmation requires "
+                "ascent_submaps.handoff_enabled=true"
             )
         allow_provisional = _as_config_bool(
             _submap_config_value(
@@ -390,11 +410,19 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     "split_contract": "vo_anchor_and_rgbd_overlap_joint",
                     "fallback_contract": "ascent_local_first_persistent_route",
                     "handoff_enabled": self._submap_handoff_enabled,
+                    "handoff_live_frontier_confirmation_enabled": (
+                        self._submap_handoff_live_frontier_confirmation_enabled
+                    ),
                     "exhaustion_recovery_enabled": (
                         self._submap_exhaustion_recovery_enabled
                     ),
                     "continuity_contract": (
                         "single_connected_handoff_and_one_shot_360_recovery"
+                    ),
+                    "handoff_live_frontier_confirmation_contract": (
+                        "destination_live_frontier_ray_corridor_regrounding"
+                        if self._submap_handoff_live_frontier_confirmation_enabled
+                        else "disabled"
                     ),
                     "config": {
                         key: getattr(self._submap_config, key)
@@ -959,6 +987,64 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             self._observations_cache[env]["robot_xy"], dtype=np.float64
         )
         obstacle_map = self._map_controller._obstacle_map[env]
+        if (
+            getattr(
+                self,
+                "_submap_handoff_live_frontier_confirmation_enabled",
+                False,
+            )
+            and handoff.live_frontier_confirmation_pending
+        ):
+            previous_waypoint = handoff.waypoint_local.copy()
+            confirmation = confirm_handoff_with_live_frontiers(
+                obstacle_map,
+                robot_xy=robot_xy,
+                ray_origin_xy=handoff.ray_origin_local,
+                inherited_target_xy=handoff.inherited_target_local,
+                corridor_radius_m=(
+                    self._submap_config.gateway_frontier_resolution_radius_m
+                ),
+            )
+            event_payload = confirmation.event_payload()
+            event_payload.update(
+                {
+                    "source_submap_id": handoff.source_submap_id,
+                    "destination_submap_id": handoff.destination_submap_id,
+                    "ray_origin_local": handoff.ray_origin_local.tolist(),
+                    "inherited_target_local": (
+                        handoff.inherited_target_local.tolist()
+                    ),
+                    "preconfirmation_waypoint_local": (
+                        previous_waypoint.tolist()
+                    ),
+                }
+            )
+            if confirmation.waypoint_local is None:
+                self._record_submap_policy_event(
+                    env,
+                    "handoff_live_frontier_rejected",
+                    **event_payload,
+                )
+                self._cancel_handoff(
+                    env,
+                    f"live_frontier_confirmation_{confirmation.reason}",
+                )
+                return None
+            confirmed_waypoint = np.asarray(
+                confirmation.waypoint_local, dtype=np.float64
+            ).copy()
+            handoff.waypoint_local = confirmed_waypoint
+            handoff.reference_distance_m = float(
+                np.linalg.norm(confirmed_waypoint - robot_xy)
+            )
+            handoff.stagnation_decisions = 0
+            handoff.live_frontier_confirmation_pending = False
+            self.cur_frontier[env] = confirmed_waypoint.copy()
+            self._record_submap_policy_event(
+                env,
+                "handoff_live_frontier_confirmed",
+                **event_payload,
+            )
         if not waypoint_in_robot_component(
             obstacle_map,
             robot_xy=robot_xy,
@@ -1233,6 +1319,13 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     turns_remaining=state.turns_remaining,
                 )
             elif handoff_frontier is not None:
+                live_confirmation_enabled = bool(
+                    getattr(
+                        self,
+                        "_submap_handoff_live_frontier_confirmation_enabled",
+                        False,
+                    )
+                )
                 replayed_frames = replay_depth_geometry(
                     self._submap_depth_frames[env],
                     source_anchor_world=old_bundle.anchor_pose_world,
@@ -1263,6 +1356,19 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                         reference_distance_m=float(
                             np.linalg.norm(waypoint)
                         ),
+                        live_frontier_confirmation_pending=(
+                            live_confirmation_enabled
+                        ),
+                        ray_origin_local=(
+                            np.zeros(2, dtype=np.float64)
+                            if live_confirmation_enabled
+                            else None
+                        ),
+                        inherited_target_local=(
+                            transformed_frontier
+                            if live_confirmation_enabled
+                            else None
+                        ),
                     )
                     self._last_goal[env] = waypoint.copy()
                     self.cur_frontier[env] = waypoint.copy()
@@ -1273,6 +1379,17 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                         destination_submap_id=new_bundle.submap_id,
                         waypoint_local=waypoint.tolist(),
                         replayed_depth_frames=replayed_frames,
+                        **(
+                            {
+                                "live_frontier_confirmation_pending": True,
+                                "ray_origin_local": [0.0, 0.0],
+                                "inherited_target_local": (
+                                    transformed_frontier.tolist()
+                                ),
+                            }
+                            if live_confirmation_enabled
+                            else {}
+                        ),
                     )
                 else:
                     self._record_submap_policy_event(

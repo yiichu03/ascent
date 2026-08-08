@@ -15,10 +15,12 @@ from ascent.submaps import (
     MapPayload,
     SubmapLifecycleConfig,
     SubmapManager,
+    confirm_handoff_with_live_frontiers,
     select_connected_handoff_waypoint,
     transform_camera_to_destination,
     waypoint_in_robot_component,
 )
+from constants import MOVE_FORWARD
 
 
 def _map() -> ObstacleMap:
@@ -37,6 +39,60 @@ def _payload() -> MapPayload:
         value_map=SimpleNamespace(),
         object_map=SimpleNamespace(),
     )
+
+
+def _mark_connected_region(
+    obstacle: ObstacleMap, points: list[np.ndarray]
+) -> None:
+    pixels = obstacle._xy_to_px(np.asarray(points, dtype=np.float64))
+    x0 = max(0, int(np.min(pixels[:, 0])) - 1)
+    x1 = min(obstacle.explored_area.shape[1], int(np.max(pixels[:, 0])) + 2)
+    y0 = max(0, int(np.min(pixels[:, 1])) - 1)
+    y1 = min(obstacle.explored_area.shape[0], int(np.max(pixels[:, 1])) + 2)
+    obstacle.explored_area[y0:y1, x0:x1] = True
+    obstacle._strict_navigable_map[y0:y1, x0:x1] = True
+
+
+def _policy_for_handoff_execution(
+    obstacle: ObstacleMap,
+    handoff: BoundaryHandoff,
+    *,
+    live_confirmation_enabled: bool,
+) -> tuple[Ascent_Policy, list[tuple[str, dict]], list[np.ndarray]]:
+    policy = object.__new__(Ascent_Policy)
+    policy._submap_handoff = [handoff]
+    policy._submap_handoff_live_frontier_confirmation_enabled = (
+        live_confirmation_enabled
+    )
+    policy._submap_config = SubmapLifecycleConfig(enabled=True)
+    policy._observations_cache = [{"robot_xy": np.zeros(2)}]
+    policy._map_controller = SimpleNamespace(_obstacle_map=[obstacle])
+    policy._pointnav_stop_radius = 0.2
+    policy._last_goal = [handoff.waypoint_local.copy()]
+    policy.cur_frontier = [handoff.waypoint_local.copy()]
+    events: list[tuple[str, dict]] = []
+    targets: list[np.ndarray] = []
+
+    def record(_env: int, event: str, **payload: object) -> None:
+        events.append((event, dict(payload)))
+
+    def pointnav(
+        _observations: object,
+        target: np.ndarray,
+        *,
+        stop: bool,
+        env: int,
+        stop_radius: float,
+    ) -> torch.Tensor:
+        assert not stop
+        assert env == 0
+        assert stop_radius == policy._pointnav_stop_radius
+        targets.append(np.asarray(target, dtype=np.float64).copy())
+        return torch.tensor([MOVE_FORWARD], dtype=torch.int64)
+
+    policy._record_submap_policy_event = record
+    policy._pointnav = pointnav
+    return policy, events, targets
 
 
 def test_camera_replay_uses_only_relative_vo_anchors() -> None:
@@ -129,6 +185,177 @@ def test_handoff_stuck_guard_reuses_frozen_ascent_constants() -> None:
         progress_threshold_m=0.3,
         max_stagnation_decisions=20,
     )
+
+
+def test_live_frontier_confirmation_retargets_deterministically() -> None:
+    obstacle = _map()
+    robot = np.array([0.0, 0.0])
+    target = np.array([3.0, 0.0])
+    lower_tie = np.array([2.8, -0.1])
+    upper_tie = np.array([2.8, 0.1])
+    obstacle.frontiers = np.vstack(
+        [np.zeros(2), upper_tie, np.array([2.4, 0.2]), lower_tie]
+    )
+    _mark_connected_region(
+        obstacle, [robot, target, lower_tie, upper_tie]
+    )
+
+    result = confirm_handoff_with_live_frontiers(
+        obstacle,
+        robot_xy=robot,
+        ray_origin_xy=np.zeros(2),
+        inherited_target_xy=target,
+        corridor_radius_m=1.0,
+    )
+
+    assert result.reason == "confirmed"
+    np.testing.assert_allclose(result.waypoint_local, lower_tie)
+    assert result.raw_candidate_count == 4
+    assert result.live_candidate_count == 3
+    assert result.corridor_candidate_count == 3
+
+
+def test_live_frontier_confirmation_filters_disabled_candidate() -> None:
+    obstacle = _map()
+    robot = np.array([0.0, 0.0])
+    disabled = np.array([2.9, 0.0])
+    enabled = np.array([2.5, 0.2])
+    obstacle.frontiers = np.vstack([disabled, enabled])
+    obstacle._disabled_frontiers.add(tuple(disabled))
+    _mark_connected_region(obstacle, [robot, disabled, enabled])
+
+    result = confirm_handoff_with_live_frontiers(
+        obstacle,
+        robot_xy=robot,
+        ray_origin_xy=np.zeros(2),
+        inherited_target_xy=np.array([3.0, 0.0]),
+        corridor_radius_m=1.0,
+    )
+
+    assert result.reason == "confirmed"
+    assert result.enabled_candidate_count == 1
+    np.testing.assert_allclose(result.waypoint_local, enabled)
+
+
+def test_live_frontier_confirmation_rejects_disconnected_candidate() -> None:
+    obstacle = _map()
+    robot = np.array([0.0, 0.0])
+    candidate = np.array([2.0, 0.0])
+    obstacle.frontiers = candidate.reshape(1, 2)
+    robot_px, candidate_px = obstacle._xy_to_px(
+        np.vstack([robot, candidate])
+    )
+    for pixel in (robot_px, candidate_px):
+        x, y = int(pixel[0]), int(pixel[1])
+        obstacle.explored_area[y - 1 : y + 2, x - 1 : x + 2] = True
+        obstacle._strict_navigable_map[
+            y - 1 : y + 2, x - 1 : x + 2
+        ] = True
+
+    result = confirm_handoff_with_live_frontiers(
+        obstacle,
+        robot_xy=robot,
+        ray_origin_xy=np.zeros(2),
+        inherited_target_xy=np.array([3.0, 0.0]),
+        corridor_radius_m=1.0,
+    )
+
+    assert result.waypoint_local is None
+    assert result.reason == "no_connected_frontiers"
+    assert result.connected_candidate_count == 0
+
+
+def test_handoff_flag_off_keeps_v1_2_waypoint_without_live_frontier() -> None:
+    obstacle = _map()
+    old_waypoint = np.array([1.5, 0.0])
+    obstacle.frontiers = np.zeros((1, 2), dtype=np.float64)
+    _mark_connected_region(obstacle, [np.zeros(2), old_waypoint])
+    handoff = BoundaryHandoff(
+        waypoint_local=old_waypoint,
+        source_submap_id="old",
+        destination_submap_id="new",
+        created_step=10,
+        reference_distance_m=1.5,
+    )
+    policy, events, targets = _policy_for_handoff_execution(
+        obstacle, handoff, live_confirmation_enabled=False
+    )
+
+    action = policy._execute_handoff(
+        {}, 0, torch.ones((1, 1), dtype=torch.bool)
+    )
+
+    assert action is not None and action.item() == MOVE_FORWARD
+    np.testing.assert_allclose(targets, [old_waypoint])
+    assert [event for event, _ in events] == ["handoff_action"]
+
+
+def test_handoff_confirms_and_executes_retarget_in_same_decision() -> None:
+    obstacle = _map()
+    inherited_target = np.array([3.0, 0.0])
+    live_frontier = np.array([2.6, 0.2])
+    obstacle.frontiers = live_frontier.reshape(1, 2)
+    _mark_connected_region(
+        obstacle, [np.zeros(2), inherited_target, live_frontier]
+    )
+    handoff = BoundaryHandoff(
+        waypoint_local=np.array([1.2, 0.0]),
+        source_submap_id="old",
+        destination_submap_id="new",
+        created_step=10,
+        reference_distance_m=1.2,
+        live_frontier_confirmation_pending=True,
+        ray_origin_local=np.zeros(2),
+        inherited_target_local=inherited_target,
+    )
+    policy, events, targets = _policy_for_handoff_execution(
+        obstacle, handoff, live_confirmation_enabled=True
+    )
+
+    action = policy._execute_handoff(
+        {}, 0, torch.ones((1, 1), dtype=torch.bool)
+    )
+
+    assert action is not None and action.item() == MOVE_FORWARD
+    np.testing.assert_allclose(targets, [live_frontier])
+    assert not handoff.live_frontier_confirmation_pending
+    assert [event for event, _ in events] == [
+        "handoff_live_frontier_confirmed",
+        "handoff_action",
+    ]
+
+
+def test_handoff_rejection_returns_control_without_pointnav_action() -> None:
+    obstacle = _map()
+    old_waypoint = np.array([1.2, 0.0])
+    obstacle.frontiers = np.zeros((1, 2), dtype=np.float64)
+    _mark_connected_region(obstacle, [np.zeros(2), old_waypoint])
+    handoff = BoundaryHandoff(
+        waypoint_local=old_waypoint,
+        source_submap_id="old",
+        destination_submap_id="new",
+        created_step=10,
+        reference_distance_m=1.2,
+        live_frontier_confirmation_pending=True,
+        ray_origin_local=np.zeros(2),
+        inherited_target_local=np.array([3.0, 0.0]),
+    )
+    policy, events, targets = _policy_for_handoff_execution(
+        obstacle, handoff, live_confirmation_enabled=True
+    )
+
+    action = policy._execute_handoff(
+        {}, 0, torch.ones((1, 1), dtype=torch.bool)
+    )
+
+    assert action is None
+    assert policy._submap_handoff[0] is None
+    assert targets == []
+    assert [event for event, _ in events] == [
+        "handoff_live_frontier_rejected",
+        "handoff_cancelled",
+    ]
+    assert events[0][1]["reason"] == "no_live_frontiers"
 
 
 def test_exhaustion_recovery_is_one_shot_and_counts_first_turn() -> None:
