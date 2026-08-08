@@ -282,9 +282,16 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             ),
             "exhaustion_recovery_enabled",
         )
+        self._submap_route_gateway_replan_enabled = _as_config_bool(
+            _submap_config_value(
+                config, "route_gateway_replan_enabled", False
+            ),
+            "route_gateway_replan_enabled",
+        )
         if (
             self._submap_handoff_enabled
             or self._submap_exhaustion_recovery_enabled
+            or self._submap_route_gateway_replan_enabled
         ) and not self._submap_enabled:
             raise RuntimeError(
                 "ASCENT submap continuity features require "
@@ -393,8 +400,16 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     "exhaustion_recovery_enabled": (
                         self._submap_exhaustion_recovery_enabled
                     ),
+                    "route_gateway_replan_enabled": (
+                        self._submap_route_gateway_replan_enabled
+                    ),
                     "continuity_contract": (
                         "single_connected_handoff_and_one_shot_360_recovery"
+                    ),
+                    "route_execution_contract": (
+                        "gateway_only_then_native_local_replan"
+                        if self._submap_route_gateway_replan_enabled
+                        else "persistent_remote_route"
                     ),
                     "config": {
                         key: getattr(self._submap_config, key)
@@ -1443,6 +1458,22 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         route = self._submap_remote_route[env]
         if route is None:
             return
+        if (
+            getattr(self, "_submap_route_gateway_replan_enabled", False)
+            and route.awaiting_local_replan
+            and outcome == "preempted_by_local_detection"
+        ):
+            self._record_submap_policy_event(
+                env,
+                "remote_route_gateway_replan_preempted",
+                route_id=route.route_id,
+                target_kind=route.target_kind,
+                candidate_key=route.candidate_key,
+                destination_submap_id=route.destination_submap_id,
+                frontier_id=route.frontier_id,
+                waypoint_index=int(route.cursor),
+                outcome=str(outcome),
+            )
         if route.frontier_id is not None:
             registry = self._submap_manager.registry(env)
             if registry.get(route.frontier_id).eligible:
@@ -1463,6 +1494,54 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         )
         self._submap_remote_route[env] = None
 
+    def _expose_remote_route_local_replan(self, env: int) -> None:
+        """Audit the first native ASCENT decision after a gateway pause."""
+
+        route = self._submap_remote_route[env]
+        if (
+            route is None
+            or not getattr(
+                self, "_submap_route_gateway_replan_enabled", False
+            )
+            or not route.expose_local_replan()
+        ):
+            return
+        self._record_submap_policy_event(
+            env,
+            "remote_route_gateway_local_replan",
+            route_id=route.route_id,
+            target_kind=route.target_kind,
+            candidate_key=route.candidate_key,
+            destination_submap_id=route.destination_submap_id,
+            frontier_id=route.frontier_id,
+            waypoint_index=int(route.cursor),
+        )
+
+    def _resume_remote_route_after_local_replan(self, env: int) -> None:
+        """Resume only when native exploration reaches remote fallback."""
+
+        route = self._submap_remote_route[env]
+        if (
+            route is None
+            or not getattr(
+                self, "_submap_route_gateway_replan_enabled", False
+            )
+            or not route.awaiting_local_replan
+        ):
+            return
+        route.resume_after_local_replan()
+        self._record_submap_policy_event(
+            env,
+            "remote_route_gateway_replan_resumed",
+            route_id=route.route_id,
+            target_kind=route.target_kind,
+            candidate_key=route.candidate_key,
+            destination_submap_id=route.destination_submap_id,
+            frontier_id=route.frontier_id,
+            waypoint_index=int(route.cursor),
+            reason="native_no_frontier_remote_fallback",
+        )
+
     def _execute_remote_route(
         self,
         observations: Union[Dict[str, Tensor], "TensorDict"],
@@ -1471,6 +1550,11 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
     ) -> Optional[Tensor]:
         route = self._submap_remote_route[env]
         if route is None:
+            return None
+        if (
+            getattr(self, "_submap_route_gateway_replan_enabled", False)
+            and route.awaiting_local_replan
+        ):
             return None
         graph = self._submap_manager.graph(env)
         active = self._submap_manager.active_bundle(env)
@@ -1502,7 +1586,29 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 edge_id=waypoint.edge_id,
                 distance_m=distance,
             )
+            reached_waypoint_index = int(route.cursor)
             route.reach_current_waypoint(graph, robot_xy)
+            if (
+                getattr(
+                    self, "_submap_route_gateway_replan_enabled", False
+                )
+                and waypoint.kind == "gateway"
+                and not route.complete
+            ):
+                route.pause_for_local_replan()
+                self._record_submap_policy_event(
+                    env,
+                    "remote_route_gateway_replan_paused",
+                    route_id=route.route_id,
+                    target_kind=route.target_kind,
+                    candidate_key=route.candidate_key,
+                    destination_submap_id=route.destination_submap_id,
+                    frontier_id=route.frontier_id,
+                    reached_waypoint_index=reached_waypoint_index,
+                    next_waypoint_index=int(route.cursor),
+                    edge_id=waypoint.edge_id,
+                )
+                return None
 
         if route.complete:
             self._finish_remote_route(env, outcome="destination_reached")
@@ -1615,6 +1721,7 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         if not self._submap_enabled:
             return None
         if self._submap_remote_route[env] is not None:
+            self._resume_remote_route_after_local_replan(env)
             return self._execute_remote_route(observations, env, masks)
         action = self._submap_remote_semantic_action(
             observations, env, masks
@@ -1884,6 +1991,7 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                             observations, env, masks
                         )
                         if pointnav_action is None:
+                            self._expose_remote_route_local_replan(env)
                             mode = "explore_after_remote_route"
                             pointnav_action = self._explore(
                                 observations, env, masks

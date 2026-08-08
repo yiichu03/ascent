@@ -43,6 +43,8 @@ class RemoteRoute:
     waypoint_stagnation_count: int = 0
     best_waypoint_distance_m: float = np.inf
     execution_submap_id: Optional[str] = None
+    awaiting_local_replan: bool = False
+    local_replan_exposed: bool = False
     owner_to_execution_transform: np.ndarray = field(
         default_factory=lambda: np.eye(3, dtype=np.float64)
     )
@@ -127,6 +129,34 @@ class RemoteRoute:
         self.waypoint_action_count = 0
         self.waypoint_stagnation_count = 0
         self.best_waypoint_distance_m = np.inf
+
+    def pause_for_local_replan(self) -> None:
+        """Pause after one gateway without completing the remote route."""
+
+        if self.complete:
+            raise RuntimeError(
+                f"Route {self.route_id} cannot pause after completion"
+            )
+        self.awaiting_local_replan = True
+        self.local_replan_exposed = False
+
+    def expose_local_replan(self) -> bool:
+        """Record the first native-planner handoff for the current pause."""
+
+        if not self.awaiting_local_replan or self.local_replan_exposed:
+            return False
+        self.local_replan_exposed = True
+        return True
+
+    def resume_after_local_replan(self) -> None:
+        """Resume the next route segment after local evidence is exhausted."""
+
+        if not self.awaiting_local_replan:
+            raise RuntimeError(
+                f"Route {self.route_id} is not awaiting local replanning"
+            )
+        self.awaiting_local_replan = False
+        self.local_replan_exposed = False
 
     def project_current_waypoint(self) -> np.ndarray:
         """Project the current point using only the route's local alignment."""
