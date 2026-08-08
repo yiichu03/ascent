@@ -1573,6 +1573,9 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 continue
             try:
                 source = graph.get_node(record.source_submap_id)
+                negative_support = graph.get_node(
+                    str(record.negative_support_submap_id)
+                )
                 boundary_path = graph.shortest_path(
                     str(record.negative_support_submap_id),
                     active.submap_id,
@@ -1608,7 +1611,11 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     <= radius
                 )
             )
-            same_floor = source.floor_id == active.floor_id
+            source_active_same_floor = source.floor_id == active.floor_id
+            negative_same_floor = (
+                negative_support.floor_id == active.floor_id
+            )
+            same_floor = source_active_same_floor and negative_same_floor
             single_boundary = len(boundary_path) == 2
             negative_evidence = (
                 independent and candidate_connected and not live_support
@@ -1648,10 +1655,17 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     frontier_id=record.frontier_id,
                     reason=(
                         "source_floor_mismatch"
-                        if not same_floor
-                        else "outside_single_boundary_confirmation"
+                        if not source_active_same_floor
+                        else (
+                            "negative_support_floor_mismatch"
+                            if not negative_same_floor
+                            else "outside_single_boundary_confirmation"
+                        )
                     ),
                     source_floor_id=int(source.floor_id),
+                    negative_support_floor_id=int(
+                        negative_support.floor_id
+                    ),
                     active_floor_id=int(active.floor_id),
                     negative_to_active_graph_hops=(
                         len(boundary_path) - 1
