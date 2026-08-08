@@ -1558,6 +1558,7 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         registry = manager.registry(env)
         view = manager.query_view(env)
         active = manager.active_bundle(env)
+        graph = manager.graph(env)
         robot_xy = np.asarray(
             self._observations_cache[env]["robot_xy"], dtype=np.float64
         )
@@ -1571,6 +1572,11 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             if record.negative_support_submap_id == active.submap_id:
                 continue
             try:
+                source = graph.get_node(record.source_submap_id)
+                boundary_path = graph.shortest_path(
+                    str(record.negative_support_submap_id),
+                    active.submap_id,
+                )
                 candidate_xy = view.project_points_to_active(
                     record.source_submap_id,
                     record.local_xy.reshape(1, 2),
@@ -1602,7 +1608,12 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     <= radius
                 )
             )
-            if independent and candidate_connected and not live_support:
+            same_floor = source.floor_id == active.floor_id
+            single_boundary = len(boundary_path) == 2
+            negative_evidence = (
+                independent and candidate_connected and not live_support
+            )
+            if negative_evidence and same_floor and single_boundary:
                 registry.confirm_retired(
                     record.frontier_id,
                     step=self._num_steps[env],
@@ -1630,14 +1641,25 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     confirmation_kind="second_view",
                 )
                 continue
-            if record.reconsideration_count != 0:
-                continue
-            try:
-                boundary_path = manager.graph(env).shortest_path(
-                    str(record.negative_support_submap_id),
-                    active.submap_id,
+            if negative_evidence and not (same_floor and single_boundary):
+                self._record_submap_policy_event(
+                    env,
+                    "frontier_evidence_confirmation_skipped",
+                    frontier_id=record.frontier_id,
+                    reason=(
+                        "source_floor_mismatch"
+                        if not same_floor
+                        else "outside_single_boundary_confirmation"
+                    ),
+                    source_floor_id=int(source.floor_id),
+                    active_floor_id=int(active.floor_id),
+                    negative_to_active_graph_hops=(
+                        len(boundary_path) - 1
+                        if boundary_path
+                        else None
+                    ),
                 )
-            except KeyError:
+            if record.reconsideration_count != 0:
                 continue
             if len(boundary_path) != 2:
                 self._record_submap_policy_event(

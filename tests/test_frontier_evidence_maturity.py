@@ -49,7 +49,9 @@ def _payload(obstacle_map: _ConnectedMap | None = None) -> MapPayload:
 
 
 def _tentative_three_submap_manager(
-    *, active_map: _ConnectedMap | None = None
+    *,
+    active_map: _ConnectedMap | None = None,
+    active_floor: int = 0,
 ) -> tuple[SubmapManager, str]:
     config = SubmapLifecycleConfig(
         enabled=True,
@@ -81,11 +83,13 @@ def _tentative_three_submap_manager(
         step=3,
         reason="no_progress",
     )
-    manager.observe_action_endpoint(0, [4.0, 0.0, 0.0], 0, 0.0)
+    manager.observe_action_endpoint(
+        0, [4.0, 0.0, 0.0], active_floor, 0.0
+    )
     manager.commit_split(
         0,
         [4.0, 0.0, 0.0],
-        0,
+        active_floor,
         _payload(active_map),
         4,
         np.empty((0, 2)),
@@ -184,7 +188,7 @@ def test_route_build_rejection_is_tentative_when_enabled() -> None:
     ]
 
 
-def test_independent_connected_live_denial_confirms_retirement() -> None:
+def test_same_floor_adjacent_live_denial_confirms_retirement() -> None:
     manager, frontier_id = _tentative_three_submap_manager()
     policy, events = _review_policy(manager, robot_xy=np.zeros(2))
 
@@ -198,6 +202,58 @@ def test_independent_connected_live_denial_confirms_retirement() -> None:
         "frontier_evidence_promoted",
         "frontier_evidence_confirmed",
     ]
+
+
+def test_cross_floor_live_denial_remains_tentative() -> None:
+    manager, frontier_id = _tentative_three_submap_manager(active_floor=1)
+    policy, events = _review_policy(manager, robot_xy=np.zeros(2))
+
+    policy._review_tentative_frontiers(0)
+
+    record = manager.registry(0).get(frontier_id)
+    assert record.status is FrontierStatus.TENTATIVE_SUPPRESSION
+    assert not any(
+        event["event"] == "frontier_evidence_confirmed"
+        for event in events
+    )
+    skipped = [
+        event
+        for event in events
+        if event["event"] == "frontier_evidence_confirmation_skipped"
+    ]
+    assert skipped[-1]["reason"] == "source_floor_mismatch"
+
+
+def test_multihop_live_denial_remains_tentative() -> None:
+    manager, frontier_id = _tentative_three_submap_manager()
+    manager.observe_action_endpoint(0, [6.0, 0.0, 0.0], 0, 0.0)
+    manager.commit_split(
+        0,
+        [6.0, 0.0, 0.0],
+        0,
+        _payload(),
+        6,
+        np.empty((0, 2)),
+    )
+    policy, events = _review_policy(manager, robot_xy=np.zeros(2))
+
+    plan = policy._review_tentative_frontiers(0)
+
+    record = manager.registry(0).get(frontier_id)
+    assert plan is None
+    assert record.status is FrontierStatus.TENTATIVE_SUPPRESSION
+    assert not any(
+        event["event"] == "frontier_evidence_confirmed"
+        for event in events
+    )
+    skipped = [
+        event
+        for event in events
+        if event["event"] == "frontier_evidence_confirmation_skipped"
+    ]
+    assert skipped[-1]["reason"] == (
+        "outside_single_boundary_confirmation"
+    )
 
 
 def test_no_frontier_fallback_allows_one_connected_reconsideration() -> None:
