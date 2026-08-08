@@ -10,6 +10,7 @@ RESOURCE_ROOT=$PROJECT/external/ascent
 POINTNAV_VO_ROOT=$PROJECT/external/PointNav-VO
 CHECKPOINT_DIR=$POINTNAV_VO_ROOT/pretrained_ckpts/vo
 HEALTH_CHECK=$SOURCE_ROOT/scripts/check_submap_services.py
+SOURCE_IMPORT_CHECK=$SOURCE_ROOT/scripts/check_submap_source_imports.py
 
 VARIANT_NAME=${ASCENT_SUBMAP_V12_VARIANT_NAME:?required}
 FEATURE_ENV_KEY=${ASCENT_SUBMAP_V12_FEATURE_ENV_KEY:?required}
@@ -68,7 +69,8 @@ mkdir -p "$RUN_ROOT"/{attempts,mpl_config,xdg_cache,service_logs}
 mkdir -p "$SCRATCH_ROOT/cache"/{pip,huggingface,torch,xdg,matplotlib,conda_pkgs}
 
 for path in \
-  "$MANIFEST" "$HEALTH_CHECK" "$SOURCE_ROOT/ascent/run.py" \
+  "$MANIFEST" "$HEALTH_CHECK" "$SOURCE_IMPORT_CHECK" \
+  "$SOURCE_ROOT/ascent/run.py" \
   "$SOURCE_ROOT/ascent/ascent_policy.py" "$SOURCE_ROOT/ascent/submaps" \
   "$SOURCE_ROOT/ascent/vo/pose_provider.py" "$SOURCE_ROOT/model_api" \
   "$SOURCE_ROOT/scripts" "$SOURCE_ROOT/experiments" \
@@ -221,11 +223,16 @@ done
   echo start_time=$(date -Is)
 } > "$RUN_ROOT/environment_preflight.txt"
 
-cd "$SOURCE_ROOT"
-"$ASCENT_PYTHON" -c \
-  'from importlib.util import find_spec; from pathlib import Path; import sys; root=Path(sys.argv[1]).resolve(); actual=Path(find_spec("ascent.ascent_policy").origin).resolve(); print(actual); assert root in actual.parents' \
-  "$SOURCE_ROOT" > "$RUN_ROOT/import_check.log" 2>&1
 cd "$RESOURCE_ROOT"
+"$ASCENT_PYTHON" "$SOURCE_IMPORT_CHECK" \
+  --source-root "$SOURCE_ROOT" \
+  --resource-root "$RESOURCE_ROOT" \
+  --output-json "$RUN_ROOT/import_check.json" \
+  ascent.run ascent.ascent_policy \
+  model_api.qwen25_out model_api.blip2itm_out \
+  model_api.sam_out model_api.grounding_dino_out \
+  model_api.ram_out model_api.dfine_out \
+  > "$RUN_ROOT/import_check.log" 2>&1
 
 SERVER_PIDS=()
 cleanup() {
@@ -244,17 +251,17 @@ trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
 
 start_service() {
-  local name=$1 module=$2 port=$3
-  CUDA_VISIBLE_DEVICES=0 "$ASCENT_PYTHON" -u -m "$module" --port "$port" \
+  local name=$1 script=$2 port=$3
+  CUDA_VISIBLE_DEVICES=0 "$ASCENT_PYTHON" -u "$script" --port "$port" \
     > "$RUN_ROOT/service_logs/$name.log" 2>&1 &
   SERVER_PIDS+=("$!")
 }
-start_service qwen2_5 model_api.qwen25_out "$QWEN2_5_PORT"
-start_service blip2itm model_api.blip2itm_out "$BLIP2ITM_PORT"
-start_service sam model_api.sam_out "$SAM_PORT"
-start_service gdino model_api.grounding_dino_out "$GROUNDING_DINO_PORT"
-start_service ram model_api.ram_out "$RAM_PORT"
-start_service dfine model_api.dfine_out "$DFINE_PORT"
+start_service qwen2_5 "$SOURCE_ROOT/model_api/qwen25_out.py" "$QWEN2_5_PORT"
+start_service blip2itm "$SOURCE_ROOT/model_api/blip2itm_out.py" "$BLIP2ITM_PORT"
+start_service sam "$SOURCE_ROOT/model_api/sam_out.py" "$SAM_PORT"
+start_service gdino "$SOURCE_ROOT/model_api/grounding_dino_out.py" "$GROUNDING_DINO_PORT"
+start_service ram "$SOURCE_ROOT/model_api/ram_out.py" "$RAM_PORT"
+start_service dfine "$SOURCE_ROOT/model_api/dfine_out.py" "$DFINE_PORT"
 
 run_health_check() {
   local stage=$1 output=$2 wait_seconds=$3
@@ -325,7 +332,7 @@ run_unit() {
   local submap_diagnostics=$unit_dir/submap_diagnostics.jsonl
   local run_id=${MODE}__screen__B2__${attempt_name}__${chunk_id}
   local cmd=(
-    "$ASCENT_PYTHON" -u -m ascent.run
+    "$ASCENT_PYTHON" -u "$SOURCE_ROOT/ascent/run.py"
     "--config-name=eval_ascent_${DATASET}.yaml"
     "habitat.dataset.data_path=$data_path"
     "habitat.dataset.content_scenes=[*]"
@@ -367,6 +374,7 @@ run_unit() {
   } > "$unit_dir/exact_command.txt"
   {
     echo source_commit=$SOURCE_COMMIT
+    echo python_entrypoint_mode=absolute_candidate_source_scripts
     echo manifest_sha256=$MANIFEST_SHA256
     echo condition=B2
     echo method_version=submap_v1.2
