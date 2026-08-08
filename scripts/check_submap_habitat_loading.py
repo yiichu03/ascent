@@ -39,6 +39,9 @@ def main() -> None:
     manifest = read_json(args.manifest)
     if manifest.get("schema") != "ascent_vo_submap_screen_materialized_v1":
         raise ValueError("unexpected materialized manifest schema")
+    manifest_split = str(manifest.get("split"))
+    if manifest_split not in {"train", "val"}:
+        raise ValueError(f"unsupported split {manifest_split!r}")
     scene_root = args.scene_root.resolve()
     scene_dataset_config = Path(
         manifest["scene_dataset_config"]
@@ -59,7 +62,7 @@ def main() -> None:
             )
         with read_write(config):
             config.habitat.dataset.data_path = chunk["data_path"]
-            config.habitat.dataset.split = "train"
+            config.habitat.dataset.split = manifest_split
             config.habitat.dataset.scenes_dir = str(scene_root)
             config.habitat.dataset.content_scenes = ["*"]
         loaded = make_dataset(
@@ -124,6 +127,7 @@ def main() -> None:
         "schema": "ascent_vo_submap_habitat_loading_v1",
         "chunk_count": len(results),
         "episode_count": sum(row["episode_count"] for row in results),
+        "split": manifest_split,
         "scene_dataset_config": str(scene_dataset_config),
         "chunks": results,
         "status": "PASS",

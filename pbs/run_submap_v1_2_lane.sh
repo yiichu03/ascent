@@ -4,13 +4,18 @@
 set -euo pipefail
 
 PROJECT=/scratch/e1538633/liuyi/drift-aware-submap-exploration
-SOURCE_ROOT=$PROJECT/external/ascent_vo_submap_v1_2
+SOURCE_ROOT=${ASCENT_SUBMAP_V12_SOURCE_ROOT:?required}
+SOURCE_ROOT=$(realpath -e "$SOURCE_ROOT")
 RESOURCE_ROOT=$PROJECT/external/ascent
 POINTNAV_VO_ROOT=$PROJECT/external/PointNav-VO
 CHECKPOINT_DIR=$POINTNAV_VO_ROOT/pretrained_ckpts/vo
 HEALTH_CHECK=$SOURCE_ROOT/scripts/check_submap_services.py
 
+VARIANT_NAME=${ASCENT_SUBMAP_V12_VARIANT_NAME:?required}
+FEATURE_ENV_KEY=${ASCENT_SUBMAP_V12_FEATURE_ENV_KEY:?required}
+FEATURE_CONFIG_KEY=${ASCENT_SUBMAP_V12_FEATURE_CONFIG_KEY:?required}
 DATASET=${ASCENT_SUBMAP_V12_DATASET:?required}
+DATA_SPLIT=${ASCENT_SUBMAP_V12_DATA_SPLIT:?required}
 MODE=${ASCENT_SUBMAP_V12_MODE:?required}
 SCENES_ROOT=${ASCENT_SUBMAP_V12_SCENES_ROOT:?required}
 MANIFEST=${ASCENT_SUBMAP_V12_MANIFEST:?required}
@@ -34,8 +39,25 @@ ASCENT_PYTHON=$ASCENT_ENV/bin/python
 RUN_ROOT=$STAGE_ROOT/lane_$LANE_ID
 MAX_CONSECUTIVE_PROCESS_FAILURES=3
 
-case "$MODE" in smoke|full) ;; *) echo "invalid_mode=$MODE"; exit 20 ;; esac
+case "$VARIANT_NAME:$FEATURE_ENV_KEY:$FEATURE_CONFIG_KEY" in
+  frontier-confirm:ASCENT_SUBMAP_HANDOFF_LIVE_CONFIRMATION_ENABLED:handoff_live_frontier_confirmation_enabled) ;;
+  route-leash:ASCENT_SUBMAP_ROUTE_GATEWAY_REPLAN_ENABLED:route_gateway_replan_enabled) ;;
+  evidence-maturity:ASCENT_SUBMAP_FRONTIER_EVIDENCE_MATURITY_ENABLED:frontier_evidence_maturity_enabled) ;;
+  *) echo "invalid_variant_feature_contract=$VARIANT_NAME:$FEATURE_ENV_KEY:$FEATURE_CONFIG_KEY"; exit 20 ;;
+esac
+EXPECTED_VARIANT_ROOT=$PROJECT/artifacts/objectnav/submap_v1_2_variants/$VARIANT_NAME
+case "$(realpath -m "$STAGE_ROOT")/" in
+  "$EXPECTED_VARIANT_ROOT"/*) ;;
+  *) echo "stage_root_outside_variant_contract=$STAGE_ROOT"; exit 20 ;;
+esac
+case "$MODE" in smoke|full|route-exposure) ;; *) echo "invalid_mode=$MODE"; exit 20 ;; esac
 case "$DATASET" in hm3d|mp3d) ;; *) echo "invalid_dataset=$DATASET"; exit 20 ;; esac
+case "$DATA_SPLIT" in train|val) ;; *) echo "invalid_data_split=$DATA_SPLIT"; exit 20 ;; esac
+[ "$MODE" != route-exposure ] || {
+  [ "$VARIANT_NAME" = route-leash ] && [ "$DATASET" = hm3d ] || {
+    echo route_exposure_contract; exit 20;
+  }
+}
 for value in "$LANE_ID" "$LANE_COUNT" "$EXPECTED_CHUNKS" \
   "$EXPECTED_EPISODES" "$BASE_PORT" "$DEADLINE_EPOCH"; do
   [[ "$value" =~ ^[0-9]+$ ]] || { echo "invalid_integer=$value"; exit 20; }
@@ -49,15 +71,16 @@ for path in \
   "$MANIFEST" "$HEALTH_CHECK" "$SOURCE_ROOT/ascent/run.py" \
   "$SOURCE_ROOT/ascent/ascent_policy.py" "$SOURCE_ROOT/ascent/submaps" \
   "$SOURCE_ROOT/ascent/vo/pose_provider.py" "$SOURCE_ROOT/model_api" \
-  "$SOURCE_ROOT/dummy_policy.pth" \
-  "$SOURCE_ROOT/pretrained_weights/Qwen2.5-7b" \
-  "$SOURCE_ROOT/pretrained_weights/mobile_sam.pt" \
-  "$SOURCE_ROOT/pretrained_weights/groundingdino_swint_ogc.pth" \
-  "$SOURCE_ROOT/pretrained_weights/dfine_x_obj2coco.pth" \
-  "$SOURCE_ROOT/pretrained_weights/ram_plus_swin_large_14m.pth" \
-  "$SOURCE_ROOT/pretrained_weights/rednet_semmap_mp3d_40.pth" \
-  "$SOURCE_ROOT/pretrained_weights/resnet50_places365.pth.tar" \
-  "$SOURCE_ROOT/third_party/vlfm/data/pointnav_weights.pth" \
+  "$SOURCE_ROOT/scripts" "$SOURCE_ROOT/experiments" \
+  "$RESOURCE_ROOT/dummy_policy.pth" \
+  "$RESOURCE_ROOT/pretrained_weights/Qwen2.5-7b" \
+  "$RESOURCE_ROOT/pretrained_weights/mobile_sam.pt" \
+  "$RESOURCE_ROOT/pretrained_weights/groundingdino_swint_ogc.pth" \
+  "$RESOURCE_ROOT/pretrained_weights/dfine_x_obj2coco.pth" \
+  "$RESOURCE_ROOT/pretrained_weights/ram_plus_swin_large_14m.pth" \
+  "$RESOURCE_ROOT/pretrained_weights/rednet_semmap_mp3d_40.pth" \
+  "$RESOURCE_ROOT/pretrained_weights/resnet50_places365.pth.tar" \
+  "$RESOURCE_ROOT/third_party/vlfm/data/pointnav_weights.pth" \
   "$CHECKPOINT_DIR/act_forward.pth" \
   "$CHECKPOINT_DIR/act_left_right_inv_joint.pth" \
   "$SCENES_ROOT/$DATASET"; do
@@ -132,7 +155,11 @@ export SAM_PORT=$((BASE_PORT + 2))
 export GROUNDING_DINO_PORT=$((BASE_PORT + 3))
 export RAM_PORT=$((BASE_PORT + 4))
 export DFINE_PORT=$((BASE_PORT + 5))
-export PYTHONPATH="$SOURCE_ROOT:$SOURCE_ROOT/third_party/vlfm:$SOURCE_ROOT/third_party/frontier_exploration:$SOURCE_ROOT/third_party/depth_camera_filtering:$SOURCE_ROOT/third_party/recognize-anything:$SOURCE_ROOT/third_party/D-FINE:$SOURCE_ROOT/third_party/places365"
+export PYTHONPATH="$SOURCE_ROOT:$RESOURCE_ROOT/third_party/vlfm:$RESOURCE_ROOT/third_party/habitat-lab/habitat-lab:$RESOURCE_ROOT/third_party/habitat-lab/habitat-baselines:$RESOURCE_ROOT/third_party/frontier_exploration:$RESOURCE_ROOT/third_party/depth_camera_filtering:$RESOURCE_ROOT/third_party/MobileSAM:$RESOURCE_ROOT/third_party/GroundingDINO:$RESOURCE_ROOT/third_party/D-FINE:$RESOURCE_ROOT/third_party/recognize-anything:$RESOURCE_ROOT/third_party/places365"
+unset ASCENT_SUBMAP_HANDOFF_LIVE_CONFIRMATION_ENABLED
+unset ASCENT_SUBMAP_ROUTE_GATEWAY_REPLAN_ENABLED
+unset ASCENT_SUBMAP_FRONTIER_EVIDENCE_MATURITY_ENABLED
+export "$FEATURE_ENV_KEY=true"
 unset ASCENT_OCSM_ENABLED ASCENT_STAIR_DISTANCE_ORDER_FIX
 unset ASCENT_POSE_SCHEDULE_PATH ASCENT_POSE_ARM
 
@@ -168,6 +195,10 @@ done
   echo host=$(hostname)
   echo mode=$MODE
   echo dataset=$DATASET
+  echo data_split=$DATA_SPLIT
+  echo variant_name=$VARIANT_NAME
+  echo feature_env_key=$FEATURE_ENV_KEY
+  echo feature_config_key=$FEATURE_CONFIG_KEY
   echo lane_id=$LANE_ID
   echo lane_count=$LANE_COUNT
   echo source_commit=$SOURCE_COMMIT
@@ -186,6 +217,7 @@ done
   echo method_version=submap_v1.2
   echo handoff_enabled=1
   echo exhaustion_recovery_enabled=1
+  echo variant_feature_enabled=1
   echo start_time=$(date -Is)
 } > "$RUN_ROOT/environment_preflight.txt"
 
@@ -193,6 +225,7 @@ cd "$SOURCE_ROOT"
 "$ASCENT_PYTHON" -c \
   'from importlib.util import find_spec; from pathlib import Path; import sys; root=Path(sys.argv[1]).resolve(); actual=Path(find_spec("ascent.ascent_policy").origin).resolve(); print(actual); assert root in actual.parents' \
   "$SOURCE_ROOT" > "$RUN_ROOT/import_check.log" 2>&1
+cd "$RESOURCE_ROOT"
 
 SERVER_PIDS=()
 cleanup() {
@@ -296,10 +329,10 @@ run_unit() {
     "--config-name=eval_ascent_${DATASET}.yaml"
     "habitat.dataset.data_path=$data_path"
     "habitat.dataset.content_scenes=[*]"
-    "habitat.dataset.split=train"
+    "habitat.dataset.split=$DATA_SPLIT"
     "habitat.dataset.scenes_dir=$SCENES_ROOT"
     "habitat.seed=100"
-    "habitat_baselines.eval.split=train"
+    "habitat_baselines.eval.split=$DATA_SPLIT"
     "habitat_baselines.test_episode_count=-1"
     "habitat.environment.max_episode_steps=$SCREEN_MAX_ACTIONS"
     "habitat_baselines.num_environments=1"
@@ -309,6 +342,7 @@ run_unit() {
     "ascent_submaps.provisional_thresholds=false"
     "ascent_submaps.handoff_enabled=true"
     "ascent_submaps.exhaustion_recovery_enabled=true"
+    "ascent_submaps.${FEATURE_CONFIG_KEY}=true"
     "ascent_submaps.min_action_endpoints=20"
     "ascent_submaps.min_anchor_displacement_m=1.5"
     "ascent_submaps.overlap_threshold=0.35"
@@ -320,10 +354,11 @@ run_unit() {
     "ascent_submaps.route_max_waypoint_actions=60"
   )
   {
-    printf 'cd %q\n' "$SOURCE_ROOT"
+    printf 'cd %q\n' "$RESOURCE_ROOT"
     printf 'ASCENT_SUBMAP_ENABLED=true ASCENT_SUBMAP_ALLOW_PROVISIONAL=false '
     printf 'ASCENT_SUBMAP_HANDOFF_ENABLED=true '
     printf 'ASCENT_SUBMAP_EXHAUSTION_RECOVERY_ENABLED=true '
+    printf '%s=true ' "$FEATURE_ENV_KEY"
     printf 'ASCENT_VO_DIAGNOSTICS_PATH=%q ASCENT_SUBMAP_DIAGNOSTICS_PATH=%q ' \
       "$vo_diagnostics" "$submap_diagnostics"
     printf 'timeout --signal=TERM --kill-after=120s %qs ' "$timeout_seconds"
@@ -337,6 +372,10 @@ run_unit() {
     echo method_version=submap_v1.2
     echo handoff_enabled=1
     echo exhaustion_recovery_enabled=1
+    echo variant_name=$VARIANT_NAME
+    echo feature_env_key=$FEATURE_ENV_KEY
+    echo feature_config_key=$FEATURE_CONFIG_KEY
+    echo variant_feature_enabled=1
     echo max_actions=$SCREEN_MAX_ACTIONS
     echo expected_episodes=$expected
     echo no_metric_driven_retry=1
@@ -352,6 +391,7 @@ run_unit() {
     export ASCENT_SUBMAP_ALLOW_PROVISIONAL=false
     export ASCENT_SUBMAP_HANDOFF_ENABLED=true
     export ASCENT_SUBMAP_EXHAUSTION_RECOVERY_ENABLED=true
+    export "$FEATURE_ENV_KEY=true"
     export ASCENT_VO_DIAGNOSTICS_PATH=$vo_diagnostics
     export ASCENT_VO_RUN_ID=$run_id
     export ASCENT_VO_SOURCE_COMMIT=$SOURCE_COMMIT
@@ -360,7 +400,7 @@ run_unit() {
     export ASCENT_SUBMAP_SOURCE_COMMIT=$SOURCE_COMMIT
     export XDG_CACHE_HOME=$unit_dir/xdg_cache
     export MPLCONFIGDIR=$unit_dir/mpl_config
-    cd "$SOURCE_ROOT"
+    cd "$RESOURCE_ROOT"
     timeout --signal=TERM --kill-after=120s "${timeout_seconds}s" \
       "${cmd[@]}" > "$unit_dir/run.log" 2>&1 < /dev/null
   ); then status=0; else status=$?; fi
