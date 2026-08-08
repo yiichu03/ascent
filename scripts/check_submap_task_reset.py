@@ -46,6 +46,7 @@ def sha256(path: Path) -> str:
 def compose_config(
     *,
     dataset: str,
+    split: str,
     config_dir: Path,
     data_path: str,
     scene_root: Path,
@@ -61,7 +62,7 @@ def compose_config(
         )
     with read_write(config):
         config.habitat.dataset.data_path = data_path
-        config.habitat.dataset.split = "train"
+        config.habitat.dataset.split = split
         config.habitat.dataset.scenes_dir = str(scene_root)
         config.habitat.dataset.content_scenes = ["*"]
         config.habitat.environment.iterator_options.cycle = False
@@ -79,6 +80,7 @@ def compose_config(
 def check_chunk(
     *,
     dataset_name: str,
+    split: str,
     chunk: Dict[str, Any],
     config_dir: Path,
     scene_root: Path,
@@ -87,6 +89,7 @@ def check_chunk(
 ) -> Dict[str, Any]:
     config = compose_config(
         dataset=dataset_name,
+        split=split,
         config_dir=config_dir,
         data_path=chunk["data_path"],
         scene_root=scene_root,
@@ -177,6 +180,9 @@ def main() -> None:
     dataset_name = str(manifest.get("dataset"))
     if dataset_name not in {"hm3d", "mp3d"}:
         raise ValueError(f"unsupported dataset {dataset_name!r}")
+    manifest_split = str(manifest.get("split"))
+    if manifest_split not in {"train", "val"}:
+        raise ValueError(f"unsupported split {manifest_split!r}")
     scene_dataset_config = Path(
         manifest["scene_dataset_config"]
     ).resolve()
@@ -195,6 +201,7 @@ def main() -> None:
             results.append(
                 check_chunk(
                     dataset_name=dataset_name,
+                    split=manifest_split,
                     chunk=chunk,
                     config_dir=args.config_dir.resolve(),
                     scene_root=scene_root,
@@ -221,6 +228,7 @@ def main() -> None:
         "manifest": str(manifest_path),
         "manifest_sha256": sha256(manifest_path),
         "dataset": dataset_name,
+        "split": manifest_split,
         "scene_dataset_config": str(scene_dataset_config),
         "scene_dataset_config_sha256": expected_config_hash,
         "expected_episode_count": int(manifest["episode_count"]),

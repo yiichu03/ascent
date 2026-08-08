@@ -20,6 +20,22 @@ from summarize_submap_screen import (
 )
 
 
+VARIANT_FEATURES = {
+    "frontier-confirm": (
+        "ASCENT_SUBMAP_HANDOFF_LIVE_CONFIRMATION_ENABLED",
+        "handoff_live_frontier_confirmation_enabled",
+    ),
+    "route-leash": (
+        "ASCENT_SUBMAP_ROUTE_GATEWAY_REPLAN_ENABLED",
+        "route_gateway_replan_enabled",
+    ),
+    "evidence-maturity": (
+        "ASCENT_SUBMAP_FRONTIER_EVIDENCE_MATURITY_ENABLED",
+        "frontier_evidence_maturity_enabled",
+    ),
+}
+
+
 def load_baseline(
     paths: Iterable[Path],
     *,
@@ -80,6 +96,14 @@ def main() -> int:
         choices=("hm3d", "mp3d"),
         required=True,
     )
+    parser.add_argument(
+        "--expected-split", choices=("train", "val"), default="train"
+    )
+    parser.add_argument(
+        "--variant-name", choices=tuple(VARIANT_FEATURES), required=True
+    )
+    parser.add_argument("--feature-env-key", required=True)
+    parser.add_argument("--feature-config-key", required=True)
     parser.add_argument("--expected-episodes", type=int, required=True)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--forward-checkpoint-sha256", required=True)
@@ -93,8 +117,18 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
 
+    expected_feature = VARIANT_FEATURES[args.variant_name]
+    if (args.feature_env_key, args.feature_config_key) != expected_feature:
+        parser.error(
+            "variant feature mismatch: "
+            f"{args.variant_name} requires {expected_feature!r}"
+        )
+
     chunks, logical_order, strict_errors = load_manifest(
-        args.manifest, args.expected_episodes, args.expected_dataset
+        args.manifest,
+        args.expected_episodes,
+        args.expected_dataset,
+        args.expected_split,
     )
     registry_rows = read_csv(args.registry)
     attempts: Dict[str, list[Dict[str, Any]]] = defaultdict(list)
@@ -121,6 +155,7 @@ def main() -> int:
                 forward_sha256=args.forward_checkpoint_sha256,
                 turn_sha256=args.turn_checkpoint_sha256,
                 calibration=None,
+                expected_feature_config_key=args.feature_config_key,
             )
             strict_errors.extend(errors)
             for logical_id, episode in accepted.items():
@@ -230,6 +265,11 @@ def main() -> int:
                 "remote_route_finished_count": b2[
                     "remote_route_finished_count"
                 ],
+                "submap_event_counts_json": json.dumps(
+                    b2["submap_event_counts"],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
                 "selected_attempt_priority": b2["priority"],
                 "evidence_vo_diagnostics": b2[
                     "evidence_vo_diagnostics"
@@ -289,26 +329,25 @@ def main() -> int:
     sr_delta = (
         None if b1_sr is None or b2_sr is None else b2_sr - b1_sr
     )
-    if args.mode != "full" or sr_delta is None:
-        performance_verdict = "ENGINEERING_ONLY"
-    elif sr_delta >= 0.02:
-        performance_verdict = "SCREEN_POSITIVE"
-    elif sr_delta <= -0.02:
-        performance_verdict = "SCREEN_NEGATIVE"
-    else:
-        performance_verdict = "SCREEN_NEAR_TIE"
+    performance_verdict = (
+        "ENGINEERING_ONLY" if args.mode == "smoke" else "DESCRIPTIVE_ONLY"
+    )
 
     selected_episodes = list(selected.values())
     summary = {
         "schema": "ascent_vo_submap_v1_2_b2_screen_v1",
         "dataset": args.expected_dataset,
+        "split": args.expected_split,
+        "variant_name": args.variant_name,
+        "feature_env_key": args.feature_env_key,
+        "feature_config_key": args.feature_config_key,
         "mode": args.mode,
         "technical_status": technical_status,
         "mechanism_exposure": mechanism_exposure,
         "performance_verdict": performance_verdict,
         "decision_threshold_note": (
-            "descriptive screen: SR delta >= +0.02 positive, "
-            "<= -0.02 negative, otherwise near-tie; never drives retry"
+            "No embedded performance threshold; SR/SPL and flips are "
+            "descriptive and never drive retry."
         ),
         "expected_episodes": args.expected_episodes,
         "b2_valid_episodes": b2_count,
@@ -342,6 +381,9 @@ def main() -> int:
             "success_flips": dict(sorted(flips.items())),
         },
         "mechanism": {
+            "submap_event_counts": sum_counters(
+                selected_episodes, "submap_event_counts"
+            ),
             "split_episodes": sum(
                 row["submap_split_count"] > 0 for row in episode_rows
             ),
@@ -425,6 +467,9 @@ def main() -> int:
             "registry": str(args.registry.resolve()),
             "registry_sha256": sha256(args.registry),
             "source_commit": args.source_commit,
+            "variant_name": args.variant_name,
+            "feature_env_key": args.feature_env_key,
+            "feature_config_key": args.feature_config_key,
             "historical_baseline_csvs": [
                 {
                     "path": str(path.resolve()),

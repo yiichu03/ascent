@@ -4,6 +4,7 @@ import csv
 import gzip
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -188,6 +189,34 @@ def test_materialized_episode_binds_hashed_absolute_scene_config(
         text=True,
     )
     assert json.loads(preflight_output.read_text())["status"] == "PASS"
+
+    val_manifest = tmp_path / "val_manifest.json"
+    val_payload = json.loads(manifest_path.read_text())
+    val_payload["split"] = "val"
+    val_manifest.write_text(json.dumps(val_payload), encoding="utf-8")
+    val_preflight = tmp_path / "val_preflight.json"
+    subprocess.run(
+        [
+            sys.executable,
+            str(PREFLIGHT),
+            "--manifest",
+            str(val_manifest),
+            "--scene-root",
+            str(scene_root),
+            "--expected-split",
+            "val",
+            "--expected-episodes",
+            "1",
+            "--expected-chunks",
+            "1",
+            "--output-json",
+            str(val_preflight),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert json.loads(val_preflight.read_text())["split"] == "val"
 
 
 def test_materializer_preserves_selection_order_across_source_files(
@@ -783,6 +812,7 @@ def make_submap_diagnostics(
                 "continuity_contract": (
                     "single_connected_handoff_and_one_shot_360_recovery"
                 ),
+                "route_gateway_replan_enabled": True,
             }
         )
     rows = [metadata]
@@ -847,6 +877,11 @@ def make_submap_diagnostics(
         if v1_2 and episode == 0:
             rows.extend(
                 [
+                    {
+                        "record_type": "submap_event",
+                        "episode_sequence": sequence,
+                        "event": "remote_route_gateway_replan_paused",
+                    },
                     {
                         "record_type": "submap_event",
                         "episode_sequence": sequence,
@@ -1065,6 +1100,16 @@ def test_paired_summarizer_checks_submap_and_gt_separation(
     assert result["paired_valid_episodes"] == 2
     assert result["metrics"]["success_flips"]["0->1"] == 1
     assert result["mechanism"]["split_count"] == 2
+    assert result["mechanism"]["submap_event_counts"][
+        "submap_split"
+    ] == 2
+    with (output / "episodes.csv").open(
+        newline="", encoding="utf-8"
+    ) as handle:
+        paired_episode_rows = list(csv.DictReader(handle))
+    assert json.loads(
+        paired_episode_rows[0]["submap_event_counts_json"]
+    )["submap_split"] == 1
 
 
 def test_v1_1_b2_only_summarizer_matches_frozen_arm_a(
@@ -1257,19 +1302,33 @@ def test_v1_1_b2_only_summarizer_matches_frozen_arm_a(
         [{"lane_id": 0, "inventory": v1_2_inventory}],
         ["lane_id", "inventory"],
     )
+    v1_2_manifest = tmp_path / "v1_2_manifest.json"
+    v1_2_manifest_payload = json.loads(manifest.read_text())
+    v1_2_manifest_payload["split"] = "val"
+    v1_2_manifest.write_text(
+        json.dumps(v1_2_manifest_payload) + "\n", encoding="utf-8"
+    )
     v1_2_output = tmp_path / "v1_2_summary"
     subprocess.run(
         [
             sys.executable,
             str(V1_2_SUMMARIZER),
             "--manifest",
-            str(manifest),
+            str(v1_2_manifest),
             "--registry",
             str(v1_2_registry),
             "--mode",
             "full",
             "--expected-dataset",
             "hm3d",
+            "--expected-split",
+            "val",
+            "--variant-name",
+            "route-leash",
+            "--feature-env-key",
+            "ASCENT_SUBMAP_ROUTE_GATEWAY_REPLAN_ENABLED",
+            "--feature-config-key",
+            "route_gateway_replan_enabled",
             "--expected-episodes",
             "2",
             "--source-commit",
@@ -1291,6 +1350,13 @@ def test_v1_1_b2_only_summarizer_matches_frozen_arm_a(
         (v1_2_output / "summary.json").read_text()
     )
     assert v1_2_result["technical_status"] == "PASS"
+    assert v1_2_result["split"] == "val"
+    assert v1_2_result["variant_name"] == "route-leash"
+    assert v1_2_result["provenance"]["feature_config_key"] == (
+        "route_gateway_replan_enabled"
+    )
+    assert v1_2_result["performance_verdict"] == "DESCRIPTIVE_ONLY"
+    assert "0.02" not in v1_2_result["decision_threshold_note"]
     assert v1_2_result["mechanism_exposure"] == (
         "HANDOFF+RECOVERY+ROUTE"
     )
@@ -1299,6 +1365,111 @@ def test_v1_1_b2_only_summarizer_matches_frozen_arm_a(
     assert v1_2_result["mechanism"][
         "exhaustion_recovery_scan_completed_count"
     ] == 1
+    assert v1_2_result["mechanism"]["submap_event_counts"][
+        "remote_route_gateway_replan_paused"
+    ] == 1
+    with (v1_2_output / "episodes.csv").open(
+        newline="", encoding="utf-8"
+    ) as handle:
+        v1_2_episode_rows = list(csv.DictReader(handle))
+    first_event_counts = json.loads(
+        v1_2_episode_rows[0]["submap_event_counts_json"]
+    )
+    assert first_event_counts["remote_route_gateway_replan_paused"] == 1
+
+    original_submap_rows = [
+        json.loads(line)
+        for line in v1_2_submap.read_text(encoding="utf-8").splitlines()
+    ]
+    for feature_case, feature_value in (
+        ("false", False),
+        ("missing", None),
+    ):
+        feature_rows = json.loads(json.dumps(original_submap_rows))
+        if feature_value is None:
+            feature_rows[0].pop("route_gateway_replan_enabled")
+        else:
+            feature_rows[0][
+                "route_gateway_replan_enabled"
+            ] = feature_value
+        feature_submap = tmp_path / f"feature_{feature_case}.jsonl"
+        write_jsonl(feature_submap, feature_rows)
+        feature_inventory = tmp_path / f"feature_{feature_case}.csv"
+        write_csv(
+            feature_inventory,
+            [
+                {
+                    "priority": 0,
+                    "stage": "screen",
+                    "condition": "B2",
+                    "chunk_id": "c000",
+                    "vo_diagnostics": b2_vo,
+                    "submap_diagnostics": feature_submap,
+                }
+            ],
+            [
+                "priority",
+                "stage",
+                "condition",
+                "chunk_id",
+                "vo_diagnostics",
+                "submap_diagnostics",
+            ],
+        )
+        feature_registry = tmp_path / f"feature_{feature_case}_registry.csv"
+        write_csv(
+            feature_registry,
+            [{"lane_id": 0, "inventory": feature_inventory}],
+            ["lane_id", "inventory"],
+        )
+        feature_output = tmp_path / f"feature_{feature_case}_summary"
+        feature_result = subprocess.run(
+            [
+                sys.executable,
+                str(V1_2_SUMMARIZER),
+                "--manifest",
+                str(v1_2_manifest),
+                "--registry",
+                str(feature_registry),
+                "--mode",
+                "full",
+                "--expected-dataset",
+                "hm3d",
+                "--expected-split",
+                "val",
+                "--variant-name",
+                "route-leash",
+                "--feature-env-key",
+                "ASCENT_SUBMAP_ROUTE_GATEWAY_REPLAN_ENABLED",
+                "--feature-config-key",
+                "route_gateway_replan_enabled",
+                "--expected-episodes",
+                "2",
+                "--source-commit",
+                SOURCE,
+                "--forward-checkpoint-sha256",
+                FORWARD,
+                "--turn-checkpoint-sha256",
+                TURN,
+                "--baseline-episodes-csv",
+                str(baseline),
+                "--output-dir",
+                str(feature_output),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert feature_result.returncode == 1
+        feature_summary = json.loads(
+            (feature_output / "summary.json").read_text()
+        )
+        assert feature_summary["technical_status"] == "FAIL"
+        assert any(
+            error.startswith(
+                "submap_metadata:route_gateway_replan_enabled:"
+            )
+            for error in feature_summary["strict_errors"]
+        )
 
 
 def test_pbs_scripts_are_syntactically_valid() -> None:
@@ -1360,14 +1531,61 @@ def test_v1_1_harness_is_b2_only_fixed_and_placement_gated() -> None:
     assert inventory_header.count(",") == inventory_row.count(",")
 
 
-def test_v1_2_harness_enables_both_bounded_mechanisms() -> None:
+def test_v1_2_variant_harness_is_isolated_and_default_safe() -> None:
     worker = (ROOT / "pbs" / "run_submap_v1_2_lane.sh").read_text()
     controller = (
         ROOT / "pbs" / "run_submap_v1_2_3shared.pbs"
     ).read_text()
     submitter = (ROOT / "pbs" / "submit_submap_v1_2.sh").read_text()
 
-    assert "external/ascent_vo_submap_v1_2" in worker
+    combined = worker + controller + submitter
+    assert "SOURCE_ROOT=$PROJECT/external/ascent_vo_submap_v1_2" not in (
+        combined
+    )
+    assert "SOURCE_ROOT=${ASCENT_SUBMAP_V12_SOURCE_ROOT:?required}" in (
+        worker + controller
+    )
+    assert 'SCRIPT_SOURCE_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.."' in (
+        submitter
+    )
+    assert "RESOURCE_ROOT=$PROJECT/external/ascent" in combined
+    assert "$RESOURCE_ROOT/third_party/vlfm" in worker + controller
+    assert "$SOURCE_ROOT/third_party/vlfm" not in worker + controller
+    assert '"$SOURCE_ROOT/model_api"' in worker
+    assert '"$SOURCE_ROOT/scripts"' in worker
+    assert 'cd "$RESOURCE_ROOT"' in worker
+    assert '"habitat.dataset.split=$DATA_SPLIT"' in worker
+    assert '"habitat_baselines.eval.split=$DATA_SPLIT"' in worker
+    assert "habitat.dataset.split=train" not in worker
+    assert "manifest_split" in (
+        ROOT / "scripts" / "check_submap_habitat_loading.py"
+    ).read_text()
+    assert "manifest_split" in (
+        ROOT / "scripts" / "check_submap_task_reset.py"
+    ).read_text()
+    assert "--expected-split" in controller
+    assert '--variant-name "$VARIANT_NAME"' in controller
+    assert '--feature-env-key "$FEATURE_ENV_KEY"' in controller
+    assert '--feature-config-key "$FEATURE_CONFIG_KEY"' in controller
+    assert 'MAIN_SCENES_ROOT=$(manifest_scenes_root "$MANIFEST")' in (
+        controller
+    )
+    assert 'GATE_SCENES_ROOT=$(manifest_scenes_root "$GATE_MANIFEST")' in (
+        controller
+    )
+    assert (
+        'preflight_manifest main "$MANIFEST" "$DATA_SPLIT" '
+        '"$MAIN_SCENES_ROOT"' in controller
+    )
+    assert (
+        'preflight_manifest placement_gate "$GATE_MANIFEST" train '
+        '\\\n    "$GATE_SCENES_ROOT"' in controller
+    )
+    assert 'run_lane smoke train "$GATE_SCENES_ROOT"' in controller
+    assert (
+        'run_lane "$MODE" "$DATA_SPLIT" "$MAIN_SCENES_ROOT"'
+        in controller
+    )
     assert "condition=B2" in worker and "condition=B1" not in worker
     assert '"ascent_submaps.handoff_enabled=true"' in worker
     assert (
@@ -1375,6 +1593,23 @@ def test_v1_2_harness_enables_both_bounded_mechanisms() -> None:
     )
     assert "ASCENT_SUBMAP_HANDOFF_ENABLED=true" in worker
     assert "ASCENT_SUBMAP_EXHAUSTION_RECOVERY_ENABLED=true" in worker
+    assert 'export "$FEATURE_ENV_KEY=true"' in worker
+    for variant, feature in (
+        (
+            "frontier-confirm",
+            "ASCENT_SUBMAP_HANDOFF_LIVE_CONFIRMATION_ENABLED",
+        ),
+        (
+            "route-leash",
+            "ASCENT_SUBMAP_ROUTE_GATEWAY_REPLAN_ENABLED",
+        ),
+        (
+            "evidence-maturity",
+            "ASCENT_SUBMAP_FRONTIER_EVIDENCE_MATURITY_ENABLED",
+        ),
+    ):
+        assert variant in combined
+        assert feature in combined
     assert "method_version=submap_v1.2" in worker
     assert "run_lane smoke" in controller
     assert controller.index("run_lane smoke") < controller.index(
@@ -1395,11 +1630,42 @@ def test_v1_2_harness_enables_both_bounded_mechanisms() -> None:
         in controller
     )
     assert '"fixed_technical_retry_per_failed_unit": 1' in submitter
-    assert "artifacts/objectnav/submap_v1_2" in submitter
+    assert "artifacts/objectnav/submap_v1_2_variants/$VARIANT_NAME" in (
+        submitter + controller + worker
+    )
+    assert "route-exposure" in combined
+    assert "route_exposure_requires_exactly_100_episodes" in submitter
+    assert "CUSTOM_EXPECTED_CHUNKS" in submitter
+    assert "CUSTOM_BASELINE_CSVS" in submitter
+    assert "ASCENT_SUBMAP_V12_NO_QSUB" in submitter
+    assert '"qsub_executed": False' in submitter
+    assert os.access(ROOT / "pbs" / "submit_submap_v1_2.sh", os.X_OK)
     assert "artifacts/objectnav/submap_v1/manifests" in submitter
     assert "/scratch/e1538633/liuyi/submap_v1_2" not in (
         worker + controller + submitter
     )
+    v1_2_summarizer = (
+        ROOT / "scripts" / "summarize_submap_v1_2_screen.py"
+    ).read_text()
+    assert '"submap_event_counts_json"' in v1_2_summarizer
+    assert '"DESCRIPTIVE_ONLY"' in v1_2_summarizer
+    assert "sr_delta >= 0.02" not in v1_2_summarizer
+
+
+def test_v1_2_variant_submitter_rejects_unknown_variant() -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            str(ROOT / "pbs" / "submit_submap_v1_2.sh"),
+            "unknown-variant",
+            "hm3d",
+            "smoke",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 20
+    assert "invalid_variant=unknown-variant" in result.stdout
 
 
 def test_frozen_calibration_selection_is_episode_disjoint() -> None:
