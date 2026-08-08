@@ -32,6 +32,9 @@ def main() -> None:
     parser.add_argument(
         "--expected-dataset", choices=("hm3d", "mp3d")
     )
+    parser.add_argument(
+        "--expected-split", choices=("train", "val"), default="train"
+    )
     parser.add_argument("--expected-episodes", type=int, required=True)
     parser.add_argument("--expected-chunks", type=int, required=True)
     parser.add_argument("--output-json", type=Path, required=True)
@@ -50,7 +53,7 @@ def main() -> None:
         and dataset != args.expected_dataset
     ):
         errors.append("expected_dataset")
-    if manifest.get("split") != "train":
+    if manifest.get("split") != args.expected_split:
         errors.append("split")
     if int(manifest.get("episode_count", -1)) != args.expected_episodes:
         errors.append("episode_count")
@@ -177,6 +180,7 @@ def main() -> None:
         "manifest": str(manifest_path),
         "manifest_sha256": sha256(manifest_path),
         "dataset": dataset,
+        "split": manifest.get("split"),
         "scene_dataset_config": (
             str(scene_dataset_config)
             if scene_dataset_config is not None

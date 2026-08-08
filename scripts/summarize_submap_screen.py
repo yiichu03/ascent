@@ -92,7 +92,10 @@ def mean(values: Iterable[float]) -> Optional[float]:
 
 
 def load_manifest(
-    path: Path, expected_episodes: int, expected_dataset: str
+    path: Path,
+    expected_episodes: int,
+    expected_dataset: str,
+    expected_split: str = "train",
 ) -> tuple[Dict[str, Dict[str, Any]], list[str], list[str]]:
     manifest = read_json(path)
     errors = []
@@ -100,7 +103,7 @@ def load_manifest(
         errors.append("manifest_schema")
     if (
         manifest.get("dataset") != expected_dataset
-        or manifest.get("split") != "train"
+        or manifest.get("split") != expected_split
     ):
         errors.append("manifest_dataset_split")
     if int(manifest.get("episode_count", -1)) != expected_episodes:
@@ -272,6 +275,7 @@ def parse_attempt(
     forward_sha256: str,
     turn_sha256: str,
     calibration: Optional[Mapping[str, Any]],
+    expected_feature_config_key: Optional[str] = None,
 ) -> tuple[Dict[str, Dict[str, Any]], list[str]]:
     condition = row["condition"]
     errors = []
@@ -367,6 +371,17 @@ def parse_attempt(
                     calibration=calibration,
                 )
             )
+            if (
+                expected_feature_config_key is not None
+                and submap_metadata[0].get(expected_feature_config_key)
+                is not True
+            ):
+                errors.append(
+                    "submap_metadata:"
+                    f"{expected_feature_config_key}:"
+                    f"{submap_metadata[0].get(expected_feature_config_key)!r}:"
+                    "True"
+                )
         grouped: Dict[int, Dict[str, Any]] = defaultdict(
             lambda: {"resets": 0, "endpoints": [], "events": []}
         )
@@ -614,6 +629,7 @@ def parse_attempt(
             "remote_route_finished_count": events[
                 "remote_route_finished"
             ],
+            "submap_event_counts": dict(sorted(events.items())),
             "remote_route_target_kinds": dict(
                 Counter(
                     str(item.get("target_kind"))
@@ -674,6 +690,9 @@ def main() -> int:
         choices=("hm3d", "mp3d"),
         default="hm3d",
     )
+    parser.add_argument(
+        "--expected-split", choices=("train", "val"), default="train"
+    )
     parser.add_argument("--expected-episodes", type=int, required=True)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--forward-checkpoint-sha256", required=True)
@@ -682,7 +701,10 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     chunks, logical_order, strict_errors = load_manifest(
-        args.manifest, args.expected_episodes, args.expected_dataset
+        args.manifest,
+        args.expected_episodes,
+        args.expected_dataset,
+        args.expected_split,
     )
     calibration = None
     if args.mode == "full" or args.calibration_json is not None:
@@ -800,6 +822,11 @@ def main() -> int:
                 "remote_boundary_crossing_count": b2[
                     "remote_boundary_crossing_count"
                 ],
+                "submap_event_counts_json": json.dumps(
+                    b2["submap_event_counts"],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
                 "b1_priority": b1["priority"],
                 "b2_priority": b2["priority"],
             }
@@ -868,6 +895,22 @@ def main() -> int:
             "success_flips": dict(sorted(flips.items())),
         },
         "mechanism": {
+            "submap_event_counts": dict(
+                sorted(
+                    sum(
+                        (
+                            Counter(
+                                selected[("B2", logical_id)][
+                                    "submap_event_counts"
+                                ]
+                            )
+                            for logical_id in logical_order
+                            if ("B2", logical_id) in selected
+                        ),
+                        Counter(),
+                    ).items()
+                )
+            ),
             "split_episodes": split_episodes,
             "split_count": split_count,
             "revisit_count": sum(

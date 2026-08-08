@@ -1,25 +1,51 @@
 #!/bin/bash
-# Submit one hash-bound B2-only ASCENT-VO submap-v1.2 screen.
+# Submit one hash-bound ASCENT-VO submap-v1.2 variant screen.
 
 set -euo pipefail
 
-USAGE='submit_submap_v1_2.sh hm3d|mp3d smoke|full [auto|autox] [stamp]'
-DATASET=${1:?usage: $USAGE}
-MODE=${2:?usage: $USAGE}
-QUEUE=${3:-autox}
-STAMP=${4:-20260731_submap_v1_2_${DATASET}_${MODE}_first_attempt}
+USAGE='submit_submap_v1_2.sh frontier-confirm|route-leash|evidence-maturity hm3d|mp3d smoke|full|route-exposure [auto|autox] [stamp] [custom_manifest custom_expected_chunks custom_expected_episodes custom_baseline_csvs]'
+VARIANT_NAME=${1:?usage: $USAGE}
+DATASET=${2:?usage: $USAGE}
+MODE=${3:?usage: $USAGE}
+QUEUE=${4:-autox}
+STAMP=${5:-20260808_submap_v1_2_${VARIANT_NAME}_${DATASET}_${MODE}_first_attempt}
+CUSTOM_MANIFEST=${6:-}
+CUSTOM_EXPECTED_CHUNKS=${7:-}
+CUSTOM_EXPECTED_EPISODES=${8:-}
+CUSTOM_BASELINE_CSVS=${9:-}
 NO_QSUB=${ASCENT_SUBMAP_V12_NO_QSUB:-0}
 
 PROJECT=/scratch/e1538633/liuyi/drift-aware-submap-exploration
-SOURCE_ROOT=$PROJECT/external/ascent_vo_submap_v1_2
+SCRIPT_SOURCE_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+SOURCE_ROOT=${ASCENT_SUBMAP_V12_SOURCE_ROOT:-$SCRIPT_SOURCE_ROOT}
+SOURCE_ROOT=$(realpath -e "$SOURCE_ROOT")
 RESOURCE_ROOT=$PROJECT/external/ascent
 POINTNAV_VO_ROOT=$PROJECT/external/PointNav-VO
-ARTIFACT_ROOT=${ASCENT_SUBMAP_V12_ARTIFACT_ROOT:-$PROJECT/artifacts/objectnav/submap_v1_2}
+ARTIFACT_ROOT=$PROJECT/artifacts/objectnav/submap_v1_2_variants/$VARIANT_NAME
 MANIFEST_ROOT=$PROJECT/artifacts/objectnav/submap_v1/manifests
 CONTROLLER=$SOURCE_ROOT/pbs/run_submap_v1_2_3shared.pbs
 WORKER=$SOURCE_ROOT/pbs/run_submap_v1_2_lane.sh
 SCRATCH_ROOT=/scratch/e1538633/liuyi
 ASCENT_PYTHON=$SCRATCH_ROOT/micromamba/envs/ascent_nav/bin/python
+
+case "$VARIANT_NAME" in
+  frontier-confirm)
+    FEATURE_ENV_KEY=ASCENT_SUBMAP_HANDOFF_LIVE_CONFIRMATION_ENABLED
+    FEATURE_CONFIG_KEY=handoff_live_frontier_confirmation_enabled
+    JOB_PREFIX=asfc
+    ;;
+  route-leash)
+    FEATURE_ENV_KEY=ASCENT_SUBMAP_ROUTE_GATEWAY_REPLAN_ENABLED
+    FEATURE_CONFIG_KEY=route_gateway_replan_enabled
+    JOB_PREFIX=asrl
+    ;;
+  evidence-maturity)
+    FEATURE_ENV_KEY=ASCENT_SUBMAP_FRONTIER_EVIDENCE_MATURITY_ENABLED
+    FEATURE_CONFIG_KEY=frontier_evidence_maturity_enabled
+    JOB_PREFIX=asem
+    ;;
+  *) echo "invalid_variant=$VARIANT_NAME"; exit 20 ;;
+esac
 
 case "$DATASET" in
   hm3d)
@@ -27,41 +53,90 @@ case "$DATASET" in
     SMOKE_MANIFEST_SHA256=5166c2ab2000799a05c30aaa56e11ccf828b20c66ae2f4fc8a01065f53d49538
     FULL_MANIFEST=$MANIFEST_ROOT/hm3d150_relocated.json
     FULL_MANIFEST_SHA256=23297001bb08e22c48e073d4438918b74973712e5cbe99b06a9e62b4cd3ccc02
-    BASELINE_CSVS=$PROJECT/artifacts/objectnav/pose_factorial/results/pose_factorial_hm3d_completed_gate_544332_20260728_v1/episodes.csv
-    JOB_NAME=asv12h
+    STANDARD_BASELINE_CSVS=$PROJECT/artifacts/objectnav/pose_factorial/results/pose_factorial_hm3d_completed_gate_544332_20260728_v1/episodes.csv
+    JOB_SUFFIX=h
     ;;
   mp3d)
     SMOKE_MANIFEST=$MANIFEST_ROOT/mp3d_smoke5_relocated.json
     SMOKE_MANIFEST_SHA256=7b31e958a74641c986d373b4693bc691c2698b2ca186012f918d56f57f3f015a
     FULL_MANIFEST=$MANIFEST_ROOT/mp3d150_relocated.json
     FULL_MANIFEST_SHA256=12632eee47c8274a6df8088f4423ca321789ebc495098fba8839460c5f98cc79
-    BASELINE_CSVS=$PROJECT/artifacts/objectnav/pose_factorial/runs/pose_factorial_shard_547621.hopper-m-02_20260728_pose_factorial_mp3d_smallx_c00_c01_c02_first_attempt/final_gate/episodes.csv:$PROJECT/artifacts/objectnav/pose_factorial/runs/pose_factorial_shard_547624.hopper-m-02_20260728_pose_factorial_mp3d_small_c03_c04_first_attempt/final_gate/episodes.csv
-    JOB_NAME=asv12m
+    STANDARD_BASELINE_CSVS=$PROJECT/artifacts/objectnav/pose_factorial/runs/pose_factorial_shard_547621.hopper-m-02_20260728_pose_factorial_mp3d_smallx_c00_c01_c02_first_attempt/final_gate/episodes.csv:$PROJECT/artifacts/objectnav/pose_factorial/runs/pose_factorial_shard_547624.hopper-m-02_20260728_pose_factorial_mp3d_small_c03_c04_first_attempt/final_gate/episodes.csv
+    JOB_SUFFIX=m
     ;;
   *) echo "invalid_dataset=$DATASET"; exit 20 ;;
 esac
 case "$QUEUE" in auto|autox) ;; *) echo queue_must_be_auto_or_autox; exit 20 ;; esac
+case "$NO_QSUB" in 0|1) ;; *) echo no_qsub_must_be_0_or_1; exit 20 ;; esac
+
 case "$MODE" in
   smoke)
+    [ -z "$CUSTOM_MANIFEST$CUSTOM_EXPECTED_CHUNKS$CUSTOM_EXPECTED_EPISODES$CUSTOM_BASELINE_CSVS" ] || {
+      echo custom_arguments_only_allowed_for_route_exposure; exit 20;
+    }
     MANIFEST=$SMOKE_MANIFEST
     MANIFEST_SHA256=$SMOKE_MANIFEST_SHA256
     EXPECTED_CHUNKS=1
     EXPECTED_EPISODES=5
     WALLTIME=24:00:00
     BASELINE_CSVS=""
+    JOB_SUFFIX=${JOB_SUFFIX}s
     ;;
   full)
+    [ -z "$CUSTOM_MANIFEST$CUSTOM_EXPECTED_CHUNKS$CUSTOM_EXPECTED_EPISODES$CUSTOM_BASELINE_CSVS" ] || {
+      echo custom_arguments_only_allowed_for_route_exposure; exit 20;
+    }
     MANIFEST=$FULL_MANIFEST
     MANIFEST_SHA256=$FULL_MANIFEST_SHA256
     EXPECTED_CHUNKS=5
     EXPECTED_EPISODES=150
     WALLTIME=96:00:00
+    BASELINE_CSVS=$STANDARD_BASELINE_CSVS
+    JOB_SUFFIX=${JOB_SUFFIX}f
+    ;;
+  route-exposure)
+    [ "$VARIANT_NAME" = route-leash ] || {
+      echo route_exposure_requires_route_leash_variant; exit 20;
+    }
+    [ "$DATASET" = hm3d ] || {
+      echo route_exposure_currently_requires_hm3d; exit 20;
+    }
+    [ -n "$CUSTOM_MANIFEST" ] && [ -n "$CUSTOM_EXPECTED_CHUNKS" ] \
+      && [ -n "$CUSTOM_EXPECTED_EPISODES" ] \
+      && [ -n "$CUSTOM_BASELINE_CSVS" ] || {
+        echo route_exposure_requires_manifest_chunks_episodes_baseline; exit 20;
+      }
+    [[ "$CUSTOM_EXPECTED_CHUNKS" =~ ^[1-9][0-9]*$ ]] || {
+      echo invalid_custom_expected_chunks; exit 20;
+    }
+    [ "$CUSTOM_EXPECTED_EPISODES" = 100 ] || {
+      echo route_exposure_requires_exactly_100_episodes; exit 20;
+    }
+    MANIFEST=$(realpath -e "$CUSTOM_MANIFEST")
+    MANIFEST_SHA256=$(sha256sum "$MANIFEST" | awk '{print $1}')
+    EXPECTED_CHUNKS=$CUSTOM_EXPECTED_CHUNKS
+    EXPECTED_EPISODES=$CUSTOM_EXPECTED_EPISODES
+    WALLTIME=96:00:00
+    BASELINE_CSVS=$CUSTOM_BASELINE_CSVS
+    JOB_SUFFIX=${JOB_SUFFIX}e
     ;;
   *) echo "invalid_mode=$MODE"; exit 20 ;;
 esac
+JOB_NAME=${JOB_PREFIX}${JOB_SUFFIX}
 
-for path in "$CONTROLLER" "$WORKER" "$MANIFEST" "$SMOKE_MANIFEST"; do
-  [ -f "$path" ] || { echo "missing_file=$path"; exit 21; }
+[ "$SOURCE_ROOT" != "$RESOURCE_ROOT" ] || {
+  echo candidate_source_cannot_be_resource_root; exit 20;
+}
+for path in "$CONTROLLER" "$WORKER" "$MANIFEST" "$SMOKE_MANIFEST" \
+  "$SOURCE_ROOT/ascent/ascent_policy.py" "$SOURCE_ROOT/model_api" \
+  "$SOURCE_ROOT/scripts" "$RESOURCE_ROOT/third_party/vlfm"; do
+  [ -e "$path" ] || { echo "missing_file=$path"; exit 21; }
+done
+for config in "$SOURCE_ROOT/experiments/eval_ascent_hm3d.yaml" \
+  "$SOURCE_ROOT/experiments/eval_ascent_mp3d.yaml"; do
+  grep -Fq "$FEATURE_ENV_KEY" "$config" || {
+    echo "feature_env_missing_from_config=$config:$FEATURE_ENV_KEY"; exit 21;
+  }
 done
 [ "$(sha256sum "$MANIFEST" | awk '{print $1}')" = "$MANIFEST_SHA256" ] || {
   echo manifest_hash_mismatch; exit 22;
@@ -69,7 +144,7 @@ done
 [ "$(sha256sum "$SMOKE_MANIFEST" | awk '{print $1}')" = "$SMOKE_MANIFEST_SHA256" ] || {
   echo smoke_manifest_hash_mismatch; exit 22;
 }
-if [ "$MODE" = full ]; then
+if [ "$MODE" != smoke ]; then
   IFS=: read -r -a BASELINE_PATHS <<< "$BASELINE_CSVS"
   for baseline in "${BASELINE_PATHS[@]}"; do
     [ -f "$baseline" ] || { echo "missing_baseline=$baseline"; exit 21; }
@@ -91,33 +166,48 @@ POINTNAV_VO_COMMIT=$(git -C "$POINTNAV_VO_ROOT" rev-parse HEAD)
 CONTROLLER_SHA256=$(sha256sum "$CONTROLLER" | awk '{print $1}')
 WORKER_SHA256=$(sha256sum "$WORKER" | awk '{print $1}')
 
-"$ASCENT_PYTHON" - "$MANIFEST" "$EXPECTED_CHUNKS" "$EXPECTED_EPISODES" "$DATASET" <<'PY'
+DATA_SPLIT=$(
+  "$ASCENT_PYTHON" - "$MANIFEST" "$EXPECTED_CHUNKS" \
+    "$EXPECTED_EPISODES" "$DATASET" "$MODE" <<'PY'
 import hashlib, json, sys
 from pathlib import Path
 value = json.load(open(sys.argv[1], encoding="utf-8"))
 expected_chunks, expected_episodes = int(sys.argv[2]), int(sys.argv[3])
 assert value["schema"] == "ascent_vo_submap_screen_materialized_v1"
-assert value["dataset"] == sys.argv[4] and value["split"] == "train"
+assert value["dataset"] == sys.argv[4]
+split = str(value.get("split"))
+assert split in {"train", "val"}
+if sys.argv[5] != "route-exposure":
+    assert split == "train"
 assert len(value["chunks"]) == expected_chunks
 assert value["episode_count"] == expected_episodes
 assert sum(int(chunk["episode_count"]) for chunk in value["chunks"]) == expected_episodes
 scene_config = Path(value["scene_dataset_config"])
 assert scene_config.is_absolute() and scene_config.is_file()
 assert hashlib.sha256(scene_config.read_bytes()).hexdigest() == value["scene_dataset_config_sha256"]
+print(split)
 PY
+)
 
 DRY_RUN_JSON=$(
-  "$ASCENT_PYTHON" - <<PY
-import json
+  "$ASCENT_PYTHON" - "$VARIANT_NAME" "$FEATURE_ENV_KEY" \
+    "$FEATURE_CONFIG_KEY" "$SOURCE_ROOT" <<PY
+import json, sys
 print(json.dumps({
     "status": "PASS",
-    "schema": "ascent_vo_submap_v1_2_submission_preflight_v1",
+    "schema": "ascent_vo_submap_v1_2_variant_submission_preflight_v1",
+    "variant_name": sys.argv[1],
+    "feature_env_key": sys.argv[2],
+    "feature_config_key": sys.argv[3],
     "dataset": "$DATASET",
+    "data_split": "$DATA_SPLIT",
     "mode": "$MODE",
     "queue_request": "$QUEUE",
     "walltime": "$WALLTIME",
     "stamp": "$STAMP",
+    "source_root": sys.argv[4],
     "source_commit": "$SOURCE_COMMIT",
+    "resource_root": "$RESOURCE_ROOT",
     "resource_commit": "$RESOURCE_COMMIT",
     "pointnav_vo_commit": "$POINTNAV_VO_COMMIT",
     "artifact_root": "$ARTIFACT_ROOT",
@@ -130,11 +220,11 @@ print(json.dumps({
     "baseline_csvs": "$BASELINE_CSVS".split(":") if "$BASELINE_CSVS" else [],
     "controller_sha256": "$CONTROLLER_SHA256",
     "worker_sha256": "$WORKER_SHA256",
-    "b2_only": True,
     "method_version": "submap_v1.2",
+    "feature_enabled": True,
     "handoff_enabled": True,
     "exhaustion_recovery_enabled": True,
-    "five_episode_gate_before_full": "$MODE" == "full",
+    "five_episode_gate_before_non_smoke": "$MODE" != "smoke",
     "fixed_technical_retry_per_failed_unit": 1,
     "qsub_executed": False,
 }, indent=2, sort_keys=True))
@@ -148,13 +238,18 @@ fi
 LOG_ROOT=$ARTIFACT_ROOT/pbs_logs
 SUBMISSION_ROOT=$ARTIFACT_ROOT/submissions
 mkdir -p "$LOG_ROOT" "$SUBMISSION_ROOT"
-PBS_LOG=$LOG_ROOT/submap_v1_2_${DATASET}_${MODE}_${STAMP}.pbs.log
-SUBMISSION_JSON=$SUBMISSION_ROOT/submap_v1_2_${DATASET}_${MODE}_${STAMP}.json
+PBS_LOG=$LOG_ROOT/${VARIANT_NAME}_${DATASET}_${MODE}_${STAMP}.pbs.log
+SUBMISSION_JSON=$SUBMISSION_ROOT/${VARIANT_NAME}_${DATASET}_${MODE}_${STAMP}.json
 [ ! -e "$PBS_LOG" ] || { echo "pbs_log_exists=$PBS_LOG"; exit 24; }
 [ ! -e "$SUBMISSION_JSON" ] || { echo "submission_record_exists=$SUBMISSION_JSON"; exit 24; }
 
 ENVIRONMENT=$(IFS=,; echo \
-"ASCENT_SUBMAP_V12_DATASET=$DATASET,\
+"ASCENT_SUBMAP_V12_VARIANT_NAME=$VARIANT_NAME,\
+ASCENT_SUBMAP_V12_FEATURE_ENV_KEY=$FEATURE_ENV_KEY,\
+ASCENT_SUBMAP_V12_FEATURE_CONFIG_KEY=$FEATURE_CONFIG_KEY,\
+ASCENT_SUBMAP_V12_SOURCE_ROOT=$SOURCE_ROOT,\
+ASCENT_SUBMAP_V12_DATASET=$DATASET,\
+ASCENT_SUBMAP_V12_DATA_SPLIT=$DATA_SPLIT,\
 ASCENT_SUBMAP_V12_MODE=$MODE,\
 ASCENT_SUBMAP_V12_ARTIFACT_ROOT=$ARTIFACT_ROOT,\
 ASCENT_SUBMAP_V12_MANIFEST=$MANIFEST,\
@@ -181,7 +276,7 @@ import json, sys
 from pathlib import Path
 output = json.loads('''$DRY_RUN_JSON''')
 output.update({
-    "schema": "ascent_vo_submap_v1_2_submission_v1",
+    "schema": "ascent_vo_submap_v1_2_variant_submission_v1",
     "job_id": sys.argv[2],
     "pbs_log": sys.argv[3],
     "qsub_executed": True,
