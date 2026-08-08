@@ -51,7 +51,7 @@ from ascent.submaps import (
     transform_points_xy,
     waypoint_in_robot_component,
 )
-from ascent.submaps.types import SubmapState
+from ascent.submaps.types import FrontierStatus, SubmapState
 from ascent.utils import (
     xyz_yaw_pitch_roll_to_tf_matrix,
     check_stairs_in_upper_50_percent,
@@ -212,6 +212,12 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             enabled=_as_config_bool(
                 _submap_config_value(config, "enabled", False), "enabled"
             ),
+            frontier_evidence_maturity_enabled=_as_config_bool(
+                _submap_config_value(
+                    config, "frontier_evidence_maturity_enabled", False
+                ),
+                "frontier_evidence_maturity_enabled",
+            ),
             min_action_endpoints=int(
                 _submap_config_value(config, "min_action_endpoints", 20)
             ),
@@ -272,6 +278,9 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             ),
         )
         self._submap_enabled = self._submap_config.enabled
+        self._submap_frontier_evidence_maturity_enabled = (
+            self._submap_config.frontier_evidence_maturity_enabled
+        )
         self._submap_handoff_enabled = _as_config_bool(
             _submap_config_value(config, "handoff_enabled", False),
             "handoff_enabled",
@@ -285,6 +294,7 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         if (
             self._submap_handoff_enabled
             or self._submap_exhaustion_recovery_enabled
+            or self._submap_frontier_evidence_maturity_enabled
         ) and not self._submap_enabled:
             raise RuntimeError(
                 "ASCENT submap continuity features require "
@@ -384,6 +394,7 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                         if (
                             self._submap_handoff_enabled
                             or self._submap_exhaustion_recovery_enabled
+                            or self._submap_frontier_evidence_maturity_enabled
                         )
                         else "submap_v1.1"
                     ),
@@ -392,6 +403,12 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     "handoff_enabled": self._submap_handoff_enabled,
                     "exhaustion_recovery_enabled": (
                         self._submap_exhaustion_recovery_enabled
+                    ),
+                    "frontier_evidence_maturity_enabled": (
+                        self._submap_frontier_evidence_maturity_enabled
+                    ),
+                    "frontier_evidence_maturity_contract": (
+                        "tentative_then_independent_denial_or_one_retry"
                     ),
                     "continuity_contract": (
                         "single_connected_handoff_and_one_shot_360_recovery"
@@ -1372,6 +1389,7 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         target_kind: str,
         candidate_key: str,
         frontier_id: Optional[str],
+        frontier_reconsideration: bool = False,
     ) -> Optional[RemoteRoute]:
         if self._submap_remote_route[env] is not None:
             return self._submap_remote_route[env]
@@ -1381,6 +1399,21 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             f"env{env}:route{self._submap_route_sequence[env]:04d}"
         )
         self._submap_route_sequence[env] += 1
+        if frontier_reconsideration:
+            if frontier_id is None:
+                raise ValueError("A reconsideration requires a frontier id")
+            self._submap_manager.registry(env).mark_reconsidering(
+                frontier_id,
+                submap_id=active.submap_id,
+                step=self._num_steps[env],
+            )
+            self._record_submap_policy_event(
+                env,
+                "frontier_evidence_reconsidered",
+                frontier_id=frontier_id,
+                reconsideration_submap_id=active.submap_id,
+                reconsideration_count=1,
+            )
         try:
             route = RemoteRoute.build(
                 graph=graph,
@@ -1397,11 +1430,11 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             if target_kind == "semantic":
                 self._submap_attempted_semantics[env].add(candidate_key)
             elif frontier_id is not None:
-                registry = self._submap_manager.registry(env)
-                if registry.get(frontier_id).eligible:
-                    registry.mark_attempted(
-                        frontier_id, self._num_steps[env]
-                    )
+                self._record_remote_frontier_outcome(
+                    env,
+                    frontier_id,
+                    outcome="route_rejected",
+                )
             self._record_submap_policy_event(
                 env,
                 "remote_route_rejected",
@@ -1418,9 +1451,10 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             # can contribute a new item, but this one is never retried.
             self._submap_attempted_semantics[env].add(candidate_key)
         elif frontier_id is not None:
-            self._submap_manager.registry(env).mark_selected(
-                frontier_id, self._num_steps[env]
-            )
+            if not frontier_reconsideration:
+                self._submap_manager.registry(env).mark_selected(
+                    frontier_id, self._num_steps[env]
+                )
         self._submap_remote_route[env] = route
         self._record_submap_policy_event(
             env,
@@ -1437,6 +1471,215 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         )
         return route
 
+    def _record_remote_frontier_outcome(
+        self, env: int, frontier_id: str, *, outcome: str
+    ) -> None:
+        """Apply the v1.2 or evidence-maturity frontier transition."""
+
+        registry = self._submap_manager.registry(env)
+        record = registry.get(frontier_id)
+        step = int(self._num_steps[env])
+        maturity_enabled = getattr(
+            self,
+            "_submap_frontier_evidence_maturity_enabled",
+            False,
+        )
+        if not maturity_enabled:
+            if record.eligible:
+                registry.mark_attempted(frontier_id, step)
+            return
+        if outcome in {
+            "destination_reached",
+            "preempted_by_local_detection",
+        }:
+            registry.confirm_retired(
+                frontier_id,
+                step=step,
+                reason=str(outcome),
+                count_attempt=True,
+            )
+            self._record_submap_policy_event(
+                env,
+                "frontier_evidence_confirmed",
+                frontier_id=frontier_id,
+                reason=str(outcome),
+                confirmation_kind="successful_retirement",
+            )
+            return
+        if record.status not in {
+            FrontierStatus.ACTIVE,
+            FrontierStatus.SELECTED,
+            FrontierStatus.RECONSIDERING,
+        }:
+            return
+        active = self._submap_manager.active_bundle(env)
+        view = np.asarray(
+            self._observations_cache[env]["robot_xy"], dtype=np.float64
+        )
+        previous_status = record.status
+        new_status = registry.mark_remote_failure(
+            frontier_id,
+            submap_id=active.submap_id,
+            view_local_xy=view,
+            step=step,
+            reason=str(outcome),
+        )
+        if new_status is FrontierStatus.TENTATIVE_SUPPRESSION:
+            self._record_submap_policy_event(
+                env,
+                "frontier_evidence_tentative",
+                frontier_id=frontier_id,
+                negative_support_submap_id=active.submap_id,
+                negative_support_view_local_xy=view.tolist(),
+                reason=str(outcome),
+            )
+        elif (
+            previous_status is FrontierStatus.RECONSIDERING
+            and new_status is FrontierStatus.CONFIRMED_RETIRED
+        ):
+            self._record_submap_policy_event(
+                env,
+                "frontier_evidence_confirmed",
+                frontier_id=frontier_id,
+                reason=f"reconsideration_failed:{outcome}",
+                confirmation_kind="second_execution_failure",
+            )
+
+    def _review_tentative_frontiers(
+        self, env: int
+    ) -> Optional[object]:
+        """Promote independent denials, then return one bounded retry plan.
+
+        This method is called only from ASCENT's no-local-frontier fallback.
+        All geometry is expressed in VO-backed submap frames.
+        """
+
+        manager = self._submap_manager
+        registry = manager.registry(env)
+        view = manager.query_view(env)
+        active = manager.active_bundle(env)
+        robot_xy = np.asarray(
+            self._observations_cache[env]["robot_xy"], dtype=np.float64
+        )
+        obstacle_map = active.payload.obstacle_map
+        live_frontiers = self._eligible_frontiers(active.payload)
+        radius = self._submap_config.gateway_frontier_resolution_radius_m
+        min_view_separation = self._submap_config.min_anchor_displacement_m
+        reconsideration_plans = []
+
+        for record in registry.tentative():
+            if record.negative_support_submap_id == active.submap_id:
+                continue
+            try:
+                candidate_xy = view.project_points_to_active(
+                    record.source_submap_id,
+                    record.local_xy.reshape(1, 2),
+                )[0]
+                negative_view_xy = view.project_points_to_active(
+                    str(record.negative_support_submap_id),
+                    np.asarray(
+                        record.negative_support_view_local_xy,
+                        dtype=np.float64,
+                    ).reshape(1, 2),
+                )[0]
+                candidate_connected = waypoint_in_robot_component(
+                    obstacle_map,
+                    robot_xy=robot_xy,
+                    waypoint_xy=candidate_xy,
+                )
+            except (KeyError, ValueError):
+                continue
+            independent = (
+                float(np.linalg.norm(robot_xy - negative_view_xy))
+                >= min_view_separation
+            )
+            live_support = bool(
+                len(live_frontiers) > 0
+                and np.any(
+                    np.linalg.norm(
+                        live_frontiers - candidate_xy, axis=1
+                    )
+                    <= radius
+                )
+            )
+            if independent and candidate_connected and not live_support:
+                registry.confirm_retired(
+                    record.frontier_id,
+                    step=self._num_steps[env],
+                    reason="independent_live_denial",
+                )
+                self._record_submap_policy_event(
+                    env,
+                    "frontier_evidence_promoted",
+                    frontier_id=record.frontier_id,
+                    negative_support_submap_id=(
+                        record.negative_support_submap_id
+                    ),
+                    confirming_submap_id=active.submap_id,
+                    view_separation_m=float(
+                        np.linalg.norm(robot_xy - negative_view_xy)
+                    ),
+                    candidate_connected=True,
+                    live_frontier_support=False,
+                )
+                self._record_submap_policy_event(
+                    env,
+                    "frontier_evidence_confirmed",
+                    frontier_id=record.frontier_id,
+                    reason="independent_live_denial",
+                    confirmation_kind="second_view",
+                )
+                continue
+            if record.reconsideration_count != 0:
+                continue
+            try:
+                boundary_path = manager.graph(env).shortest_path(
+                    str(record.negative_support_submap_id),
+                    active.submap_id,
+                )
+            except KeyError:
+                continue
+            if len(boundary_path) != 2:
+                self._record_submap_policy_event(
+                    env,
+                    "frontier_evidence_reconsideration_skipped",
+                    frontier_id=record.frontier_id,
+                    reason="outside_single_boundary_window",
+                    active_submap_id=active.submap_id,
+                )
+                continue
+            try:
+                plan = view.plan_to_frontier(record.frontier_id)
+            except (KeyError, ValueError):
+                continue
+            execution_connected = waypoint_in_robot_component(
+                obstacle_map,
+                robot_xy=robot_xy,
+                waypoint_xy=plan.execution_local_xy,
+            )
+            if execution_connected:
+                reconsideration_plans.append(
+                    (
+                        plan.graph_hops,
+                        -record.score,
+                        record.creation_step,
+                        record.frontier_id,
+                        plan,
+                    )
+                )
+            else:
+                self._record_submap_policy_event(
+                    env,
+                    "frontier_evidence_reconsideration_skipped",
+                    frontier_id=record.frontier_id,
+                    reason="execution_waypoint_disconnected",
+                    active_submap_id=active.submap_id,
+                )
+        if not reconsideration_plans:
+            return None
+        reconsideration_plans.sort(key=lambda item: item[:-1])
+        return reconsideration_plans[0][-1]
+
     def _finish_remote_route(
         self, env: int, *, outcome: str
     ) -> None:
@@ -1444,11 +1687,9 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         if route is None:
             return
         if route.frontier_id is not None:
-            registry = self._submap_manager.registry(env)
-            if registry.get(route.frontier_id).eligible:
-                registry.mark_attempted(
-                    route.frontier_id, self._num_steps[env]
-                )
+            self._record_remote_frontier_outcome(
+                env, route.frontier_id, outcome=str(outcome)
+            )
         self._record_submap_policy_event(
             env,
             "remote_route_finished",
@@ -1474,6 +1715,18 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             return None
         graph = self._submap_manager.graph(env)
         active = self._submap_manager.active_bundle(env)
+        if route.frontier_id is not None:
+            record = self._submap_manager.registry(env).get(
+                route.frontier_id
+            )
+            if (
+                record.status is FrontierStatus.RECONSIDERING
+                and record.reconsideration_submap_id != active.submap_id
+            ):
+                self._finish_remote_route(
+                    env, outcome="reconsideration_crossed_second_boundary"
+                )
+                return None
         try:
             route.rebase_execution_submap(graph, active.submap_id)
         except (KeyError, RuntimeError):
@@ -1583,10 +1836,17 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         env: int,
         masks: Tensor,
     ) -> Optional[Tensor]:
-        plan = (
-            self._submap_manager.query_view(env)
-            .best_remote_frontier_plan()
-        )
+        plan = self._submap_manager.query_view(
+            env
+        ).best_remote_frontier_plan()
+        reconsideration = False
+        if plan is None and getattr(
+            self,
+            "_submap_frontier_evidence_maturity_enabled",
+            False,
+        ):
+            plan = self._review_tentative_frontiers(env)
+            reconsideration = plan is not None
         if plan is None:
             return None
         frontier = self._submap_manager.registry(env).get(
@@ -1599,6 +1859,7 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             target_kind="frontier",
             candidate_key=f"frontier:{frontier.frontier_id}",
             frontier_id=frontier.frontier_id,
+            frontier_reconsideration=reconsideration,
         )
         if route is None:
             return None

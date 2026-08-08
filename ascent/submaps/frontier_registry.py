@@ -12,9 +12,10 @@ from ascent.submaps.types import FrontierRecord, FrontierStatus
 class FrontierRegistry:
     """Registry that never merges candidates using untrusted global XY alone."""
 
-    def __init__(self) -> None:
+    def __init__(self, evidence_maturity_enabled: bool = False) -> None:
         self._records: Dict[str, FrontierRecord] = {}
         self._next_index_by_submap: Dict[str, int] = {}
+        self.evidence_maturity_enabled = bool(evidence_maturity_enabled)
 
     @property
     def records(self) -> Dict[str, FrontierRecord]:
@@ -94,6 +95,107 @@ class FrontierRegistry:
             raise RuntimeError(f"Cannot attempt inactive frontier {frontier_id}")
         record.status = FrontierStatus.ATTEMPTED
         record.attempt_count += 1
+        record.last_update_step = int(step)
+
+    def mark_remote_failure(
+        self,
+        frontier_id: str,
+        *,
+        submap_id: str,
+        view_local_xy: np.ndarray,
+        step: int,
+        reason: str,
+    ) -> FrontierStatus:
+        """Record bounded negative evidence from remote-frontier execution.
+
+        With evidence maturity disabled this is exactly the v1.2 ATTEMPTED
+        transition.  With it enabled, the first negative observation is only
+        tentative; failure of the sole reconsideration is globally final.
+        """
+
+        record = self.get(frontier_id)
+        if not self.evidence_maturity_enabled:
+            self.mark_attempted(frontier_id, step)
+            return record.status
+        view = np.asarray(view_local_xy, dtype=np.float64)
+        if view.shape != (2,) or not np.isfinite(view).all():
+            raise ValueError("view_local_xy must be a finite XY point")
+        if record.status is FrontierStatus.RECONSIDERING:
+            self.confirm_retired(
+                frontier_id,
+                step=step,
+                reason=f"reconsideration_failed:{reason}",
+                count_attempt=True,
+            )
+            return record.status
+        if record.status not in {
+            FrontierStatus.ACTIVE,
+            FrontierStatus.SELECTED,
+        }:
+            raise RuntimeError(
+                f"Cannot suppress frontier {frontier_id} from {record.status}"
+            )
+        record.status = FrontierStatus.TENTATIVE_SUPPRESSION
+        record.attempt_count += 1
+        record.negative_support_submap_id = str(submap_id)
+        record.negative_support_view_local_xy = view.copy()
+        record.negative_support_step = int(step)
+        record.negative_support_reason = str(reason)
+        record.last_update_step = int(step)
+        return record.status
+
+    def tentative(self) -> List[FrontierRecord]:
+        return sorted(
+            (
+                record
+                for record in self._records.values()
+                if record.status is FrontierStatus.TENTATIVE_SUPPRESSION
+            ),
+            key=lambda record: (
+                -record.score,
+                record.creation_step,
+                record.frontier_id,
+            ),
+        )
+
+    def mark_reconsidering(
+        self, frontier_id: str, *, submap_id: str, step: int
+    ) -> None:
+        record = self.get(frontier_id)
+        if record.status is not FrontierStatus.TENTATIVE_SUPPRESSION:
+            raise RuntimeError(
+                f"Cannot reconsider frontier {frontier_id} from {record.status}"
+            )
+        if record.reconsideration_count != 0:
+            raise RuntimeError(
+                f"Frontier {frontier_id} already used its reconsideration"
+            )
+        if record.negative_support_submap_id == str(submap_id):
+            raise RuntimeError(
+                "Frontier reconsideration requires a different submap"
+            )
+        record.status = FrontierStatus.RECONSIDERING
+        record.reconsideration_count = 1
+        record.reconsideration_submap_id = str(submap_id)
+        record.selection_count += 1
+        record.last_update_step = int(step)
+
+    def confirm_retired(
+        self,
+        frontier_id: str,
+        *,
+        step: int,
+        reason: str,
+        count_attempt: bool = False,
+    ) -> None:
+        record = self.get(frontier_id)
+        if record.status is FrontierStatus.CONFIRMED_RETIRED:
+            return
+        if count_attempt:
+            record.attempt_count += 1
+        record.status = FrontierStatus.CONFIRMED_RETIRED
+        record.confirmed_retirement_step = int(step)
+        record.confirmed_retirement_reason = str(reason)
         record.last_update_step = int(step)
 
     def mark_resolved(

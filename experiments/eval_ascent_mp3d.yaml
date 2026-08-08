@@ -19,6 +19,7 @@ ascent_vo:
 
 ascent_submaps:
   enabled: ${oc.env:ASCENT_SUBMAP_ENABLED,false}
+  frontier_evidence_maturity_enabled: ${oc.env:ASCENT_SUBMAP_FRONTIER_EVIDENCE_MATURITY_ENABLED,false}
   handoff_enabled: ${oc.env:ASCENT_SUBMAP_HANDOFF_ENABLED,false}
   exhaustion_recovery_enabled: ${oc.env:ASCENT_SUBMAP_EXHAUSTION_RECOVERY_ENABLED,false}
   min_action_endpoints: 20

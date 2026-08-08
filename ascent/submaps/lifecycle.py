@@ -21,6 +21,7 @@ from ascent.submaps.types import (
 @dataclass(frozen=True)
 class SubmapLifecycleConfig:
     enabled: bool = False
+    frontier_evidence_maturity_enabled: bool = False
     min_action_endpoints: int = 20
     min_anchor_displacement_m: float = 1.5
     min_path_length_m: float = 1.5
@@ -93,10 +94,21 @@ class SubmapManager:
         if num_envs < 1:
             raise ValueError("num_envs must be positive")
         self.config = config
-        self._environments = [_EnvironmentMemory() for _ in range(num_envs)]
+        self._environments = [
+            self._new_environment_memory() for _ in range(num_envs)
+        ]
+
+    def _new_environment_memory(self) -> _EnvironmentMemory:
+        return _EnvironmentMemory(
+            registry=FrontierRegistry(
+                evidence_maturity_enabled=(
+                    self.config.frontier_evidence_maturity_enabled
+                )
+            )
+        )
 
     def reset(self, env: int) -> None:
-        self._environments[env] = _EnvironmentMemory()
+        self._environments[env] = self._new_environment_memory()
 
     def _new_submap_id(self, env: int) -> str:
         memory = self._environments[env]

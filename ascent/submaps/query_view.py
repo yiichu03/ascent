@@ -118,6 +118,44 @@ class SubmapQueryView:
             for hops, _, frontier, edge in candidates
         ]
 
+    def plan_to_frontier(self, frontier_id: str) -> RemoteFrontierPlan:
+        """Plan to one explicitly authorized frontier, regardless of status."""
+
+        frontier = self._registry.get(frontier_id)
+        active = self._graph.get_node(self.active_submap_id)
+        edge: Optional[GatewayEdge] = None
+        hops = 0
+        direct = None
+        if frontier.source_submap_id == self.active_submap_id:
+            direct = frontier.local_xy.copy()
+        elif active.reference_submap_id == frontier.source_submap_id:
+            direct = self.project_points_to_active(
+                frontier.source_submap_id,
+                frontier.local_xy.reshape(1, 2),
+            )[0]
+        else:
+            path = self._graph.shortest_path(
+                self.active_submap_id, frontier.source_submap_id
+            )
+            if len(path) < 2:
+                raise ValueError(
+                    f"No route to frontier {frontier.frontier_id}"
+                )
+            hops = len(path) - 1
+            edge = self._graph.edge_between(path[0], path[1])
+        return RemoteFrontierPlan(
+            frontier_id=frontier.frontier_id,
+            source_submap_id=frontier.source_submap_id,
+            next_gateway_edge_id=None if edge is None else edge.edge_id,
+            next_gateway_local_xy=(
+                None
+                if edge is None
+                else edge.endpoint_for(self.active_submap_id)[:2]
+            ),
+            graph_hops=hops,
+            direct_frontier_local_xy=direct,
+        )
+
     def best_remote_frontier_plan(self) -> Optional[RemoteFrontierPlan]:
         plans = self.remote_frontier_plans()
         return plans[0] if plans else None

@@ -20,6 +20,9 @@ class SubmapState(str, Enum):
 class FrontierStatus(str, Enum):
     ACTIVE = "active"
     SELECTED = "selected"
+    TENTATIVE_SUPPRESSION = "tentative_suppression"
+    RECONSIDERING = "reconsidering"
+    CONFIRMED_RETIRED = "confirmed_retired"
     ATTEMPTED = "attempted"
     RESOLVED = "resolved"
     SUPERSEDED = "superseded"
@@ -53,12 +56,27 @@ class FrontierRecord:
     selection_count: int = 0
     attempt_count: int = 0
     last_update_step: int = 0
+    negative_support_submap_id: Optional[str] = None
+    negative_support_view_local_xy: Optional[np.ndarray] = None
+    negative_support_step: Optional[int] = None
+    negative_support_reason: Optional[str] = None
+    reconsideration_count: int = 0
+    reconsideration_submap_id: Optional[str] = None
+    confirmed_retirement_step: Optional[int] = None
+    confirmed_retirement_reason: Optional[str] = None
 
     def __post_init__(self) -> None:
         point = np.asarray(self.local_xy, dtype=np.float64)
         if point.shape != (2,) or not np.isfinite(point).all():
             raise ValueError(f"Invalid frontier point: {point}")
         self.local_xy = point.copy()
+        if self.negative_support_view_local_xy is not None:
+            view = np.asarray(
+                self.negative_support_view_local_xy, dtype=np.float64
+            )
+            if view.shape != (2,) or not np.isfinite(view).all():
+                raise ValueError(f"Invalid negative-support view: {view}")
+            self.negative_support_view_local_xy = view.copy()
 
     @property
     def eligible(self) -> bool:
