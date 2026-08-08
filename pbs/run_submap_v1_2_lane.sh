@@ -157,7 +157,7 @@ export SAM_PORT=$((BASE_PORT + 2))
 export GROUNDING_DINO_PORT=$((BASE_PORT + 3))
 export RAM_PORT=$((BASE_PORT + 4))
 export DFINE_PORT=$((BASE_PORT + 5))
-export PYTHONPATH="$SOURCE_ROOT:$RESOURCE_ROOT/third_party/vlfm:$RESOURCE_ROOT/third_party/habitat-lab/habitat-lab:$RESOURCE_ROOT/third_party/habitat-lab/habitat-baselines:$RESOURCE_ROOT/third_party/frontier_exploration:$RESOURCE_ROOT/third_party/depth_camera_filtering:$RESOURCE_ROOT/third_party/MobileSAM:$RESOURCE_ROOT/third_party/GroundingDINO:$RESOURCE_ROOT/third_party/D-FINE:$RESOURCE_ROOT/third_party/recognize-anything:$RESOURCE_ROOT/third_party/places365"
+export PYTHONPATH="$SOURCE_ROOT:$RESOURCE_ROOT:$RESOURCE_ROOT/third_party/vlfm:$RESOURCE_ROOT/third_party/habitat-lab/habitat-lab:$RESOURCE_ROOT/third_party/habitat-lab/habitat-baselines:$RESOURCE_ROOT/third_party/frontier_exploration:$RESOURCE_ROOT/third_party/depth_camera_filtering:$RESOURCE_ROOT/third_party/MobileSAM:$RESOURCE_ROOT/third_party/GroundingDINO:$RESOURCE_ROOT/third_party/D-FINE:$RESOURCE_ROOT/third_party/recognize-anything:$RESOURCE_ROOT/third_party/places365"
 unset ASCENT_SUBMAP_HANDOFF_LIVE_CONFIRMATION_ENABLED
 unset ASCENT_SUBMAP_ROUTE_GATEWAY_REPLAN_ENABLED
 unset ASCENT_SUBMAP_FRONTIER_EVIDENCE_MATURITY_ENABLED

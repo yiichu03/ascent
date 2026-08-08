@@ -35,12 +35,20 @@ def main() -> int:
         raise SystemExit("candidate source and resource roots must differ")
 
     search_path = [resolved_path(entry) for entry in sys.path]
-    if resource_root in search_path:
-        raise SystemExit(
-            f"resource root shadows candidate imports: {resource_root}"
-        )
     if source_root not in search_path:
         raise SystemExit(f"candidate source missing from sys.path: {source_root}")
+    source_index = search_path.index(source_root)
+    resource_indices = [
+        index
+        for index, path in enumerate(search_path)
+        if path == resource_root
+    ]
+    if resource_indices and min(resource_indices) < source_index:
+        raise SystemExit(
+            "frozen resource checkout precedes candidate source on "
+            f"sys.path: resource={min(resource_indices)} "
+            f"source={source_index}"
+        )
 
     origins: dict[str, str] = {}
     for module in args.modules:
@@ -67,6 +75,8 @@ def main() -> int:
         "resource_root": str(resource_root),
         "cwd": str(Path.cwd().resolve()),
         "sys_path": [str(path) for path in search_path],
+        "source_path_index": source_index,
+        "resource_path_indices": resource_indices,
         "module_origins": origins,
     }
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
