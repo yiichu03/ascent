@@ -1554,6 +1554,27 @@ def test_v1_2_variant_harness_is_isolated_and_default_safe() -> None:
     assert '"$SOURCE_ROOT/model_api"' in worker
     assert '"$SOURCE_ROOT/scripts"' in worker
     assert 'cd "$RESOURCE_ROOT"' in worker
+    assert (
+        "SOURCE_IMPORT_CHECK="
+        "$SOURCE_ROOT/scripts/check_submap_source_imports.py"
+    ) in worker
+    assert '"$ASCENT_PYTHON" "$SOURCE_IMPORT_CHECK"' in worker
+    assert '--source-root "$SOURCE_ROOT"' in worker
+    assert '--resource-root "$RESOURCE_ROOT"' in worker
+    assert (
+        '"$ASCENT_PYTHON" -u "$SOURCE_ROOT/ascent/run.py"' in worker
+    )
+    assert '-m ascent.run' not in worker
+    assert '"$ASCENT_PYTHON" -u -m "$module"' not in worker
+    for service_script in (
+        "qwen25_out.py",
+        "blip2itm_out.py",
+        "sam_out.py",
+        "grounding_dino_out.py",
+        "ram_out.py",
+        "dfine_out.py",
+    ):
+        assert f'"$SOURCE_ROOT/model_api/{service_script}"' in worker
     assert '"habitat.dataset.split=$DATA_SPLIT"' in worker
     assert '"habitat_baselines.eval.split=$DATA_SPLIT"' in worker
     assert "habitat.dataset.split=train" not in worker
@@ -1650,6 +1671,54 @@ def test_v1_2_variant_harness_is_isolated_and_default_safe() -> None:
     assert '"submap_event_counts_json"' in v1_2_summarizer
     assert '"DESCRIPTIVE_ONLY"' in v1_2_summarizer
     assert "sr_delta >= 0.02" not in v1_2_summarizer
+
+
+def test_v1_2_runtime_cwd_imports_candidate_source() -> None:
+    resource_root = ROOT.parent / "ascent"
+    checker = ROOT / "scripts" / "check_submap_source_imports.py"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = ":".join(
+        str(path)
+        for path in (
+            ROOT,
+            resource_root / "third_party" / "vlfm",
+            resource_root / "third_party" / "habitat-lab" / "habitat-lab",
+            resource_root
+            / "third_party"
+            / "habitat-lab"
+            / "habitat-baselines",
+        )
+    )
+    output = ROOT / ".pytest_cache" / "candidate_import_check.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.unlink(missing_ok=True)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(checker),
+            "--source-root",
+            str(ROOT),
+            "--resource-root",
+            str(resource_root),
+            "--output-json",
+            str(output),
+            "ascent.run",
+            "ascent.ascent_policy",
+            "model_api.qwen25_out",
+            "model_api.sam_out",
+        ],
+        cwd=resource_root,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(output.read_text())
+    assert payload["status"] == "PASS"
+    assert payload["cwd"] == str(resource_root.resolve())
+    for origin in payload["module_origins"].values():
+        assert ROOT.resolve() in Path(origin).resolve().parents
 
 
 def test_v1_2_variant_submitter_rejects_unknown_variant() -> None:
