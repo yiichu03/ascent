@@ -110,22 +110,30 @@ class LiveFrontierConfirmation:
     raw_candidate_count: int
     live_candidate_count: int
     enabled_candidate_count: int
-    connected_candidate_count: int
+    connected_execution_waypoint_count: int
     forward_candidate_count: int
     corridor_candidate_count: int
+    selected_live_frontier_local: Optional[np.ndarray] = None
     selected_projection_m: Optional[float] = None
     selected_lateral_distance_m: Optional[float] = None
     selected_target_distance_m: Optional[float] = None
 
     def __post_init__(self) -> None:
-        if self.waypoint_local is None:
-            return
-        waypoint = np.asarray(self.waypoint_local, dtype=np.float64)
-        if waypoint.shape != (2,) or not np.isfinite(waypoint).all():
-            raise ValueError("confirmed live frontier must be finite XY")
-        waypoint = waypoint.copy()
-        waypoint.setflags(write=False)
-        object.__setattr__(self, "waypoint_local", waypoint)
+        for field_name in (
+            "waypoint_local",
+            "selected_live_frontier_local",
+        ):
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            point = np.asarray(value, dtype=np.float64)
+            if point.shape != (2,) or not np.isfinite(point).all():
+                raise ValueError(
+                    f"live-frontier confirmation {field_name} must be finite XY"
+                )
+            point = point.copy()
+            point.setflags(write=False)
+            object.__setattr__(self, field_name, point)
 
     def event_payload(self) -> Dict[str, object]:
         payload: Dict[str, object] = {
@@ -133,8 +141,8 @@ class LiveFrontierConfirmation:
             "raw_candidate_count": int(self.raw_candidate_count),
             "live_candidate_count": int(self.live_candidate_count),
             "enabled_candidate_count": int(self.enabled_candidate_count),
-            "connected_candidate_count": int(
-                self.connected_candidate_count
+            "connected_execution_waypoint_count": int(
+                self.connected_execution_waypoint_count
             ),
             "forward_candidate_count": int(self.forward_candidate_count),
             "corridor_candidate_count": int(
@@ -143,6 +151,10 @@ class LiveFrontierConfirmation:
         }
         if self.waypoint_local is not None:
             payload["waypoint_local"] = self.waypoint_local.tolist()
+        if self.selected_live_frontier_local is not None:
+            payload["selected_live_frontier_local"] = (
+                self.selected_live_frontier_local.tolist()
+            )
             payload["selected_projection_m"] = float(
                 self.selected_projection_m
             )
@@ -337,11 +349,13 @@ def confirm_handoff_with_live_frontiers(
     inherited_target_xy: Sequence[float],
     corridor_radius_m: float,
 ) -> LiveFrontierConfirmation:
-    """Reground a pending handoff onto a live destination-map frontier.
+    """Confirm live directional evidence, then project a safe waypoint.
 
     The destination map is expected to have consumed its normal current RGB-D
-    update before this function is called.  Candidate ordering never affects
-    the answer: target distance, X, then Y form the deterministic tie-break.
+    update before this function is called.  A frontier lies on the dilated
+    explored contour, so it is evidence rather than an execution waypoint.
+    Candidate ordering never affects the answer: target distance, X, then Y
+    form the deterministic tie-break before safe connected projection.
     """
 
     robot = np.asarray(robot_xy, dtype=np.float64)
@@ -380,22 +394,6 @@ def confirm_handoff_with_live_frontiers(
     else:
         enabled = enabled.reshape(-1, 2)
     enabled_count = len(enabled)
-    connected = np.asarray(
-        [
-            point
-            for point in enabled
-            if waypoint_in_robot_component(
-                obstacle_map, robot_xy=robot, waypoint_xy=point
-            )
-        ],
-        dtype=np.float64,
-    )
-    if connected.size == 0:
-        connected = np.empty((0, 2), dtype=np.float64)
-    else:
-        connected = connected.reshape(-1, 2)
-    connected_count = len(connected)
-
     direction = target - origin
     direction_norm = float(np.linalg.norm(direction))
     if direction_norm <= np.finfo(np.float64).eps:
@@ -405,15 +403,15 @@ def confirm_handoff_with_live_frontiers(
             raw_candidate_count=raw_count,
             live_candidate_count=live_count,
             enabled_candidate_count=enabled_count,
-            connected_candidate_count=connected_count,
+            connected_execution_waypoint_count=0,
             forward_candidate_count=0,
             corridor_candidate_count=0,
         )
     unit_direction = direction / direction_norm
-    offsets = connected - origin
+    offsets = enabled - origin
     projections = offsets @ unit_direction
     forward_mask = projections > 0.0
-    forward = connected[forward_mask]
+    forward = enabled[forward_mask]
     forward_projections = projections[forward_mask]
     forward_count = len(forward)
     lateral = np.linalg.norm(
@@ -432,8 +430,6 @@ def confirm_handoff_with_live_frontiers(
             reason = "no_live_frontiers"
         elif enabled_count == 0:
             reason = "no_enabled_frontiers"
-        elif connected_count == 0:
-            reason = "no_connected_frontiers"
         elif forward_count == 0:
             reason = "no_forward_frontiers"
         else:
@@ -444,7 +440,7 @@ def confirm_handoff_with_live_frontiers(
             raw_candidate_count=raw_count,
             live_candidate_count=live_count,
             enabled_candidate_count=enabled_count,
-            connected_candidate_count=connected_count,
+            connected_execution_waypoint_count=0,
             forward_candidate_count=forward_count,
             corridor_candidate_count=0,
         )
@@ -454,15 +450,37 @@ def confirm_handoff_with_live_frontiers(
         (corridor[:, 1], corridor[:, 0], target_distances)
     )
     selected = int(order[0])
+    selected_live_frontier = corridor[selected]
+    execution_waypoint = select_connected_handoff_waypoint(
+        obstacle_map,
+        robot_xy=robot,
+        old_frontier_direction_xy=selected_live_frontier,
+    )
+    if execution_waypoint is None:
+        return LiveFrontierConfirmation(
+            waypoint_local=None,
+            reason="no_connected_execution_waypoint",
+            raw_candidate_count=raw_count,
+            live_candidate_count=live_count,
+            enabled_candidate_count=enabled_count,
+            connected_execution_waypoint_count=0,
+            forward_candidate_count=forward_count,
+            corridor_candidate_count=corridor_count,
+            selected_live_frontier_local=selected_live_frontier,
+            selected_projection_m=float(corridor_projections[selected]),
+            selected_lateral_distance_m=float(corridor_lateral[selected]),
+            selected_target_distance_m=float(target_distances[selected]),
+        )
     return LiveFrontierConfirmation(
-        waypoint_local=corridor[selected],
+        waypoint_local=execution_waypoint,
         reason="confirmed",
         raw_candidate_count=raw_count,
         live_candidate_count=live_count,
         enabled_candidate_count=enabled_count,
-        connected_candidate_count=connected_count,
+        connected_execution_waypoint_count=1,
         forward_candidate_count=forward_count,
         corridor_candidate_count=corridor_count,
+        selected_live_frontier_local=selected_live_frontier,
         selected_projection_m=float(corridor_projections[selected]),
         selected_lateral_distance_m=float(corridor_lateral[selected]),
         selected_target_distance_m=float(target_distances[selected]),

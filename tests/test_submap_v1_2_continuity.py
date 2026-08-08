@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import cv2
 import numpy as np
 import pytest
 import torch
@@ -51,6 +52,36 @@ def _mark_connected_region(
     y1 = min(obstacle.explored_area.shape[0], int(np.max(pixels[:, 1])) + 2)
     obstacle.explored_area[y0:y1, x0:x1] = True
     obstacle._strict_navigable_map[y0:y1, x0:x1] = True
+
+
+def _obstacle_with_detected_frontier(
+    shape: str,
+) -> tuple[ObstacleMap, np.ndarray, np.ndarray, np.ndarray]:
+    obstacle = _map()
+    obstacle._tight_search_thresh = True
+    obstacle._navigable_map.fill(True)
+    obstacle._strict_navigable_map.fill(True)
+    explored = np.zeros_like(obstacle.explored_area, dtype=np.uint8)
+    if shape == "circle":
+        cv2.circle(explored, (50, 50), 18, 1, -1)
+    elif shape == "rectangle":
+        cv2.rectangle(explored, (30, 35), (70, 65), 1, -1)
+    elif shape == "corridor":
+        cv2.rectangle(explored, (45, 45), (75, 55), 1, -1)
+    else:
+        raise ValueError(shape)
+    obstacle.explored_area[:] = explored.astype(bool)
+    frontier_pixels = obstacle._get_frontiers()
+    assert len(frontier_pixels) == 1
+    obstacle._frontiers_px = frontier_pixels
+    obstacle.frontiers = obstacle._px_to_xy(frontier_pixels)
+    robot = obstacle._px_to_xy(np.array([[50, 50]]))[0]
+    frontier = obstacle.frontiers[0]
+    rounded_frontier_px = np.rint(frontier_pixels[0]).astype(np.int64)
+    assert not obstacle.explored_area[
+        rounded_frontier_px[1], rounded_frontier_px[0]
+    ]
+    return obstacle, robot, frontier, frontier_pixels[0]
 
 
 def _policy_for_handoff_execution(
@@ -209,10 +240,16 @@ def test_live_frontier_confirmation_retargets_deterministically() -> None:
     )
 
     assert result.reason == "confirmed"
-    np.testing.assert_allclose(result.waypoint_local, lower_tie)
+    np.testing.assert_allclose(
+        result.selected_live_frontier_local, lower_tie
+    )
+    assert waypoint_in_robot_component(
+        obstacle, robot_xy=robot, waypoint_xy=result.waypoint_local
+    )
     assert result.raw_candidate_count == 4
     assert result.live_candidate_count == 3
     assert result.corridor_candidate_count == 3
+    assert result.connected_execution_waypoint_count == 1
 
 
 def test_live_frontier_confirmation_filters_disabled_candidate() -> None:
@@ -234,23 +271,23 @@ def test_live_frontier_confirmation_filters_disabled_candidate() -> None:
 
     assert result.reason == "confirmed"
     assert result.enabled_candidate_count == 1
-    np.testing.assert_allclose(result.waypoint_local, enabled)
+    np.testing.assert_allclose(
+        result.selected_live_frontier_local, enabled
+    )
+    assert waypoint_in_robot_component(
+        obstacle, robot_xy=robot, waypoint_xy=result.waypoint_local
+    )
 
 
-def test_live_frontier_confirmation_rejects_disconnected_candidate() -> None:
+def test_live_frontier_confirmation_rejects_without_safe_execution_point() -> None:
     obstacle = _map()
     robot = np.array([0.0, 0.0])
     candidate = np.array([2.0, 0.0])
     obstacle.frontiers = candidate.reshape(1, 2)
-    robot_px, candidate_px = obstacle._xy_to_px(
-        np.vstack([robot, candidate])
-    )
-    for pixel in (robot_px, candidate_px):
-        x, y = int(pixel[0]), int(pixel[1])
-        obstacle.explored_area[y - 1 : y + 2, x - 1 : x + 2] = True
-        obstacle._strict_navigable_map[
-            y - 1 : y + 2, x - 1 : x + 2
-        ] = True
+    robot_px = obstacle._xy_to_px(robot.reshape(1, 2))[0]
+    x, y = int(robot_px[0]), int(robot_px[1])
+    obstacle.explored_area[y, x] = True
+    obstacle._strict_navigable_map[y, x] = True
 
     result = confirm_handoff_with_live_frontiers(
         obstacle,
@@ -261,8 +298,39 @@ def test_live_frontier_confirmation_rejects_disconnected_candidate() -> None:
     )
 
     assert result.waypoint_local is None
-    assert result.reason == "no_connected_frontiers"
-    assert result.connected_candidate_count == 0
+    assert result.reason == "no_connected_execution_waypoint"
+    assert result.connected_execution_waypoint_count == 0
+    assert result.corridor_candidate_count == 1
+    np.testing.assert_allclose(
+        result.selected_live_frontier_local, candidate
+    )
+
+
+@pytest.mark.parametrize("shape", ["circle", "rectangle", "corridor"])
+def test_real_detector_frontier_confirms_via_safe_projection(
+    shape: str,
+) -> None:
+    obstacle, robot, live_frontier, _ = _obstacle_with_detected_frontier(
+        shape
+    )
+    inherited_target = robot + 1.2 * (live_frontier - robot)
+
+    result = confirm_handoff_with_live_frontiers(
+        obstacle,
+        robot_xy=robot,
+        ray_origin_xy=robot,
+        inherited_target_xy=inherited_target,
+        corridor_radius_m=1.0,
+    )
+
+    assert result.reason == "confirmed"
+    np.testing.assert_allclose(
+        result.selected_live_frontier_local, live_frontier
+    )
+    assert not np.allclose(result.waypoint_local, live_frontier)
+    assert waypoint_in_robot_component(
+        obstacle, robot_xy=robot, waypoint_xy=result.waypoint_local
+    )
 
 
 def test_handoff_flag_off_keeps_v1_2_waypoint_without_live_frontier() -> None:
@@ -291,13 +359,16 @@ def test_handoff_flag_off_keeps_v1_2_waypoint_without_live_frontier() -> None:
 
 
 def test_handoff_confirms_and_executes_retarget_in_same_decision() -> None:
-    obstacle = _map()
-    inherited_target = np.array([3.0, 0.0])
-    live_frontier = np.array([2.6, 0.2])
-    obstacle.frontiers = live_frontier.reshape(1, 2)
-    _mark_connected_region(
-        obstacle, [np.zeros(2), inherited_target, live_frontier]
+    obstacle, robot, live_frontier, _ = _obstacle_with_detected_frontier(
+        "corridor"
     )
+    inherited_target = robot + 1.2 * (live_frontier - robot)
+    expected_waypoint = select_connected_handoff_waypoint(
+        obstacle,
+        robot_xy=robot,
+        old_frontier_direction_xy=live_frontier,
+    )
+    assert expected_waypoint is not None
     handoff = BoundaryHandoff(
         waypoint_local=np.array([1.2, 0.0]),
         source_submap_id="old",
@@ -317,7 +388,7 @@ def test_handoff_confirms_and_executes_retarget_in_same_decision() -> None:
     )
 
     assert action is not None and action.item() == MOVE_FORWARD
-    np.testing.assert_allclose(targets, [live_frontier])
+    np.testing.assert_allclose(targets, [expected_waypoint])
     assert not handoff.live_frontier_confirmation_pending
     assert [event for event, _ in events] == [
         "handoff_live_frontier_confirmed",
