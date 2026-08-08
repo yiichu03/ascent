@@ -51,7 +51,7 @@ from ascent.submaps import (
     transform_points_xy,
     waypoint_in_robot_component,
 )
-from ascent.submaps.types import SubmapState
+from ascent.submaps.types import FrontierStatus, SubmapState
 from ascent.utils import (
     xyz_yaw_pitch_roll_to_tf_matrix,
     check_stairs_in_upper_50_percent,
@@ -1458,11 +1458,12 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         route = self._submap_remote_route[env]
         if route is None:
             return
-        if (
+        paused_local_target_preempt = (
             getattr(self, "_submap_route_gateway_replan_enabled", False)
             and route.awaiting_local_replan
             and outcome == "preempted_by_local_detection"
-        ):
+        )
+        if paused_local_target_preempt:
             self._record_submap_policy_event(
                 env,
                 "remote_route_gateway_replan_preempted",
@@ -1473,10 +1474,23 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 frontier_id=route.frontier_id,
                 waypoint_index=int(route.cursor),
                 outcome=str(outcome),
+                frontier_disposition=(
+                    "released_selected_unattempted"
+                    if route.frontier_id is not None
+                    else "not_applicable"
+                ),
             )
         if route.frontier_id is not None:
             registry = self._submap_manager.registry(env)
-            if registry.get(route.frontier_id).eligible:
+            frontier = registry.get(route.frontier_id)
+            if (
+                paused_local_target_preempt
+                and frontier.status is FrontierStatus.SELECTED
+            ):
+                registry.release_selected(
+                    route.frontier_id, self._num_steps[env]
+                )
+            elif frontier.eligible:
                 registry.mark_attempted(
                     route.frontier_id, self._num_steps[env]
                 )

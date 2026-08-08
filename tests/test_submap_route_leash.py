@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 
 from ascent.ascent_policy import Ascent_Policy
@@ -104,6 +105,24 @@ def _no_frontier_obstacle() -> SimpleNamespace:
         _up_stair_frontiers=np.empty((0, 2)),
         _down_stair_frontiers=np.empty((0, 2)),
         _this_floor_explored=False,
+    )
+
+
+def _append_local_split(manager: SubmapManager, index: int) -> None:
+    active = manager.active_bundle(0)
+    next_pose = np.asarray(active.anchor_pose_world).copy()
+    next_pose[0] += 1.0
+    decision = manager.observe_action_endpoint(
+        0, next_pose, 0, 0.0
+    )
+    assert decision.should_split
+    manager.commit_split(
+        0,
+        next_pose,
+        0,
+        _payload(f"local-{index}"),
+        20 + index,
+        np.empty((0, 2), dtype=np.float64),
     )
 
 
@@ -237,6 +256,33 @@ def test_native_no_frontier_fallback_resumes_next_route_segment() -> None:
     )
 
 
+@pytest.mark.parametrize("local_split_count", [0, 1, 2])
+def test_paused_route_resumes_after_local_splits(
+    local_split_count: int,
+) -> None:
+    policy, route, frontier_id, events = _route_policy(enabled=True)
+    masks = torch.ones((1, 1), dtype=torch.bool)
+    assert policy._execute_remote_route(None, 0, masks) is None
+    for index in range(local_split_count):
+        _append_local_split(policy._submap_manager, index)
+    policy._observations_cache[0]["robot_xy"] = np.zeros(2)
+
+    action = policy._submap_remote_fallback_action(None, 0, masks)
+
+    assert action is not None and action.item() == 1
+    assert policy._submap_remote_route[0] is route
+    assert route.execution_submap_id == (
+        policy._submap_manager.active_bundle(0).submap_id
+    )
+    assert policy._submap_manager.registry(0).get(
+        frontier_id
+    ).status is FrontierStatus.SELECTED
+    assert not any(
+        event.get("outcome") == "execution_frame_disconnected"
+        for event in events
+    )
+
+
 def test_local_target_preempts_paused_route_with_explicit_event() -> None:
     policy, route, frontier_id, events = _route_policy(enabled=True)
     assert (
@@ -253,12 +299,16 @@ def test_local_target_preempts_paused_route_with_explicit_event() -> None:
     )
 
     assert policy._submap_remote_route[0] is None
-    assert policy._submap_manager.registry(0).get(
-        frontier_id
-    ).status is FrontierStatus.ATTEMPTED
-    assert any(
-        event["event"] == "remote_route_gateway_replan_preempted"
+    frontier = policy._submap_manager.registry(0).get(frontier_id)
+    assert frontier.status is FrontierStatus.ACTIVE
+    assert frontier.attempt_count == 0
+    preempt = next(
+        event
         for event in events
+        if event["event"] == "remote_route_gateway_replan_preempted"
+    )
+    assert preempt["frontier_disposition"] == (
+        "released_selected_unattempted"
     )
 
 

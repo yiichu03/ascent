@@ -88,6 +88,17 @@ class FrontierRegistry:
         record.selection_count += 1
         record.last_update_step = int(step)
 
+    def release_selected(self, frontier_id: str, step: int) -> None:
+        """Return an unattempted selected frontier to the eligible pool."""
+
+        record = self.get(frontier_id)
+        if record.status is not FrontierStatus.SELECTED:
+            raise RuntimeError(
+                f"Cannot release non-selected frontier {frontier_id}"
+            )
+        record.status = FrontierStatus.ACTIVE
+        record.last_update_step = int(step)
+
     def mark_attempted(self, frontier_id: str, step: int) -> None:
         record = self.get(frontier_id)
         if not record.eligible:

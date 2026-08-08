@@ -173,7 +173,7 @@ class RemoteRoute:
     def rebase_execution_submap(
         self, graph: SubmapGraph, new_execution_submap_id: str
     ) -> None:
-        """Carry route alignment across a lifecycle split using its gateway."""
+        """Carry alignment through every intervening lifecycle gateway."""
 
         new_id = str(new_execution_submap_id)
         old_id = self.execution_submap_id
@@ -181,17 +181,24 @@ class RemoteRoute:
             return
         if old_id is None:
             raise RuntimeError("Route has no execution submap")
-        edge = graph.edge_between(old_id, new_id)
-        old_endpoint = edge.endpoint_for(old_id)
-        new_endpoint = edge.endpoint_for(new_id)
-        new_from_old = (
-            pose_to_matrix(new_endpoint)
-            @ np.linalg.inv(pose_to_matrix(old_endpoint))
-        )
-        self.owner_to_execution_transform = (
-            new_from_old @ self.owner_to_execution_transform
-        )
-        self.execution_submap_id = new_id
+        path = graph.shortest_path(old_id, new_id)
+        if len(path) < 2:
+            raise RuntimeError(
+                f"No gateway path from {old_id} to {new_id}"
+            )
+        for source_id, destination_id in zip(path, path[1:]):
+            edge = graph.edge_between(source_id, destination_id)
+            source_endpoint = edge.endpoint_for(source_id)
+            destination_endpoint = edge.endpoint_for(destination_id)
+            destination_from_source = (
+                pose_to_matrix(destination_endpoint)
+                @ np.linalg.inv(pose_to_matrix(source_endpoint))
+            )
+            self.owner_to_execution_transform = (
+                destination_from_source
+                @ self.owner_to_execution_transform
+            )
+            self.execution_submap_id = destination_id
 
     def reach_current_waypoint(
         self,
