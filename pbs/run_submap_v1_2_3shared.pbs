@@ -156,7 +156,7 @@ mkdir -p "$RUN_ROOT"/{checks,lanes,mpl_config,xdg_cache}
 
 export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1
 export LD_LIBRARY_PATH="$ASCENT_ENV/lib:$ASCENT_ENV/lib64:$ASCENT_ENV/lib/python3.9/site-packages/torch/lib:${LD_LIBRARY_PATH:-}"
-export PYTHONPATH="$SOURCE_ROOT:$RESOURCE_ROOT/third_party/vlfm:$RESOURCE_ROOT/third_party/habitat-lab/habitat-lab:$RESOURCE_ROOT/third_party/habitat-lab/habitat-baselines:$RESOURCE_ROOT/third_party/frontier_exploration:$RESOURCE_ROOT/third_party/depth_camera_filtering:$RESOURCE_ROOT/third_party/MobileSAM:$RESOURCE_ROOT/third_party/GroundingDINO:$RESOURCE_ROOT/third_party/D-FINE:$RESOURCE_ROOT/third_party/recognize-anything:$RESOURCE_ROOT/third_party/places365"
+export PYTHONPATH="$SOURCE_ROOT:$RESOURCE_ROOT:$RESOURCE_ROOT/third_party/vlfm:$RESOURCE_ROOT/third_party/habitat-lab/habitat-lab:$RESOURCE_ROOT/third_party/habitat-lab/habitat-baselines:$RESOURCE_ROOT/third_party/frontier_exploration:$RESOURCE_ROOT/third_party/depth_camera_filtering:$RESOURCE_ROOT/third_party/MobileSAM:$RESOURCE_ROOT/third_party/GroundingDINO:$RESOURCE_ROOT/third_party/D-FINE:$RESOURCE_ROOT/third_party/recognize-anything:$RESOURCE_ROOT/third_party/places365"
 export XDG_CACHE_HOME=$RUN_ROOT/xdg_cache
 export MPLCONFIGDIR=$RUN_ROOT/mpl_config
 

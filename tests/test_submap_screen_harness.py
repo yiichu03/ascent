@@ -1551,6 +1551,8 @@ def test_v1_2_variant_harness_is_isolated_and_default_safe() -> None:
     assert "RESOURCE_ROOT=$PROJECT/external/ascent" in combined
     assert "$RESOURCE_ROOT/third_party/vlfm" in worker + controller
     assert "$SOURCE_ROOT/third_party/vlfm" not in worker + controller
+    assert 'PYTHONPATH="$SOURCE_ROOT:$RESOURCE_ROOT:' in worker
+    assert 'PYTHONPATH="$SOURCE_ROOT:$RESOURCE_ROOT:' in controller
     assert '"$SOURCE_ROOT/model_api"' in worker
     assert '"$SOURCE_ROOT/scripts"' in worker
     assert 'cd "$RESOURCE_ROOT"' in worker
@@ -1681,6 +1683,7 @@ def test_v1_2_runtime_cwd_imports_candidate_source() -> None:
         str(path)
         for path in (
             ROOT,
+            resource_root,
             resource_root / "third_party" / "vlfm",
             resource_root / "third_party" / "habitat-lab" / "habitat-lab",
             resource_root
@@ -1717,8 +1720,42 @@ def test_v1_2_runtime_cwd_imports_candidate_source() -> None:
     payload = json.loads(output.read_text())
     assert payload["status"] == "PASS"
     assert payload["cwd"] == str(resource_root.resolve())
+    assert payload["source_path_index"] < min(
+        payload["resource_path_indices"]
+    )
     for origin in payload["module_origins"].values():
         assert ROOT.resolve() in Path(origin).resolve().parents
+
+
+def test_v1_2_runtime_import_check_rejects_resource_precedence(
+    tmp_path: Path,
+) -> None:
+    resource_root = ROOT.parent / "ascent"
+    checker = ROOT / "scripts" / "check_submap_source_imports.py"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{resource_root}:{ROOT}"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(checker),
+            "--source-root",
+            str(ROOT),
+            "--resource-root",
+            str(resource_root),
+            "--output-json",
+            str(tmp_path / "must_not_exist.json"),
+            "ascent.ascent_policy",
+        ],
+        cwd=resource_root,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "frozen resource checkout precedes candidate source" in (
+        result.stdout + result.stderr
+    )
 
 
 def test_v1_2_variant_submitter_rejects_unknown_variant() -> None:
