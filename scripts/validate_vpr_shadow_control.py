@@ -164,9 +164,6 @@ def main() -> int:
             != str(historical[logical_id]["action_hash"])
         )
     ]
-    if mismatches:
-        strict_errors.append(f"historical_action_equivalence:{len(mismatches)}")
-
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=False)
     reference_entries = [
@@ -207,10 +204,16 @@ def main() -> int:
         "valid_episodes": len(selected),
         "capture_enabled": False,
         "historical_reference_required": True,
+        "historical_action_equivalence_required": False,
+        "historical_action_equivalence_scope": (
+            "diagnostic_only_repacked_subset_changes_process_rng_history"
+        ),
+        "same_commit_capture_action_equivalence_required": True,
         "historical_action_equivalent_episodes": (
             len(historical) - len(mismatches) if historical else 0
         ),
         "historical_action_mismatch_count": len(mismatches),
+        "historical_action_mismatch_ids": mismatches,
         "navigation_metrics_emitted": False,
         "association_scores_emitted": False,
         "ignored_failed_attempt_count": ignored_failed_attempt_count,

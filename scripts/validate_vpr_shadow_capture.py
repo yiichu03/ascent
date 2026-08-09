@@ -94,8 +94,15 @@ def main() -> int:
                 != "ascent_v1_4_vpr_shadow_control_gate_v1"
                 or control_summary.get("technical_status") != "PASS"
                 or control_summary.get("capture_enabled") is not False
-                or int(control_summary.get("historical_action_mismatch_count", -1))
-                != 0
+                or int(control_summary.get("strict_error_count", -1)) != 0
+                or int(control_summary.get("valid_episodes", -1))
+                != args.expected_episodes
+                or control_summary.get(
+                    "historical_action_equivalence_required"
+                ) is not False
+                or control_summary.get(
+                    "same_commit_capture_action_equivalence_required"
+                ) is not True
                 or control_summary.get("provenance", {}).get("source_commit")
                 != args.source_commit
                 or control_summary.get("provenance", {}).get(

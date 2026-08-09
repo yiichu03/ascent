@@ -29,6 +29,11 @@ def test_capture_harness_is_passive_staged_and_project_local() -> None:
     assert "$SOURCE_ROOT/third_party/vlfm" not in controller
     assert 'PYTHONPATH="$SOURCE_ROOT:$RESOURCE_ROOT:' not in worker
     assert 'PYTHONPATH="$SOURCE_ROOT:$RESOURCE_ROOT:' not in controller
+    inventory_printf = next(
+        line for line in worker.splitlines()
+        if line.strip().startswith("printf '%s,screen,B2")
+    )
+    assert inventory_printf.count("%s") == 28
     assert "WORKER_MODE=full" in controller
     assert "validate_vpr_shadow_capture.py" in controller
     assert "validate_vpr_shadow_control.py" in controller
@@ -46,6 +51,13 @@ def test_capture_harness_is_passive_staged_and_project_local() -> None:
     assert '"association_scores_emitted": False' in validator
     assert '"capture_enabled": False' in control_validator
     assert '"same_commit_capture_off_control"' in control_validator
+    assert '"historical_action_equivalence_required": False' in control_validator
+    assert '"same_commit_capture_action_equivalence_required": True' in (
+        control_validator
+    )
+    assert 'strict_errors.append(f"historical_action_equivalence:' not in (
+        control_validator
+    )
 
 
 def test_capture_harness_does_not_run_vpr_or_change_planner() -> None:

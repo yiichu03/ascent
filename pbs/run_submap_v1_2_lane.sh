@@ -458,7 +458,7 @@ run_unit() {
   elif [ "$ve" -ne "$expected" ]; then
     terminal_class=incomplete_diagnostics
   fi
-  printf '%s,screen,B2,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+  printf '%s,screen,B2,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
     "$priority" "$chunk_id" "$expected" "$status" "$post_health" \
     "$terminal_class" "$vm" "$vs" "$ve" "$vt" "$vp" "$vu" \
     "$sm" "$sr" "$se" "$sv" "$sp" "$su" \
