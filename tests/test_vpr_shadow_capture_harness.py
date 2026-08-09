@@ -17,6 +17,18 @@ def test_capture_harness_is_passive_staged_and_project_local() -> None:
     assert "ASCENT_VPR_SHADOW_CAPTURE_ENABLED" in worker
     assert "ASCENT_VPR_SHADOW_OUTPUT_DIR" in worker
     assert "vpr_shadow_manifest" in worker
+    assert '$RESOURCE_ROOT/pretrained_weights/Qwen2.5-7b' in worker
+    assert 'RUNTIME_CWD=$RUN_ROOT/resource_view' in worker
+    assert 'ln -s "$RESOURCE_ROOT/pretrained_weights"' in worker
+    assert 'ln -s "$RESOURCE_ROOT/third_party"' in worker
+    assert 'cd "$RUNTIME_CWD"' in worker
+    assert 'cd "$RESOURCE_ROOT"' not in worker
+    assert "$RESOURCE_ROOT/third_party/vlfm" in worker
+    assert "$SOURCE_ROOT/third_party/vlfm" not in worker
+    assert "$RESOURCE_ROOT/third_party/vlfm" in controller
+    assert "$SOURCE_ROOT/third_party/vlfm" not in controller
+    assert 'PYTHONPATH="$SOURCE_ROOT:$RESOURCE_ROOT:' not in worker
+    assert 'PYTHONPATH="$SOURCE_ROOT:$RESOURCE_ROOT:' not in controller
     assert "WORKER_MODE=full" in controller
     assert "validate_vpr_shadow_capture.py" in controller
     assert "validate_vpr_shadow_control.py" in controller

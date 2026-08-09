@@ -33,6 +33,7 @@ SCRATCH_ROOT=/scratch/e1538633/liuyi
 ASCENT_ENV=$SCRATCH_ROOT/micromamba/envs/ascent_nav
 ASCENT_PYTHON=$ASCENT_ENV/bin/python
 RUN_ROOT=$STAGE_ROOT/lane_$LANE_ID
+RUNTIME_CWD=$RUN_ROOT/resource_view
 MAX_CONSECUTIVE_PROCESS_FAILURES=3
 
 case "$MODE" in smoke|full) ;; *) echo "invalid_mode=$MODE"; exit 20 ;; esac
@@ -45,21 +46,22 @@ done
 [ "$LANE_ID" -lt "$LANE_COUNT" ] || { echo invalid_lane; exit 20; }
 [ ! -e "$RUN_ROOT" ] || { echo "run_root_exists=$RUN_ROOT"; exit 24; }
 mkdir -p "$RUN_ROOT"/{attempts,mpl_config,xdg_cache,service_logs}
+mkdir -p "$RUNTIME_CWD"
 mkdir -p "$SCRATCH_ROOT/cache"/{pip,huggingface,torch,xdg,matplotlib,conda_pkgs}
 
 for path in \
   "$MANIFEST" "$HEALTH_CHECK" "$SOURCE_ROOT/ascent/run.py" \
   "$SOURCE_ROOT/ascent/ascent_policy.py" "$SOURCE_ROOT/ascent/submaps" \
   "$SOURCE_ROOT/ascent/vo/pose_provider.py" "$SOURCE_ROOT/model_api" \
-  "$SOURCE_ROOT/dummy_policy.pth" \
-  "$SOURCE_ROOT/pretrained_weights/Qwen2.5-7b" \
-  "$SOURCE_ROOT/pretrained_weights/mobile_sam.pt" \
-  "$SOURCE_ROOT/pretrained_weights/groundingdino_swint_ogc.pth" \
-  "$SOURCE_ROOT/pretrained_weights/dfine_x_obj2coco.pth" \
-  "$SOURCE_ROOT/pretrained_weights/ram_plus_swin_large_14m.pth" \
-  "$SOURCE_ROOT/pretrained_weights/rednet_semmap_mp3d_40.pth" \
-  "$SOURCE_ROOT/pretrained_weights/resnet50_places365.pth.tar" \
-  "$SOURCE_ROOT/third_party/vlfm/data/pointnav_weights.pth" \
+  "$RESOURCE_ROOT/dummy_policy.pth" \
+  "$RESOURCE_ROOT/pretrained_weights/Qwen2.5-7b" \
+  "$RESOURCE_ROOT/pretrained_weights/mobile_sam.pt" \
+  "$RESOURCE_ROOT/pretrained_weights/groundingdino_swint_ogc.pth" \
+  "$RESOURCE_ROOT/pretrained_weights/dfine_x_obj2coco.pth" \
+  "$RESOURCE_ROOT/pretrained_weights/ram_plus_swin_large_14m.pth" \
+  "$RESOURCE_ROOT/pretrained_weights/rednet_semmap_mp3d_40.pth" \
+  "$RESOURCE_ROOT/pretrained_weights/resnet50_places365.pth.tar" \
+  "$RESOURCE_ROOT/third_party/vlfm/data/pointnav_weights.pth" \
   "$CHECKPOINT_DIR/act_forward.pth" \
   "$CHECKPOINT_DIR/act_left_right_inv_joint.pth" \
   "$SCENES_ROOT/$DATASET"; do
@@ -89,6 +91,15 @@ command -v timeout >/dev/null || { echo missing_timeout; exit 21; }
 [ "$(git -C "$POINTNAV_VO_ROOT" rev-parse HEAD)" = "$POINTNAV_VO_COMMIT" ] || {
   echo pointnav_vo_commit_mismatch; exit 22;
 }
+
+# Linked worktrees do not inherit the frozen anchor's materialized submodules
+# or untracked weights.  Keep method imports fail-closed to SOURCE_ROOT while
+# exposing only the immutable resource paths through a code-free runtime cwd.
+ln -s "$RESOURCE_ROOT/pretrained_weights" "$RUNTIME_CWD/pretrained_weights"
+ln -s "$RESOURCE_ROOT/third_party" "$RUNTIME_CWD/third_party"
+ln -s "$RESOURCE_ROOT/data" "$RUNTIME_CWD/data"
+ln -s "$RESOURCE_ROOT/dummy_policy.pth" "$RUNTIME_CWD/dummy_policy.pth"
+ln -s "$SOURCE_ROOT/statistic_priors" "$RUNTIME_CWD/statistic_priors"
 
 read -r SCENE_DATASET_CONFIG SCENE_DATASET_CONFIG_SHA256 < <(
   "$ASCENT_PYTHON" - "$MANIFEST" <<'PY'
@@ -134,7 +145,7 @@ export SAM_PORT=$((BASE_PORT + 2))
 export GROUNDING_DINO_PORT=$((BASE_PORT + 3))
 export RAM_PORT=$((BASE_PORT + 4))
 export DFINE_PORT=$((BASE_PORT + 5))
-export PYTHONPATH="$SOURCE_ROOT:$SOURCE_ROOT/third_party/vlfm:$SOURCE_ROOT/third_party/frontier_exploration:$SOURCE_ROOT/third_party/depth_camera_filtering:$SOURCE_ROOT/third_party/recognize-anything:$SOURCE_ROOT/third_party/D-FINE:$SOURCE_ROOT/third_party/places365"
+export PYTHONPATH="$SOURCE_ROOT:$RESOURCE_ROOT/third_party/vlfm:$RESOURCE_ROOT/third_party/frontier_exploration:$RESOURCE_ROOT/third_party/depth_camera_filtering:$RESOURCE_ROOT/third_party/recognize-anything:$RESOURCE_ROOT/third_party/D-FINE:$RESOURCE_ROOT/third_party/places365:$RESOURCE_ROOT"
 unset ASCENT_OCSM_ENABLED ASCENT_STAIR_DISTANCE_ORDER_FIX
 unset ASCENT_POSE_SCHEDULE_PATH ASCENT_POSE_ARM
 unset ASCENT_VPR_SHADOW_ENABLED ASCENT_VPR_SHADOW_OUTPUT_DIR
@@ -199,10 +210,10 @@ done
   echo start_time=$(date -Is)
 } > "$RUN_ROOT/environment_preflight.txt"
 
-cd "$SOURCE_ROOT"
+cd "$RUNTIME_CWD"
 "$ASCENT_PYTHON" -c \
-  'from importlib.util import find_spec; from pathlib import Path; import sys; root=Path(sys.argv[1]).resolve(); actual=Path(find_spec("ascent.ascent_policy").origin).resolve(); print(actual); assert root in actual.parents' \
-  "$SOURCE_ROOT" > "$RUN_ROOT/import_check.log" 2>&1
+  'from importlib.util import find_spec; from pathlib import Path; import sys; source=Path(sys.argv[1]).resolve(); resource=Path(sys.argv[2]).resolve(); ascent=Path(find_spec("ascent.ascent_policy").origin).resolve(); vlfm=Path(find_spec("vlfm").origin).resolve(); print(f"ascent={ascent}"); print(f"vlfm={vlfm}"); assert source in ascent.parents and resource in vlfm.parents' \
+  "$SOURCE_ROOT" "$RESOURCE_ROOT" > "$RUN_ROOT/import_check.log" 2>&1
 
 SERVER_PIDS=()
 cleanup() {
@@ -359,7 +370,7 @@ run_unit() {
     "ascent_submaps.route_max_waypoint_actions=60"
   )
   {
-    printf 'cd %q\n' "$SOURCE_ROOT"
+    printf 'cd %q\n' "$RUNTIME_CWD"
     printf 'ASCENT_SUBMAP_ENABLED=true ASCENT_SUBMAP_ALLOW_PROVISIONAL=false '
     printf 'ASCENT_SUBMAP_HANDOFF_ENABLED=true '
     printf 'ASCENT_SUBMAP_EXHAUSTION_RECOVERY_ENABLED=true '
@@ -414,7 +425,7 @@ run_unit() {
     export ASCENT_SUBMAP_SOURCE_COMMIT=$SOURCE_COMMIT
     export XDG_CACHE_HOME=$unit_dir/xdg_cache
     export MPLCONFIGDIR=$unit_dir/mpl_config
-    cd "$SOURCE_ROOT"
+    cd "$RUNTIME_CWD"
     timeout --signal=TERM --kill-after=120s "${timeout_seconds}s" \
       "${cmd[@]}" > "$unit_dir/run.log" 2>&1 < /dev/null
   ); then status=0; else status=$?; fi
