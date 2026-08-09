@@ -9,6 +9,7 @@ from scripts.run_vpr_shadow_offline_batch import (
     _check_role_unlock,
     merge_scored_units,
 )
+from scripts.check_vpr_shadow_offline_compatibility import classify_changed_paths
 from scripts.vpr_shadow_data import sha256
 
 
@@ -165,5 +166,21 @@ def test_offline_pbs_is_hash_bound_and_calibration_staged() -> None:
     assert "ASCENT_VPR_OFFLINE_NO_QSUB" in submitter
     assert "calibration_required" in submitter
     assert "source_commit_not_pushed" in submitter
+    assert "OFFLINE_COMPATIBILITY_SHA256" in runner
+    assert "CAPTURE_SOURCE_COMMIT" in runner
+    assert "OFFLINE_SOURCE_COMMIT" in runner
     assert batch.index("# Pass 1:") < batch.index("# Pass 2:")
     assert "locked test association requires a frozen Cal50 PASS file" in batch
+
+
+def test_post_capture_compatibility_scope_excludes_runtime_policy() -> None:
+    assert classify_changed_paths(
+        [
+            "scripts/vpr_shadow_data.py",
+            "scripts/vpr_shadow_capture_gate.py",
+            "tests/test_vpr_shadow_data.py",
+        ]
+    ) == []
+    assert classify_changed_paths(["ascent/submaps/vpr_shadow.py"]) == [
+        "ascent/submaps/vpr_shadow.py"
+    ]

@@ -13,11 +13,13 @@ STAMP=${6:-20260809_vpr_offline_${ROLE}_${RETRIEVER}_first_attempt}
 NO_QSUB=${ASCENT_VPR_OFFLINE_NO_QSUB:-0}
 
 PROJECT=/scratch/e1538633/liuyi/drift-aware-submap-exploration
-SOURCE_ROOT=$PROJECT/external/ascent_vo_submap_v1_4
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+SOURCE_ROOT=$(realpath "$SCRIPT_DIR/..")
 ARTIFACT_ROOT=$PROJECT/artifacts/objectnav/vpr_shadow
 MODEL_REGISTRY=$SOURCE_ROOT/experiments/vpr_shadow/model_registry.json
 MODEL_GATE=$ARTIFACT_ROOT/local_model_gate_20260809_v2/model_gate.json
 RUNNER=$SOURCE_ROOT/pbs/run_vpr_shadow_offline.pbs
+COMPATIBILITY_CHECKER=$SOURCE_ROOT/scripts/check_vpr_shadow_offline_compatibility.py
 ASCENT_PYTHON=/scratch/e1538633/liuyi/micromamba/envs/ascent_nav/bin/python
 
 case "$QUEUE" in auto|autox) ;; *) echo queue_must_be_auto_or_autox; exit 20 ;; esac
@@ -52,19 +54,41 @@ CAPTURE_GATE_DIR=$(realpath "$CAPTURE_GATE_DIR")
 CAPTURE_SUMMARY=$CAPTURE_GATE_DIR/summary.json
 CAPTURE_EPISODES=$CAPTURE_GATE_DIR/episodes.jsonl
 SPLIT_MANIFEST=$SOURCE_ROOT/experiments/vpr_shadow/manifests/$SPLIT_NAME
-for path in "$SOURCE_ROOT" "$RUNNER" "$MODEL_REGISTRY" "$MODEL_GATE" \
+for path in "$SOURCE_ROOT" "$RUNNER" "$COMPATIBILITY_CHECKER" \
+  "$MODEL_REGISTRY" "$MODEL_GATE" \
   "$CAPTURE_SUMMARY" "$CAPTURE_EPISODES" "$SPLIT_MANIFEST"; do
   [ -e "$path" ] || { echo "missing_required_path=$path"; exit 21; }
 done
 [ -z "$(git -C "$SOURCE_ROOT" status --porcelain --untracked-files=all)" ] || {
   echo source_worktree_not_clean; exit 23;
 }
-SOURCE_COMMIT=$(git -C "$SOURCE_ROOT" rev-parse HEAD)
+OFFLINE_SOURCE_COMMIT=$(git -C "$SOURCE_ROOT" rev-parse HEAD)
 UPSTREAM=$(git -C "$SOURCE_ROOT" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)
 [ -n "$UPSTREAM" ] || { echo source_branch_has_no_upstream; exit 23; }
-git -C "$SOURCE_ROOT" merge-base --is-ancestor "$SOURCE_COMMIT" "$UPSTREAM" || {
+git -C "$SOURCE_ROOT" merge-base --is-ancestor "$OFFLINE_SOURCE_COMMIT" "$UPSTREAM" || {
   echo source_commit_not_pushed; exit 23;
 }
+
+read -r CAPTURE_SOURCE_COMMIT VALIDATOR_SOURCE_COMMIT < <(
+  "$ASCENT_PYTHON" - "$CAPTURE_SUMMARY" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["schema"] == "ascent_v1_4_vpr_shadow_capture_gate_v2"
+assert value["immutable_raw_revalidation"] is True
+provenance = value["provenance"]
+print(provenance["capture_source_commit"], provenance["validator_source_commit"])
+PY
+)
+[ "$VALIDATOR_SOURCE_COMMIT" = "$OFFLINE_SOURCE_COMMIT" ] || {
+  echo capture_validator_commit_mismatch; exit 22;
+}
+OFFLINE_COMPATIBILITY_JSON=$(
+  "$ASCENT_PYTHON" "$COMPATIBILITY_CHECKER" \
+    --source-root "$SOURCE_ROOT" \
+    --capture-commit "$CAPTURE_SOURCE_COMMIT" \
+    --offline-commit "$OFFLINE_SOURCE_COMMIT"
+)
+OFFLINE_COMPATIBILITY_SHA256=$(printf '%s' "$OFFLINE_COMPATIBILITY_JSON" | sha256sum | awk '{print $1}')
 
 RUNNER_SHA256=$(sha256sum "$RUNNER" | awk '{print $1}')
 MODEL_REGISTRY_SHA256=$(sha256sum "$MODEL_REGISTRY" | awk '{print $1}')
@@ -80,27 +104,29 @@ fi
 
 "$ASCENT_PYTHON" - "$MODEL_GATE" "$MODEL_REGISTRY_SHA256" \
   "$CAPTURE_SUMMARY" "$CAPTURE_EPISODES_SHA256" "$SPLIT_MANIFEST_SHA256" \
-  "$SOURCE_COMMIT" "$EXPECTED_ROLE" "$RETRIEVER" "$CALIBRATION_FILE" <<'PY'
+  "$CAPTURE_SOURCE_COMMIT" "$OFFLINE_SOURCE_COMMIT" "$EXPECTED_ROLE" \
+  "$RETRIEVER" "$CALIBRATION_FILE" <<'PY'
 import json, sys
 model_gate = json.load(open(sys.argv[1], encoding="utf-8"))
 assert model_gate["schema"] == "ascent_v1_4_vpr_shadow_model_gate_v1"
 assert model_gate["technical_status"] == "PASS"
 assert model_gate["registry_sha256"] == sys.argv[2]
 capture = json.load(open(sys.argv[3], encoding="utf-8"))
-assert capture["schema"] == "ascent_v1_4_vpr_shadow_capture_gate_v1"
+assert capture["schema"] == "ascent_v1_4_vpr_shadow_capture_gate_v2"
 assert capture["technical_status"] == "PASS"
 assert capture["strict_error_count"] == 0
 assert capture["provenance"]["episodes_sha256"] == sys.argv[4]
 assert capture["provenance"]["split_manifest_sha256"] == sys.argv[5]
-assert capture["provenance"]["source_commit"] == sys.argv[6]
-assert capture["role"] == sys.argv[7]
+assert capture["provenance"]["capture_source_commit"] == sys.argv[6]
+assert capture["provenance"]["validator_source_commit"] == sys.argv[7]
+assert capture["role"] == sys.argv[8]
 assert capture["navigation_metrics_emitted"] is False
 assert capture["association_scores_emitted"] is False
-if sys.argv[9]:
-    calibration = json.load(open(sys.argv[9], encoding="utf-8"))
+if sys.argv[10]:
+    calibration = json.load(open(sys.argv[10], encoding="utf-8"))
     assert calibration["schema"] == "ascent_v1_4_vpr_shadow_calibration_v1"
     assert calibration["calibration_gate"] == "PASS"
-    assert calibration["retriever"] == sys.argv[8]
+    assert calibration["retriever"] == sys.argv[9]
 PY
 
 DRY_RUN_JSON=$(
@@ -114,7 +140,10 @@ print(json.dumps({
     "queue_request": "$QUEUE",
     "walltime": "$WALLTIME",
     "stamp": "$STAMP",
-    "source_commit": "$SOURCE_COMMIT",
+    "capture_source_commit": "$CAPTURE_SOURCE_COMMIT",
+    "validator_source_commit": "$VALIDATOR_SOURCE_COMMIT",
+    "offline_source_commit": "$OFFLINE_SOURCE_COMMIT",
+    "offline_compatibility_sha256": "$OFFLINE_COMPATIBILITY_SHA256",
     "capture_summary": "$CAPTURE_SUMMARY",
     "capture_summary_sha256": "$CAPTURE_SUMMARY_SHA256",
     "capture_episodes_sha256": "$CAPTURE_EPISODES_SHA256",
@@ -148,7 +177,10 @@ ASCENT_VPR_OFFLINE_CAPTURE_SUMMARY=$CAPTURE_SUMMARY,\
 ASCENT_VPR_OFFLINE_CAPTURE_EPISODES=$CAPTURE_EPISODES,\
 ASCENT_VPR_OFFLINE_SPLIT_MANIFEST=$SPLIT_MANIFEST,\
 ASCENT_VPR_OFFLINE_CALIBRATION_FILE=$CALIBRATION_FILE,\
-ASCENT_VPR_OFFLINE_SOURCE_COMMIT=$SOURCE_COMMIT,\
+ASCENT_VPR_OFFLINE_SOURCE_ROOT=$SOURCE_ROOT,\
+ASCENT_VPR_OFFLINE_CAPTURE_SOURCE_COMMIT=$CAPTURE_SOURCE_COMMIT,\
+ASCENT_VPR_OFFLINE_OFFLINE_SOURCE_COMMIT=$OFFLINE_SOURCE_COMMIT,\
+ASCENT_VPR_OFFLINE_COMPATIBILITY_SHA256=$OFFLINE_COMPATIBILITY_SHA256,\
 ASCENT_VPR_OFFLINE_RUNNER_SHA256=$RUNNER_SHA256,\
 ASCENT_VPR_OFFLINE_MODEL_REGISTRY_SHA256=$MODEL_REGISTRY_SHA256,\
 ASCENT_VPR_OFFLINE_CAPTURE_SUMMARY_SHA256=$CAPTURE_SUMMARY_SHA256,\

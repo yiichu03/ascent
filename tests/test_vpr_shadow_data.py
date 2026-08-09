@@ -4,7 +4,16 @@ from pathlib import Path
 
 import numpy as np
 
-from scripts.vpr_shadow_data import EpisodeGraph, ShadowFrame, build_query_events
+import json
+
+import pytest
+
+from scripts.vpr_shadow_data import (
+    EpisodeGraph,
+    ShadowFrame,
+    build_query_events,
+    load_submap_graphs,
+)
 
 
 def _frame(step: int, submap: str, floor: int = 0) -> ShadowFrame:
@@ -67,3 +76,97 @@ def test_wrong_policy_floor_candidate_is_not_proposed() -> None:
         floor_by_submap={"s0": 1, "s1": 0},
     )
     assert build_query_events(frames, {0: graph}) == []
+
+
+def test_floor_change_endpoint_keeps_source_submap_writer_floor(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "submaps.jsonl"
+    rows = [
+        {
+            "record_type": "submap_action_endpoint",
+            "episode_sequence": 0,
+            "action_step": 0,
+            "submap_id": "s0",
+            "floor_id": 2,
+            "decision": {
+                "floor_changed": False,
+                "should_split": False,
+                "reason": None,
+            },
+        },
+        {
+            "record_type": "submap_action_endpoint",
+            "episode_sequence": 0,
+            "action_step": 1,
+            "submap_id": "s0",
+            "floor_id": 3,
+            "decision": {
+                "floor_changed": True,
+                "should_split": True,
+                "reason": "floor_change",
+            },
+        },
+        {
+            "record_type": "submap_event",
+            "episode_sequence": 0,
+            "step": 1,
+            "event": "submap_split",
+            "reason": "floor_change",
+            "source_submap_id": "s0",
+            "destination_submap_id": "s1",
+        },
+        {
+            "record_type": "submap_action_endpoint",
+            "episode_sequence": 0,
+            "action_step": 2,
+            "submap_id": "s1",
+            "floor_id": 3,
+            "decision": {
+                "floor_changed": False,
+                "should_split": False,
+                "reason": None,
+            },
+        },
+    ]
+    path.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+    graph = load_submap_graphs(path)[0]
+    assert graph.floor_by_submap == {"s0": 2, "s1": 3}
+    assert frozenset(("s0", "s1")) in graph.direct_edges
+
+
+def test_unconfirmed_floor_change_remains_fail_closed(tmp_path: Path) -> None:
+    path = tmp_path / "submaps.jsonl"
+    rows = [
+        {
+            "record_type": "submap_action_endpoint",
+            "episode_sequence": 0,
+            "action_step": 0,
+            "submap_id": "s0",
+            "floor_id": 0,
+            "decision": {
+                "floor_changed": False,
+                "should_split": False,
+                "reason": None,
+            },
+        },
+        {
+            "record_type": "submap_action_endpoint",
+            "episode_sequence": 0,
+            "action_step": 1,
+            "submap_id": "s0",
+            "floor_id": 1,
+            "decision": {
+                "floor_changed": False,
+                "should_split": False,
+                "reason": None,
+            },
+        },
+    ]
+    path.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="stable writer floor"):
+        load_submap_graphs(path)

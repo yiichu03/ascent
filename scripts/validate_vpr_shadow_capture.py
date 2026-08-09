@@ -45,6 +45,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-dataset", choices=("hm3d", "mp3d"), required=True)
     parser.add_argument("--expected-episodes", type=int, required=True)
     parser.add_argument("--source-commit", required=True)
+    parser.add_argument(
+        "--validator-commit",
+        help=(
+            "Commit containing this validator for immutable-raw revalidation. "
+            "When set, emit the dual-provenance v2 gate schema."
+        ),
+    )
     parser.add_argument("--action-reference", type=Path)
     parser.add_argument("--control-summary", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -66,6 +73,15 @@ def _reference(path: Path | None, split_hash: str) -> dict[str, Mapping[str, Any
 
 def main() -> int:
     args = parse_args()
+    if len(args.source_commit) != 40 or any(
+        value not in "0123456789abcdef" for value in args.source_commit
+    ):
+        raise ValueError("source commit must be a full lowercase Git hash")
+    if args.validator_commit is not None and (
+        len(args.validator_commit) != 40
+        or any(value not in "0123456789abcdef" for value in args.validator_commit)
+    ):
+        raise ValueError("validator commit must be a full lowercase Git hash")
     chunks, logical_order, strict_errors = load_manifest(
         args.manifest, args.expected_episodes, args.expected_dataset
     )
@@ -264,8 +280,13 @@ def main() -> int:
         if not strict_errors and len(selected) == args.expected_episodes
         else "FAIL"
     )
+    validator_commit = args.validator_commit or args.source_commit
     summary = {
-        "schema": "ascent_v1_4_vpr_shadow_capture_gate_v1",
+        "schema": (
+            "ascent_v1_4_vpr_shadow_capture_gate_v2"
+            if args.validator_commit is not None
+            else "ascent_v1_4_vpr_shadow_capture_gate_v1"
+        ),
         "technical_status": technical_status,
         "dataset": args.expected_dataset,
         "role": split.get("role"),
@@ -282,10 +303,14 @@ def main() -> int:
         "action_hash_contract": ACTION_HASH_CONTRACT,
         "navigation_metrics_emitted": False,
         "association_scores_emitted": False,
+        "immutable_raw_revalidation": args.validator_commit is not None,
         "strict_error_count": len(strict_errors),
         "strict_errors": strict_errors,
         "provenance": {
+            # Retained as a compatibility alias for the runtime capture commit.
             "source_commit": args.source_commit,
+            "capture_source_commit": args.source_commit,
+            "validator_source_commit": validator_commit,
             "manifest_sha256": sha256(args.manifest),
             "split_manifest_sha256": split_hash,
             "registry_sha256": sha256(args.registry),

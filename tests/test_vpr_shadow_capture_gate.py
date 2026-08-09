@@ -101,3 +101,106 @@ def test_capture_gate_binds_frames_to_submap_endpoints(tmp_path: Path) -> None:
     assert errors == []
     assert report["keyframe_count"] == 2
     assert report["episode_frame_counts"] == {"0": 2}
+
+
+def test_capture_gate_accepts_only_closed_floor_transition(tmp_path: Path) -> None:
+    capture = tmp_path / "capture"
+    writer = VPRShadowKeyframeWriter(
+        capture,
+        metadata={
+            "run_id": "transition",
+            "ascent_source_commit": "a" * 40,
+            "dataset": "hm3d",
+            "pose_source": "zhao_rgbd_2021",
+            "navigation_behavior": "frozen_submap_v1.2",
+            "capture_point": "pre_planner_policy_visible_observation",
+        },
+    )
+    writer.reset_env(env=0, episode_sequence=0)
+    rgb = np.zeros((24, 32, 3), dtype=np.uint8)
+    depth = np.full((24, 32), 0.5, dtype=np.float32)
+    transform = np.eye(4)
+    assert writer.observe(
+        env=0,
+        episode_sequence=0,
+        action_step=0,
+        submap_id="sm0",
+        floor_id=0,
+        world_pose_vo=[0.0, 0.0, 0.0],
+        local_pose=[0.0, 0.0, 0.0],
+        tf_camera_to_submap=transform,
+        rgb=rgb,
+        normalized_depth=depth,
+        min_depth=0.5,
+        max_depth=5.0,
+        fx=16.0,
+        fy=16.0,
+    )
+    writer.close()
+    endpoint = {
+        "record_type": "submap_action_endpoint",
+        "episode_sequence": 0,
+        "action_step": 0,
+        "submap_id": "sm0",
+        "floor_id": 1,
+        "world_pose_vo": [0.0, 0.0, 0.0],
+        "local_pose": [0.0, 0.0, 0.0],
+        "decision": {
+            "floor_changed": True,
+            "should_split": True,
+            "reason": "floor_change",
+        },
+    }
+    stable_endpoint = {
+        **endpoint,
+        "action_step": -1,
+        "floor_id": 0,
+        "decision": {
+            "floor_changed": False,
+            "should_split": False,
+            "reason": None,
+        },
+    }
+    split = {
+        "record_type": "submap_event",
+        "episode_sequence": 0,
+        "step": 0,
+        "event": "submap_split",
+        "reason": "floor_change",
+        "source_submap_id": "sm0",
+        "destination_submap_id": "sm1",
+    }
+    submap = tmp_path / "submap.jsonl"
+    _write_jsonl(submap, [stable_endpoint, endpoint, split])
+    vo = tmp_path / "vo.jsonl"
+    _write_jsonl(
+        vo,
+        [
+            {
+                "record_type": "vo_step",
+                "episode_id": "0",
+                "action_step": 1,
+                "action": 1,
+            },
+            {"record_type": "episode_end", "episode_id": "0"},
+        ],
+    )
+    report, errors = validate_capture_attempt(
+        capture_manifest=capture / "keyframes.jsonl",
+        submap_diagnostics=submap,
+        vo_diagnostics=vo,
+        source_commit="a" * 40,
+        dataset="hm3d",
+    )
+    assert errors == []
+    assert report["validated_floor_transition_count"] == 1
+
+    _write_jsonl(tmp_path / "bad_submap.jsonl", [stable_endpoint, endpoint])
+    _, errors = validate_capture_attempt(
+        capture_manifest=capture / "keyframes.jsonl",
+        submap_diagnostics=tmp_path / "bad_submap.jsonl",
+        vo_diagnostics=vo,
+        source_commit="a" * 40,
+        dataset="hm3d",
+    )
+    assert any(error.startswith("capture_floor_contract:") for error in errors)

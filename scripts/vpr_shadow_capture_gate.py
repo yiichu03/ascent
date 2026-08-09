@@ -12,9 +12,19 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 try:
-    from vpr_shadow_data import load_keyframes, read_jsonl, sha256
+    from vpr_shadow_data import (
+        load_keyframes,
+        read_jsonl,
+        resolve_submap_identity_floors,
+        sha256,
+    )
 except ImportError:
-    from scripts.vpr_shadow_data import load_keyframes, read_jsonl, sha256
+    from scripts.vpr_shadow_data import (
+        load_keyframes,
+        read_jsonl,
+        resolve_submap_identity_floors,
+        sha256,
+    )
 
 
 ACTION_HASH_CONTRACT = "sha256(json_compact_integer_action_list_plus_lf)"
@@ -168,6 +178,14 @@ def validate_capture_attempt(
     except (OSError, ValueError) as exc:
         submap_rows = []
         errors.append(f"capture_submap_read:{type(exc).__name__}:{exc}")
+    try:
+        floor_by_submap, floor_transition_keys = resolve_submap_identity_floors(
+            submap_rows
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        floor_by_submap = {}
+        floor_transition_keys = set()
+        errors.append(f"capture_floor_contract:{type(exc).__name__}:{exc}")
     for row in submap_rows:
         if row.get("record_type") != "submap_action_endpoint":
             continue
@@ -188,7 +206,10 @@ def validate_capture_attempt(
             continue
         if str(endpoint.get("submap_id")) != frame.submap_id:
             errors.append(f"capture_submap_binding:{frame.frame_id}")
-        if int(endpoint.get("floor_id", -1)) != frame.floor_id:
+        writer_floor = floor_by_submap.get(frame.episode_sequence, {}).get(
+            frame.submap_id
+        )
+        if writer_floor is None or writer_floor != frame.floor_id:
             errors.append(f"capture_floor_binding:{frame.frame_id}")
         for name, captured, recorded in (
             ("world", frame.world_pose_vo, endpoint.get("world_pose_vo")),
@@ -258,5 +279,6 @@ def validate_capture_attempt(
             str(key): value for key, value in sorted(episode_frame_counts.items())
         },
         "runtime_episode_order": runtime_order,
+        "validated_floor_transition_count": len(floor_transition_keys),
     }
     return report, errors

@@ -29,6 +29,10 @@ LOCKED_ROLES = {
     "locked_in_distribution_test",
     "locked_cross_dataset_transfer_test",
 }
+CAPTURE_GATE_SCHEMAS = {
+    "ascent_v1_4_vpr_shadow_capture_gate_v1",
+    "ascent_v1_4_vpr_shadow_capture_gate_v2",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,6 +44,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split-manifest", type=Path, required=True)
     parser.add_argument("--retriever", choices=("mixvpr", "megaloc"), required=True)
     parser.add_argument("--calibration-file", type=Path)
+    parser.add_argument("--offline-source-commit", required=True)
+    parser.add_argument("--offline-compatibility-sha256", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--batch-size", type=int, default=16)
@@ -61,7 +67,7 @@ def _read_capture_units(
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     split = json.loads(split_path.read_text(encoding="utf-8"))
     if (
-        summary.get("schema") != "ascent_v1_4_vpr_shadow_capture_gate_v1"
+        summary.get("schema") not in CAPTURE_GATE_SCHEMAS
         or summary.get("technical_status") != "PASS"
         or int(summary.get("strict_error_count", -1)) != 0
     ):
@@ -350,6 +356,22 @@ def main() -> int:
         episodes_path=episodes_path,
         split_path=split_path,
     )
+    provenance = capture_summary["provenance"]
+    capture_source_commit = provenance.get(
+        "capture_source_commit", provenance.get("source_commit")
+    )
+    validator_source_commit = provenance.get(
+        "validator_source_commit", capture_source_commit
+    )
+    if capture_summary["schema"].endswith("_v2") and (
+        capture_summary.get("immutable_raw_revalidation") is not True
+        or validator_source_commit != args.offline_source_commit
+    ):
+        raise ValueError("capture revalidation is not bound to offline source commit")
+    if len(args.offline_source_commit) != 40 or len(
+        args.offline_compatibility_sha256
+    ) != 64:
+        raise ValueError("invalid offline source provenance")
     calibration_hash = _check_role_unlock(
         split=split,
         retriever=args.retriever,
@@ -439,7 +461,10 @@ def main() -> int:
         "runtime_policy_access_to_gt": False,
         "threshold_applied_during_raw_association": False,
         "calibration_unlock_sha256": calibration_hash,
-        "source_commit": capture_summary["provenance"]["source_commit"],
+        "capture_source_commit": capture_source_commit,
+        "capture_validator_source_commit": validator_source_commit,
+        "offline_source_commit": args.offline_source_commit,
+        "offline_compatibility_sha256": args.offline_compatibility_sha256,
         "capture_summary_sha256": sha256(summary_path),
         "capture_episodes_sha256": sha256(episodes_path),
         "model_registry_sha256": sha256(model_registry),

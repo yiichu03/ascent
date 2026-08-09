@@ -18,6 +18,7 @@ GRAPH_EDGE_EVENTS = {
     "submap_exhaustion_recovery",
     "submap_revisit",
 }
+FLOOR_CHANGE_REASON = "floor_change"
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,102 @@ class QueryEvent:
     @property
     def event_id(self) -> str:
         return f"query:{self.query_frame.frame_id}"
+
+
+def resolve_submap_identity_floors(
+    rows: Sequence[Mapping[str, Any]],
+) -> tuple[dict[int, dict[str, int]], set[tuple[int, int, str]]]:
+    """Resolve immutable writer-floor identity from endpoint/split evidence.
+
+    A policy call captures its VPR frame before the map-floor update, while the
+    same call's endpoint is logged after that update.  Consequently, the final
+    endpoint of an old submap may carry the destination floor.  We accept that
+    mismatch only when both halves of the existing v1.2 transition contract are
+    present: the endpoint requests a floor-change split and a matching split
+    event follows at the same episode/step/source submap.
+    """
+
+    endpoints: dict[tuple[int, str], list[Mapping[str, Any]]] = defaultdict(list)
+    floor_split_keys: set[tuple[int, int, str]] = set()
+    for row in rows:
+        sequence_value = row.get("episode_sequence")
+        if sequence_value is None:
+            continue
+        sequence = int(sequence_value)
+        if (
+            row.get("record_type") == "submap_event"
+            and row.get("event") == "submap_split"
+            and row.get("reason") == FLOOR_CHANGE_REASON
+        ):
+            key = (
+                sequence,
+                int(row["step"]),
+                str(row["source_submap_id"]),
+            )
+            if key in floor_split_keys:
+                raise ValueError(f"duplicate floor-change split event: {key}")
+            floor_split_keys.add(key)
+        elif row.get("record_type") == "submap_action_endpoint":
+            endpoints[(sequence, str(row["submap_id"]))].append(row)
+
+    floors: dict[int, dict[str, int]] = defaultdict(dict)
+    matched_split_keys: set[tuple[int, int, str]] = set()
+    transition_keys: set[tuple[int, int, str]] = set()
+    for (sequence, submap_id), values in endpoints.items():
+        values = sorted(values, key=lambda row: int(row["action_step"]))
+        steps = [int(row["action_step"]) for row in values]
+        if len(steps) != len(set(steps)):
+            raise ValueError(
+                f"duplicate submap endpoint step: {sequence}:{submap_id}"
+            )
+        stable_floors: set[int] = set()
+        transition_rows: list[Mapping[str, Any]] = []
+        for row in values:
+            step = int(row["action_step"])
+            key = (sequence, step, submap_id)
+            decision = row.get("decision")
+            endpoint_claims_transition = bool(
+                isinstance(decision, Mapping)
+                and decision.get("floor_changed") is True
+                and decision.get("should_split") is True
+                and decision.get("reason") == FLOOR_CHANGE_REASON
+            )
+            split_confirms_transition = key in floor_split_keys
+            if endpoint_claims_transition != split_confirms_transition:
+                raise ValueError(f"incomplete floor-change transition: {key}")
+            if endpoint_claims_transition:
+                transition_rows.append(row)
+                transition_keys.add(key)
+                matched_split_keys.add(key)
+            else:
+                stable_floors.add(int(row["floor_id"]))
+
+        if len(stable_floors) != 1:
+            raise ValueError(
+                "submap lacks one stable writer floor: "
+                f"{sequence}:{submap_id}:{sorted(stable_floors)}"
+            )
+        identity_floor = next(iter(stable_floors))
+        if len(transition_rows) > 1:
+            raise ValueError(
+                f"multiple floor-change endpoints: {sequence}:{submap_id}"
+            )
+        if transition_rows:
+            transition = transition_rows[0]
+            if int(transition["action_step"]) != max(steps):
+                raise ValueError(
+                    f"non-terminal floor-change endpoint: {sequence}:{submap_id}"
+                )
+            if int(transition["floor_id"]) == identity_floor:
+                raise ValueError(
+                    f"floor-change endpoint kept writer floor: {sequence}:{submap_id}"
+                )
+        floors[sequence][submap_id] = identity_floor
+
+    unmatched = floor_split_keys - matched_split_keys
+    if unmatched:
+        raise ValueError(f"floor-change split lacks endpoint: {sorted(unmatched)[0]}")
+    return {key: dict(value) for key, value in floors.items()}, transition_keys
 
 
 def sha256(path: Path) -> str:
@@ -169,9 +266,10 @@ def load_submap_graphs(path: Path) -> dict[int, EpisodeGraph]:
     first: dict[int, dict[str, int]] = defaultdict(dict)
     last: dict[int, dict[str, int]] = defaultdict(dict)
     by_step: dict[int, dict[int, str]] = defaultdict(dict)
-    floor_by_submap: dict[int, dict[str, int]] = defaultdict(dict)
+    rows = read_jsonl(path)
+    floor_by_submap, _ = resolve_submap_identity_floors(rows)
     sequences: set[int] = set()
-    for row in read_jsonl(path):
+    for row in rows:
         sequence = row.get("episode_sequence")
         if sequence is None:
             continue
@@ -181,11 +279,6 @@ def load_submap_graphs(path: Path) -> dict[int, EpisodeGraph]:
             step = int(row["action_step"])
             submap_id = str(row["submap_id"])
             by_step[sequence][step] = submap_id
-            floor = int(row["floor_id"])
-            incumbent_floor = floor_by_submap[sequence].get(submap_id)
-            if incumbent_floor is not None and incumbent_floor != floor:
-                raise ValueError(f"submap changes policy floor: {submap_id}")
-            floor_by_submap[sequence][submap_id] = floor
             first[sequence][submap_id] = min(
                 step, first[sequence].get(submap_id, step)
             )
@@ -208,7 +301,7 @@ def load_submap_graphs(path: Path) -> dict[int, EpisodeGraph]:
             submap_first_step=dict(first[sequence]),
             submap_last_step=dict(last[sequence]),
             submap_by_step=dict(by_step[sequence]),
-            floor_by_submap=dict(floor_by_submap[sequence]),
+            floor_by_submap=dict(floor_by_submap.get(sequence, {})),
         )
         for sequence in sequences
     }
@@ -232,6 +325,16 @@ def build_query_events(
             raise ValueError(f"no submap diagnostics for episode sequence {sequence}")
         by_submap: dict[str, list[ShadowFrame]] = defaultdict(list)
         for frame in sorted(episode_frames, key=lambda value: value.action_step):
+            writer_floor = graph.floor_by_submap.get(frame.submap_id)
+            if writer_floor is None:
+                raise ValueError(
+                    f"keyframe submap absent from floor binding: {frame.submap_id}"
+                )
+            if frame.floor_id != writer_floor:
+                raise ValueError(
+                    "keyframe differs from immutable writer floor: "
+                    f"{frame.frame_id}:{frame.floor_id}:{writer_floor}"
+                )
             by_submap[frame.submap_id].append(frame)
             current_frames = by_submap[frame.submap_id]
             if len(current_frames) < min_query_frames:

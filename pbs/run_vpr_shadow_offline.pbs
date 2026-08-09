@@ -9,7 +9,7 @@
 set -euo pipefail
 
 PROJECT=/scratch/e1538633/liuyi/drift-aware-submap-exploration
-SOURCE_ROOT=$PROJECT/external/ascent_vo_submap_v1_4
+SOURCE_ROOT=$(realpath "${ASCENT_VPR_OFFLINE_SOURCE_ROOT:?required}")
 ARTIFACT_ROOT=$PROJECT/artifacts/objectnav/vpr_shadow
 ASCENT_ENV=/scratch/e1538633/liuyi/micromamba/envs/ascent_nav
 ASCENT_PYTHON=$ASCENT_ENV/bin/python
@@ -20,7 +20,9 @@ CAPTURE_SUMMARY=${ASCENT_VPR_OFFLINE_CAPTURE_SUMMARY:?required}
 CAPTURE_EPISODES=${ASCENT_VPR_OFFLINE_CAPTURE_EPISODES:?required}
 SPLIT_MANIFEST=${ASCENT_VPR_OFFLINE_SPLIT_MANIFEST:?required}
 CALIBRATION_FILE=${ASCENT_VPR_OFFLINE_CALIBRATION_FILE:-}
-SOURCE_COMMIT=${ASCENT_VPR_OFFLINE_SOURCE_COMMIT:?required}
+CAPTURE_SOURCE_COMMIT=${ASCENT_VPR_OFFLINE_CAPTURE_SOURCE_COMMIT:?required}
+OFFLINE_SOURCE_COMMIT=${ASCENT_VPR_OFFLINE_OFFLINE_SOURCE_COMMIT:?required}
+OFFLINE_COMPATIBILITY_SHA256=${ASCENT_VPR_OFFLINE_COMPATIBILITY_SHA256:?required}
 RUNNER_SHA256=${ASCENT_VPR_OFFLINE_RUNNER_SHA256:?required}
 MODEL_REGISTRY_SHA256=${ASCENT_VPR_OFFLINE_MODEL_REGISTRY_SHA256:?required}
 CAPTURE_SUMMARY_SHA256=${ASCENT_VPR_OFFLINE_CAPTURE_SUMMARY_SHA256:?required}
@@ -33,15 +35,17 @@ MODEL_REGISTRY=$SOURCE_ROOT/experiments/vpr_shadow/model_registry.json
 BATCH_RUNNER=$SOURCE_ROOT/scripts/run_vpr_shadow_offline_batch.py
 CALIBRATOR=$SOURCE_ROOT/scripts/calibrate_vpr_shadow_threshold.py
 EVALUATOR=$SOURCE_ROOT/scripts/evaluate_vpr_shadow_threshold.py
+COMPATIBILITY_CHECKER=$SOURCE_ROOT/scripts/check_vpr_shadow_offline_compatibility.py
 RUN_ROOT=$ARTIFACT_ROOT/offline/${ROLE}/${RETRIEVER}_${PBS_JOBID:-manual}_${STAMP}
 
 case "$ROLE" in hm3d_cal50|hm3d_test100|mp3d_test150) ;; *) echo invalid_role; exit 20 ;; esac
 case "$RETRIEVER" in mixvpr|megaloc) ;; *) echo invalid_retriever; exit 20 ;; esac
 for path in "$CAPTURE_SUMMARY" "$CAPTURE_EPISODES" "$SPLIT_MANIFEST" \
-  "$MODEL_REGISTRY" "$BATCH_RUNNER" "$CALIBRATOR" "$EVALUATOR"; do
+  "$MODEL_REGISTRY" "$BATCH_RUNNER" "$CALIBRATOR" "$EVALUATOR" \
+  "$COMPATIBILITY_CHECKER"; do
   [ -f "$path" ] || { echo "missing_file=$path"; exit 21; }
 done
-[ "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" = "$SOURCE_COMMIT" ] || {
+[ "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" = "$OFFLINE_SOURCE_COMMIT" ] || {
   echo source_commit_mismatch; exit 22;
 }
 [ -z "$(git -C "$SOURCE_ROOT" status --porcelain --untracked-files=all)" ] || {
@@ -62,6 +66,16 @@ done
 [ "$(sha256sum "$SPLIT_MANIFEST" | awk '{print $1}')" = "$SPLIT_MANIFEST_SHA256" ] || {
   echo split_manifest_hash_mismatch; exit 22;
 }
+OFFLINE_COMPATIBILITY_JSON=$(
+  "$ASCENT_PYTHON" "$COMPATIBILITY_CHECKER" \
+    --source-root "$SOURCE_ROOT" \
+    --capture-commit "$CAPTURE_SOURCE_COMMIT" \
+    --offline-commit "$OFFLINE_SOURCE_COMMIT"
+)
+[ "$(printf '%s' "$OFFLINE_COMPATIBILITY_JSON" | sha256sum | awk '{print $1}')" = \
+  "$OFFLINE_COMPATIBILITY_SHA256" ] || {
+  echo offline_compatibility_hash_mismatch; exit 22;
+}
 if [ "$ROLE" = hm3d_cal50 ]; then
   [ -z "$CALIBRATION_FILE" ] && [ -z "$CALIBRATION_FILE_SHA256" ] || {
     echo calibration_forbidden_for_cal50; exit 20;
@@ -73,6 +87,7 @@ else
 fi
 [ ! -e "$RUN_ROOT" ] || { echo "run_root_exists=$RUN_ROOT"; exit 24; }
 mkdir -p "$RUN_ROOT"/{batch,decision,mpl_config,xdg_cache}
+printf '%s\n' "$OFFLINE_COMPATIBILITY_JSON" > "$RUN_ROOT/offline_compatibility.json"
 
 export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1
 export LD_LIBRARY_PATH="$ASCENT_ENV/lib:$ASCENT_ENV/lib64:$ASCENT_ENV/lib/python3.9/site-packages/torch/lib:${LD_LIBRARY_PATH:-}"
@@ -84,19 +99,21 @@ export HF_HOME=$ARTIFACT_ROOT/model_cache/huggingface
 export HUGGINGFACE_HUB_CACHE=$HF_HOME/hub
 export TRANSFORMERS_OFFLINE=1 HF_HUB_OFFLINE=1
 
-"$ASCENT_PYTHON" - "$CAPTURE_SUMMARY" "$SOURCE_COMMIT" "$ROLE" \
+"$ASCENT_PYTHON" - "$CAPTURE_SUMMARY" "$CAPTURE_SOURCE_COMMIT" \
+  "$OFFLINE_SOURCE_COMMIT" "$ROLE" \
   "$RETRIEVER" <<'PY'
 import json, sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))
-assert value["schema"] == "ascent_v1_4_vpr_shadow_capture_gate_v1"
+assert value["schema"] == "ascent_v1_4_vpr_shadow_capture_gate_v2"
 assert value["technical_status"] == "PASS"
 assert value["strict_error_count"] == 0
-assert value["provenance"]["source_commit"] == sys.argv[2]
+assert value["provenance"]["capture_source_commit"] == sys.argv[2]
+assert value["provenance"]["validator_source_commit"] == sys.argv[3]
 expected = {
     "hm3d_cal50": "threshold_calibration_only",
     "hm3d_test100": "locked_in_distribution_test",
     "mp3d_test150": "locked_cross_dataset_transfer_test",
-}[sys.argv[3]]
+}[sys.argv[4]]
 assert value["role"] == expected
 assert value["association_scores_emitted"] is False
 PY
@@ -108,7 +125,9 @@ PY
   echo host=$(hostname)
   echo role=$ROLE
   echo retriever=$RETRIEVER
-  echo source_commit=$SOURCE_COMMIT
+  echo capture_source_commit=$CAPTURE_SOURCE_COMMIT
+  echo offline_source_commit=$OFFLINE_SOURCE_COMMIT
+  echo offline_compatibility_sha256=$OFFLINE_COMPATIBILITY_SHA256
   echo capture_summary=$CAPTURE_SUMMARY
   echo capture_summary_sha256=$CAPTURE_SUMMARY_SHA256
   echo capture_episodes_sha256=$CAPTURE_EPISODES_SHA256
@@ -129,6 +148,8 @@ BATCH_ARGS=(
   --capture-episodes "$CAPTURE_EPISODES"
   --split-manifest "$SPLIT_MANIFEST"
   --retriever "$RETRIEVER"
+  --offline-source-commit "$OFFLINE_SOURCE_COMMIT"
+  --offline-compatibility-sha256 "$OFFLINE_COMPATIBILITY_SHA256"
   --output-dir "$RUN_ROOT/batch/result"
   --device cuda
   --batch-size 16
