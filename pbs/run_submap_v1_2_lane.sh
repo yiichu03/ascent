@@ -4,7 +4,7 @@
 set -euo pipefail
 
 PROJECT=/scratch/e1538633/liuyi/drift-aware-submap-exploration
-SOURCE_ROOT=$PROJECT/external/ascent_vo_submap_v1_2
+SOURCE_ROOT=${ASCENT_SUBMAP_V12_SOURCE_ROOT:-$PROJECT/external/ascent_vo_submap_v1_2}
 RESOURCE_ROOT=$PROJECT/external/ascent
 POINTNAV_VO_ROOT=$PROJECT/external/PointNav-VO
 CHECKPOINT_DIR=$POINTNAV_VO_ROOT/pretrained_ckpts/vo
@@ -25,6 +25,7 @@ EXPECTED_EPISODES=${ASCENT_SUBMAP_V12_LANE_EXPECTED_EPISODES:?required}
 STAGE_ROOT=${ASCENT_SUBMAP_V12_STAGE_ROOT:?required}
 BASE_PORT=${ASCENT_SUBMAP_V12_BASE_PORT:?required}
 DEADLINE_EPOCH=${ASCENT_SUBMAP_V12_DEADLINE_EPOCH:?required}
+VPR_SHADOW_CAPTURE_ENABLED=${ASCENT_VPR_SHADOW_CAPTURE_ENABLED:-0}
 
 FORWARD_SHA256=6b571bb717366f7d80f61e919b33a45ac2f45925201c4e3011b3239a2c42e586
 TURN_SHA256=c469643f9ab35c9e1058f31fbb672a5fa3adf582987a4388bdd020dd89faf1d9
@@ -36,6 +37,7 @@ MAX_CONSECUTIVE_PROCESS_FAILURES=3
 
 case "$MODE" in smoke|full) ;; *) echo "invalid_mode=$MODE"; exit 20 ;; esac
 case "$DATASET" in hm3d|mp3d) ;; *) echo "invalid_dataset=$DATASET"; exit 20 ;; esac
+case "$VPR_SHADOW_CAPTURE_ENABLED" in 0|1) ;; *) echo invalid_vpr_shadow_capture; exit 20 ;; esac
 for value in "$LANE_ID" "$LANE_COUNT" "$EXPECTED_CHUNKS" \
   "$EXPECTED_EPISODES" "$BASE_PORT" "$DEADLINE_EPOCH"; do
   [[ "$value" =~ ^[0-9]+$ ]] || { echo "invalid_integer=$value"; exit 20; }
@@ -135,6 +137,8 @@ export DFINE_PORT=$((BASE_PORT + 5))
 export PYTHONPATH="$SOURCE_ROOT:$SOURCE_ROOT/third_party/vlfm:$SOURCE_ROOT/third_party/frontier_exploration:$SOURCE_ROOT/third_party/depth_camera_filtering:$SOURCE_ROOT/third_party/recognize-anything:$SOURCE_ROOT/third_party/D-FINE:$SOURCE_ROOT/third_party/places365"
 unset ASCENT_OCSM_ENABLED ASCENT_STAIR_DISTANCE_ORDER_FIX
 unset ASCENT_POSE_SCHEDULE_PATH ASCENT_POSE_ARM
+unset ASCENT_VPR_SHADOW_ENABLED ASCENT_VPR_SHADOW_OUTPUT_DIR
+unset ASCENT_VPR_SHADOW_RUN_ID ASCENT_VPR_SHADOW_SOURCE_COMMIT
 
 mapfile -t CHUNK_ROWS < <(
   "$ASCENT_PYTHON" - "$MANIFEST" "$LANE_ID" "$LANE_COUNT" <<'PY'
@@ -163,7 +167,11 @@ done
 
 {
   echo schema=ascent_vo_submap_v1_2_lane_v2
-  echo scientific_role=b2_only_method_screen
+  if [ "$VPR_SHADOW_CAPTURE_ENABLED" = 1 ]; then
+    echo scientific_role=vpr_shadow_passive_capture
+  else
+    echo scientific_role=b2_only_method_screen
+  fi
   echo pbs_jobid=${PBS_JOBID:-manual}
   echo host=$(hostname)
   echo mode=$MODE
@@ -186,6 +194,8 @@ done
   echo method_version=submap_v1.2
   echo handoff_enabled=1
   echo exhaustion_recovery_enabled=1
+  echo vpr_shadow_capture_enabled=$VPR_SHADOW_CAPTURE_ENABLED
+  echo vpr_shadow_association_runtime_enabled=0
   echo start_time=$(date -Is)
 } > "$RUN_ROOT/environment_preflight.txt"
 
@@ -233,7 +243,7 @@ run_health_check initial "$RUN_ROOT/service_health_initial.log" \
   "$ASCENT_SERVER_WAIT_SECONDS" || exit 41
 
 INVENTORY=$RUN_ROOT/inventory.csv
-printf 'priority,stage,condition,chunk_id,expected_episodes,process_exit_status,post_health_status,terminal_class,vo_metadata_count,vo_step_count,episode_end_count,vo_technical_error_count,vo_parse_error_count,vo_unknown_count,submap_metadata_count,submap_reset_count,submap_endpoint_count,submap_event_count,submap_parse_error_count,submap_unknown_count,vo_diagnostics,submap_diagnostics,identity_path,run_log\n' \
+printf 'priority,stage,condition,chunk_id,expected_episodes,process_exit_status,post_health_status,terminal_class,vo_metadata_count,vo_step_count,episode_end_count,vo_technical_error_count,vo_parse_error_count,vo_unknown_count,submap_metadata_count,submap_reset_count,submap_endpoint_count,submap_event_count,submap_parse_error_count,submap_unknown_count,vpr_metadata_count,vpr_reset_count,vpr_keyframe_count,vpr_parse_error_count,vpr_unknown_count,vo_diagnostics,submap_diagnostics,vpr_shadow_manifest,identity_path,run_log\n' \
   > "$INVENTORY"
 
 diagnostic_counts() {
@@ -267,6 +277,29 @@ print(*values)
 PY
 }
 
+vpr_diagnostic_counts() {
+  local path=$1
+  "$ASCENT_PYTHON" - "$path" <<'PY'
+import json, sys
+from collections import Counter
+from pathlib import Path
+path = Path(sys.argv[1])
+counts, parse = Counter(), 0
+if path.is_file():
+    for line in path.open(errors="replace", encoding="utf-8"):
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            parse += 1
+            continue
+        counts[str(record.get("record_type"))] += 1
+known = {"vpr_shadow_run_metadata", "vpr_shadow_episode_reset", "vpr_shadow_keyframe"}
+print(counts["vpr_shadow_run_metadata"], counts["vpr_shadow_episode_reset"],
+      counts["vpr_shadow_keyframe"], parse,
+      sum(value for key, value in counts.items() if key not in known))
+PY
+}
+
 FAILED_UNITS=()
 CONSECUTIVE_PROCESS_FAILURES=0
 ATTEMPT_SEQUENCE=0
@@ -290,6 +323,12 @@ run_unit() {
 
   local vo_diagnostics=$unit_dir/vo_diagnostics.jsonl
   local submap_diagnostics=$unit_dir/submap_diagnostics.jsonl
+  local vpr_shadow_dir=$unit_dir/vpr_shadow
+  local vpr_shadow_manifest=$vpr_shadow_dir/keyframes.jsonl
+  local vpr_shadow_inventory_manifest=
+  if [ "$VPR_SHADOW_CAPTURE_ENABLED" = 1 ]; then
+    vpr_shadow_inventory_manifest=$vpr_shadow_manifest
+  fi
   local run_id=${MODE}__screen__B2__${attempt_name}__${chunk_id}
   local cmd=(
     "$ASCENT_PYTHON" -u -m ascent.run
@@ -324,6 +363,12 @@ run_unit() {
     printf 'ASCENT_SUBMAP_ENABLED=true ASCENT_SUBMAP_ALLOW_PROVISIONAL=false '
     printf 'ASCENT_SUBMAP_HANDOFF_ENABLED=true '
     printf 'ASCENT_SUBMAP_EXHAUSTION_RECOVERY_ENABLED=true '
+    if [ "$VPR_SHADOW_CAPTURE_ENABLED" = 1 ]; then
+      printf 'ASCENT_VPR_SHADOW_ENABLED=true '
+      printf 'ASCENT_VPR_SHADOW_OUTPUT_DIR=%q ' "$vpr_shadow_dir"
+      printf 'ASCENT_VPR_SHADOW_RUN_ID=%q ' "$run_id"
+      printf 'ASCENT_VPR_SHADOW_SOURCE_COMMIT=%q ' "$SOURCE_COMMIT"
+    fi
     printf 'ASCENT_VO_DIAGNOSTICS_PATH=%q ASCENT_SUBMAP_DIAGNOSTICS_PATH=%q ' \
       "$vo_diagnostics" "$submap_diagnostics"
     printf 'timeout --signal=TERM --kill-after=120s %qs ' "$timeout_seconds"
@@ -337,6 +382,9 @@ run_unit() {
     echo method_version=submap_v1.2
     echo handoff_enabled=1
     echo exhaustion_recovery_enabled=1
+    echo vpr_shadow_capture_enabled=$VPR_SHADOW_CAPTURE_ENABLED
+    echo vpr_shadow_output_dir=$vpr_shadow_dir
+    echo vpr_shadow_association_runtime_enabled=0
     echo max_actions=$SCREEN_MAX_ACTIONS
     echo expected_episodes=$expected
     echo no_metric_driven_retry=1
@@ -352,6 +400,12 @@ run_unit() {
     export ASCENT_SUBMAP_ALLOW_PROVISIONAL=false
     export ASCENT_SUBMAP_HANDOFF_ENABLED=true
     export ASCENT_SUBMAP_EXHAUSTION_RECOVERY_ENABLED=true
+    if [ "$VPR_SHADOW_CAPTURE_ENABLED" = 1 ]; then
+      export ASCENT_VPR_SHADOW_ENABLED=true
+      export ASCENT_VPR_SHADOW_OUTPUT_DIR=$vpr_shadow_dir
+      export ASCENT_VPR_SHADOW_RUN_ID=$run_id
+      export ASCENT_VPR_SHADOW_SOURCE_COMMIT=$SOURCE_COMMIT
+    fi
     export ASCENT_VO_DIAGNOSTICS_PATH=$vo_diagnostics
     export ASCENT_VO_RUN_ID=$run_id
     export ASCENT_VO_SOURCE_COMMIT=$SOURCE_COMMIT
@@ -369,9 +423,14 @@ run_unit() {
   local post_health=0
   run_health_check "after_${attempt_name}_${chunk_id}" \
     "$unit_dir/service_health_after.log" 0 || post_health=$?
-  local vm vs ve vt vp vu sm sr se sv sp su
+  local vm vs ve vt vp vu sm sr se sv sp su vf vr vk vprp vpu
   read -r vm vs ve vt vp vu <<< "$(diagnostic_counts "$vo_diagnostics" vo)"
   read -r sm sr se sv sp su <<< "$(diagnostic_counts "$submap_diagnostics" submap)"
+  if [ "$VPR_SHADOW_CAPTURE_ENABLED" = 1 ]; then
+    read -r vf vr vk vprp vpu <<< "$(vpr_diagnostic_counts "$vpr_shadow_manifest")"
+  else
+    vf=0; vr=0; vk=0; vprp=0; vpu=0
+  fi
   local terminal_class=complete
   if [ "$post_health" -ne 0 ]; then
     terminal_class=infrastructure_failure
@@ -381,14 +440,20 @@ run_unit() {
     terminal_class=logging_failure
   elif [ "$sm" -ne 1 ] || [ "$sp" -ne 0 ] || [ "$su" -ne 0 ]; then
     terminal_class=logging_failure
+  elif [ "$VPR_SHADOW_CAPTURE_ENABLED" = 1 ] && \
+       { [ "$vf" -ne 1 ] || [ "$vr" -ne "$expected" ] || \
+         [ "$vk" -lt "$expected" ] || [ "$vprp" -ne 0 ] || [ "$vpu" -ne 0 ]; }; then
+    terminal_class=logging_failure
   elif [ "$ve" -ne "$expected" ]; then
     terminal_class=incomplete_diagnostics
   fi
-  printf '%s,screen,B2,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+  printf '%s,screen,B2,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
     "$priority" "$chunk_id" "$expected" "$status" "$post_health" \
     "$terminal_class" "$vm" "$vs" "$ve" "$vt" "$vp" "$vu" \
-    "$sm" "$sr" "$se" "$sv" "$sp" "$su" "$vo_diagnostics" \
-    "$submap_diagnostics" "$identity_path" "$unit_dir/run.log" >> "$INVENTORY"
+    "$sm" "$sr" "$se" "$sv" "$sp" "$su" \
+    "$vf" "$vr" "$vk" "$vprp" "$vpu" "$vo_diagnostics" \
+    "$submap_diagnostics" "$vpr_shadow_inventory_manifest" "$identity_path" \
+    "$unit_dir/run.log" >> "$INVENTORY"
   echo "unit_end priority=$priority condition=B2 chunk=$chunk_id status=$status class=$terminal_class ends=$ve time=$(date -Is)" \
     | tee -a "$RUN_ROOT/driver.log"
   case "$terminal_class" in

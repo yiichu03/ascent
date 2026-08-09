@@ -1,0 +1,52 @@
+{
+  "schema": "ascent_v1_4_vpr_shadow_model_registry_v1",
+  "global_retrievers": {
+    "mixvpr": {
+      "repository_path": "external/vpr_references/MixVPR",
+      "repository_commit": "4043915cef24818003ece1a8112bc8a24e69abe0",
+      "license_note": "no LICENSE file present in the pinned repository; import for internal research evaluation only",
+      "weights_path": "artifacts/objectnav/vpr_shadow/model_cache/mixvpr/resnet50_MixVPR_4096.ckpt",
+      "weights_sha256": "97528606773e9920e93ca4d211daeabf1c7312480f38b45379ee5551a1b4dd24",
+      "weights_source": "official README Google Drive id 1vuz3PvnR7vxnDDLQrdHJaOA04SQrtk5L",
+      "input_size": [320, 320],
+      "descriptor_dimension": 4096
+    },
+    "megaloc": {
+      "repository_path": "external/vpr_references/MegaLoc",
+      "repository_commit": "5fe0dd697c4a70ba3e23607f6716ab3c606b16db",
+      "license": "MIT",
+      "weights_path": "artifacts/objectnav/vpr_shadow/model_cache/huggingface/hub/models--gberton--MegaLoc/snapshots/37bb43d65dd6388d1578052de5eb0bcdceb497e7/model.safetensors",
+      "weights_sha256": "d4f9f2bcb60018f91eb6a8e061ed054fd55654e10c2569cf13841ea986ffb4f8",
+      "huggingface_revision": "37bb43d65dd6388d1578052de5eb0bcdceb497e7",
+      "input_size": [322, 322],
+      "descriptor_dimension": 8448
+    }
+  },
+  "local_verifier": {
+    "name": "ALIKED-n16+LightGlue",
+    "repository_path": "external/vpr_references/LightGlue",
+    "repository_commit": "eb42fee2d71449efb0aa5c10549752b5d75384d8",
+    "license": "Apache-2.0; bundled ALIKED is BSD-3-Clause",
+    "max_keypoints": 2048,
+    "aliked_weights_path": "artifacts/objectnav/vpr_shadow/model_cache/torch/hub/checkpoints/aliked-n16.pth",
+    "aliked_weights_sha256": "5be8704840ed662d9d8c561bf7279c222092674e7eb05fd0feab94899e9d82f2",
+    "lightglue_weights_path": "artifacts/objectnav/vpr_shadow/model_cache/torch/hub/checkpoints/aliked_lightglue_v0-1_arxiv.pth",
+    "lightglue_weights_sha256": "d975e965b105311a6143194852297dff4f02aea5cc2e10cecfed966ca0e22503",
+    "python_deps_path": "artifacts/objectnav/vpr_shadow/python_deps",
+    "kornia_version": "0.7.3",
+    "kornia_rs_version": "0.1.0"
+  },
+  "design_references_only": {
+    "hierarchical_localization": {
+      "repository_path": "external/vpr_references/Hierarchical-Localization",
+      "repository_commit": "c13273bd0ecc2917a35910fd843712a1c6243193",
+      "license": "Apache-2.0"
+    },
+    "orb_slam3": {
+      "repository_path": "external/vpr_references/ORB_SLAM3",
+      "repository_commit": "4452a3c4ab75b1cde34e5505a36ec3f9edcdc4c4",
+      "license": "GPL-3.0",
+      "usage": "read-only design reference; no code copied and no pose-graph backend used"
+    }
+  }
+}

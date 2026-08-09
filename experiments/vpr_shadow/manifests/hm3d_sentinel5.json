@@ -1,0 +1,53 @@
+{
+  "dataset": "hm3d",
+  "episode_count": 5,
+  "episodes": [
+    {
+      "logical_case_id": "hm3d_train_0010",
+      "scene_id": "hm3d/train/00031-Wo6kuutE9i7/Wo6kuutE9i7.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c000",
+      "source_episode_index": 10
+    },
+    {
+      "logical_case_id": "hm3d_train_0050",
+      "scene_id": "hm3d/train/00251-wsAYBFtQaL7/wsAYBFtQaL7.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c001",
+      "source_episode_index": 20
+    },
+    {
+      "logical_case_id": "hm3d_train_0066",
+      "scene_id": "hm3d/train/00022-gmuS7Wgsbrx/gmuS7Wgsbrx.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c002",
+      "source_episode_index": 6
+    },
+    {
+      "logical_case_id": "hm3d_train_0078",
+      "scene_id": "hm3d/train/00657-TSJmdttd2GV/TSJmdttd2GV.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c002",
+      "source_episode_index": 18
+    },
+    {
+      "logical_case_id": "hm3d_train_0118",
+      "scene_id": "hm3d/train/00414-77mMEyxhs44/77mMEyxhs44.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c003",
+      "source_episode_index": 28
+    }
+  ],
+  "evaluation_gt_read": false,
+  "outcome_fields_read": false,
+  "role": "engineering_sentinel",
+  "scene_count": 5,
+  "scene_ids": [
+    "hm3d/train/00022-gmuS7Wgsbrx/gmuS7Wgsbrx.basis.glb",
+    "hm3d/train/00031-Wo6kuutE9i7/Wo6kuutE9i7.basis.glb",
+    "hm3d/train/00251-wsAYBFtQaL7/wsAYBFtQaL7.basis.glb",
+    "hm3d/train/00414-77mMEyxhs44/77mMEyxhs44.basis.glb",
+    "hm3d/train/00657-TSJmdttd2GV/TSJmdttd2GV.basis.glb"
+  ],
+  "schema": "ascent_v1_4_vpr_shadow_split_v1",
+  "selection_inputs": "scene_id_and_source_order_only",
+  "selection_rule": "first source-order episode from each of the first five hash-ranked HM3D-Cal50 scenes",
+  "source_manifest_name": "hm3d150_relocated.json",
+  "source_manifest_sha256": "23297001bb08e22c48e073d4438918b74973712e5cbe99b06a9e62b4cd3ccc02",
+  "split_salt": "ascent_v1.4_vpr_shadow_scene_split_20260809_v1"
+}

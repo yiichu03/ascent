@@ -1,0 +1,343 @@
+{
+  "dataset": "hm3d",
+  "episode_count": 50,
+  "episodes": [
+    {
+      "logical_case_id": "hm3d_train_0000",
+      "scene_id": "hm3d/train/00327-xgLmjqzoAzF/xgLmjqzoAzF.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c000",
+      "source_episode_index": 0
+    },
+    {
+      "logical_case_id": "hm3d_train_0010",
+      "scene_id": "hm3d/train/00031-Wo6kuutE9i7/Wo6kuutE9i7.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c000",
+      "source_episode_index": 10
+    },
+    {
+      "logical_case_id": "hm3d_train_0011",
+      "scene_id": "hm3d/train/00508-4vwGX7U38Ux/4vwGX7U38Ux.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c000",
+      "source_episode_index": 11
+    },
+    {
+      "logical_case_id": "hm3d_train_0014",
+      "scene_id": "hm3d/train/00205-NEVASPhcrxR/NEVASPhcrxR.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c000",
+      "source_episode_index": 14
+    },
+    {
+      "logical_case_id": "hm3d_train_0016",
+      "scene_id": "hm3d/train/00109-GTV2Y73Sn5t/GTV2Y73Sn5t.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c000",
+      "source_episode_index": 16
+    },
+    {
+      "logical_case_id": "hm3d_train_0022",
+      "scene_id": "hm3d/train/00205-NEVASPhcrxR/NEVASPhcrxR.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c000",
+      "source_episode_index": 22
+    },
+    {
+      "logical_case_id": "hm3d_train_0026",
+      "scene_id": "hm3d/train/00591-JptJPosx1Z6/JptJPosx1Z6.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c000",
+      "source_episode_index": 26
+    },
+    {
+      "logical_case_id": "hm3d_train_0027",
+      "scene_id": "hm3d/train/00025-ixTj1aTMup2/ixTj1aTMup2.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c000",
+      "source_episode_index": 27
+    },
+    {
+      "logical_case_id": "hm3d_train_0028",
+      "scene_id": "hm3d/train/00508-4vwGX7U38Ux/4vwGX7U38Ux.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c000",
+      "source_episode_index": 28
+    },
+    {
+      "logical_case_id": "hm3d_train_0030",
+      "scene_id": "hm3d/train/00207-FRQ75PjD278/FRQ75PjD278.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c001",
+      "source_episode_index": 0
+    },
+    {
+      "logical_case_id": "hm3d_train_0034",
+      "scene_id": "hm3d/train/00569-YJDUB7hWg9h/YJDUB7hWg9h.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c001",
+      "source_episode_index": 4
+    },
+    {
+      "logical_case_id": "hm3d_train_0037",
+      "scene_id": "hm3d/train/00294-PPTLa8SkUfo/PPTLa8SkUfo.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c001",
+      "source_episode_index": 7
+    },
+    {
+      "logical_case_id": "hm3d_train_0038",
+      "scene_id": "hm3d/train/00569-YJDUB7hWg9h/YJDUB7hWg9h.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c001",
+      "source_episode_index": 8
+    },
+    {
+      "logical_case_id": "hm3d_train_0046",
+      "scene_id": "hm3d/train/00466-xAHnY3QzFUN/xAHnY3QzFUN.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c001",
+      "source_episode_index": 16
+    },
+    {
+      "logical_case_id": "hm3d_train_0047",
+      "scene_id": "hm3d/train/00141-iigzG1rtanx/iigzG1rtanx.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c001",
+      "source_episode_index": 17
+    },
+    {
+      "logical_case_id": "hm3d_train_0050",
+      "scene_id": "hm3d/train/00251-wsAYBFtQaL7/wsAYBFtQaL7.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c001",
+      "source_episode_index": 20
+    },
+    {
+      "logical_case_id": "hm3d_train_0053",
+      "scene_id": "hm3d/train/00422-8wJuSPJ9FXG/8wJuSPJ9FXG.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c001",
+      "source_episode_index": 23
+    },
+    {
+      "logical_case_id": "hm3d_train_0058",
+      "scene_id": "hm3d/train/00250-U3oQjwTuMX8/U3oQjwTuMX8.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c001",
+      "source_episode_index": 28
+    },
+    {
+      "logical_case_id": "hm3d_train_0060",
+      "scene_id": "hm3d/train/00203-VoVGtfYrpuQ/VoVGtfYrpuQ.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c002",
+      "source_episode_index": 0
+    },
+    {
+      "logical_case_id": "hm3d_train_0061",
+      "scene_id": "hm3d/train/00207-FRQ75PjD278/FRQ75PjD278.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c002",
+      "source_episode_index": 1
+    },
+    {
+      "logical_case_id": "hm3d_train_0063",
+      "scene_id": "hm3d/train/00388-pcpn6mFqFCg/pcpn6mFqFCg.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c002",
+      "source_episode_index": 3
+    },
+    {
+      "logical_case_id": "hm3d_train_0066",
+      "scene_id": "hm3d/train/00022-gmuS7Wgsbrx/gmuS7Wgsbrx.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c002",
+      "source_episode_index": 6
+    },
+    {
+      "logical_case_id": "hm3d_train_0071",
+      "scene_id": "hm3d/train/00466-xAHnY3QzFUN/xAHnY3QzFUN.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c002",
+      "source_episode_index": 11
+    },
+    {
+      "logical_case_id": "hm3d_train_0073",
+      "scene_id": "hm3d/train/00327-xgLmjqzoAzF/xgLmjqzoAzF.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c002",
+      "source_episode_index": 13
+    },
+    {
+      "logical_case_id": "hm3d_train_0075",
+      "scene_id": "hm3d/train/00307-vDfkYo5VqEQ/vDfkYo5VqEQ.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c002",
+      "source_episode_index": 15
+    },
+    {
+      "logical_case_id": "hm3d_train_0076",
+      "scene_id": "hm3d/train/00744-1S7LAXRdDqK/1S7LAXRdDqK.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c002",
+      "source_episode_index": 16
+    },
+    {
+      "logical_case_id": "hm3d_train_0078",
+      "scene_id": "hm3d/train/00657-TSJmdttd2GV/TSJmdttd2GV.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c002",
+      "source_episode_index": 18
+    },
+    {
+      "logical_case_id": "hm3d_train_0080",
+      "scene_id": "hm3d/train/00203-VoVGtfYrpuQ/VoVGtfYrpuQ.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c002",
+      "source_episode_index": 20
+    },
+    {
+      "logical_case_id": "hm3d_train_0082",
+      "scene_id": "hm3d/train/00009-vLpv2VX547B/vLpv2VX547B.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c002",
+      "source_episode_index": 22
+    },
+    {
+      "logical_case_id": "hm3d_train_0083",
+      "scene_id": "hm3d/train/00251-wsAYBFtQaL7/wsAYBFtQaL7.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c002",
+      "source_episode_index": 23
+    },
+    {
+      "logical_case_id": "hm3d_train_0085",
+      "scene_id": "hm3d/train/00591-JptJPosx1Z6/JptJPosx1Z6.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c002",
+      "source_episode_index": 25
+    },
+    {
+      "logical_case_id": "hm3d_train_0087",
+      "scene_id": "hm3d/train/00031-Wo6kuutE9i7/Wo6kuutE9i7.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c002",
+      "source_episode_index": 27
+    },
+    {
+      "logical_case_id": "hm3d_train_0092",
+      "scene_id": "hm3d/train/00057-1UnKg1rAb8A/1UnKg1rAb8A.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c003",
+      "source_episode_index": 2
+    },
+    {
+      "logical_case_id": "hm3d_train_0095",
+      "scene_id": "hm3d/train/00307-vDfkYo5VqEQ/vDfkYo5VqEQ.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c003",
+      "source_episode_index": 5
+    },
+    {
+      "logical_case_id": "hm3d_train_0096",
+      "scene_id": "hm3d/train/00150-LcAd9dhvVwh/LcAd9dhvVwh.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c003",
+      "source_episode_index": 6
+    },
+    {
+      "logical_case_id": "hm3d_train_0097",
+      "scene_id": "hm3d/train/00744-1S7LAXRdDqK/1S7LAXRdDqK.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c003",
+      "source_episode_index": 7
+    },
+    {
+      "logical_case_id": "hm3d_train_0098",
+      "scene_id": "hm3d/train/00294-PPTLa8SkUfo/PPTLa8SkUfo.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c003",
+      "source_episode_index": 8
+    },
+    {
+      "logical_case_id": "hm3d_train_0102",
+      "scene_id": "hm3d/train/00422-8wJuSPJ9FXG/8wJuSPJ9FXG.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c003",
+      "source_episode_index": 12
+    },
+    {
+      "logical_case_id": "hm3d_train_0106",
+      "scene_id": "hm3d/train/00388-pcpn6mFqFCg/pcpn6mFqFCg.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c003",
+      "source_episode_index": 16
+    },
+    {
+      "logical_case_id": "hm3d_train_0107",
+      "scene_id": "hm3d/train/00009-vLpv2VX547B/vLpv2VX547B.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c003",
+      "source_episode_index": 17
+    },
+    {
+      "logical_case_id": "hm3d_train_0108",
+      "scene_id": "hm3d/train/00141-iigzG1rtanx/iigzG1rtanx.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c003",
+      "source_episode_index": 18
+    },
+    {
+      "logical_case_id": "hm3d_train_0118",
+      "scene_id": "hm3d/train/00414-77mMEyxhs44/77mMEyxhs44.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c003",
+      "source_episode_index": 28
+    },
+    {
+      "logical_case_id": "hm3d_train_0122",
+      "scene_id": "hm3d/train/00057-1UnKg1rAb8A/1UnKg1rAb8A.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c004",
+      "source_episode_index": 2
+    },
+    {
+      "logical_case_id": "hm3d_train_0123",
+      "scene_id": "hm3d/train/00657-TSJmdttd2GV/TSJmdttd2GV.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c004",
+      "source_episode_index": 3
+    },
+    {
+      "logical_case_id": "hm3d_train_0124",
+      "scene_id": "hm3d/train/00022-gmuS7Wgsbrx/gmuS7Wgsbrx.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c004",
+      "source_episode_index": 4
+    },
+    {
+      "logical_case_id": "hm3d_train_0126",
+      "scene_id": "hm3d/train/00414-77mMEyxhs44/77mMEyxhs44.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c004",
+      "source_episode_index": 6
+    },
+    {
+      "logical_case_id": "hm3d_train_0128",
+      "scene_id": "hm3d/train/00025-ixTj1aTMup2/ixTj1aTMup2.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c004",
+      "source_episode_index": 8
+    },
+    {
+      "logical_case_id": "hm3d_train_0132",
+      "scene_id": "hm3d/train/00250-U3oQjwTuMX8/U3oQjwTuMX8.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c004",
+      "source_episode_index": 12
+    },
+    {
+      "logical_case_id": "hm3d_train_0138",
+      "scene_id": "hm3d/train/00150-LcAd9dhvVwh/LcAd9dhvVwh.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c004",
+      "source_episode_index": 18
+    },
+    {
+      "logical_case_id": "hm3d_train_0143",
+      "scene_id": "hm3d/train/00109-GTV2Y73Sn5t/GTV2Y73Sn5t.basis.glb",
+      "source_chunk_id": "hm3d_screen150_c004",
+      "source_episode_index": 23
+    }
+  ],
+  "evaluation_gt_read": false,
+  "outcome_fields_read": false,
+  "role": "threshold_calibration_only",
+  "scene_count": 25,
+  "scene_ids": [
+    "hm3d/train/00009-vLpv2VX547B/vLpv2VX547B.basis.glb",
+    "hm3d/train/00022-gmuS7Wgsbrx/gmuS7Wgsbrx.basis.glb",
+    "hm3d/train/00025-ixTj1aTMup2/ixTj1aTMup2.basis.glb",
+    "hm3d/train/00031-Wo6kuutE9i7/Wo6kuutE9i7.basis.glb",
+    "hm3d/train/00057-1UnKg1rAb8A/1UnKg1rAb8A.basis.glb",
+    "hm3d/train/00109-GTV2Y73Sn5t/GTV2Y73Sn5t.basis.glb",
+    "hm3d/train/00141-iigzG1rtanx/iigzG1rtanx.basis.glb",
+    "hm3d/train/00150-LcAd9dhvVwh/LcAd9dhvVwh.basis.glb",
+    "hm3d/train/00203-VoVGtfYrpuQ/VoVGtfYrpuQ.basis.glb",
+    "hm3d/train/00205-NEVASPhcrxR/NEVASPhcrxR.basis.glb",
+    "hm3d/train/00207-FRQ75PjD278/FRQ75PjD278.basis.glb",
+    "hm3d/train/00250-U3oQjwTuMX8/U3oQjwTuMX8.basis.glb",
+    "hm3d/train/00251-wsAYBFtQaL7/wsAYBFtQaL7.basis.glb",
+    "hm3d/train/00294-PPTLa8SkUfo/PPTLa8SkUfo.basis.glb",
+    "hm3d/train/00307-vDfkYo5VqEQ/vDfkYo5VqEQ.basis.glb",
+    "hm3d/train/00327-xgLmjqzoAzF/xgLmjqzoAzF.basis.glb",
+    "hm3d/train/00388-pcpn6mFqFCg/pcpn6mFqFCg.basis.glb",
+    "hm3d/train/00414-77mMEyxhs44/77mMEyxhs44.basis.glb",
+    "hm3d/train/00422-8wJuSPJ9FXG/8wJuSPJ9FXG.basis.glb",
+    "hm3d/train/00466-xAHnY3QzFUN/xAHnY3QzFUN.basis.glb",
+    "hm3d/train/00508-4vwGX7U38Ux/4vwGX7U38Ux.basis.glb",
+    "hm3d/train/00569-YJDUB7hWg9h/YJDUB7hWg9h.basis.glb",
+    "hm3d/train/00591-JptJPosx1Z6/JptJPosx1Z6.basis.glb",
+    "hm3d/train/00657-TSJmdttd2GV/TSJmdttd2GV.basis.glb",
+    "hm3d/train/00744-1S7LAXRdDqK/1S7LAXRdDqK.basis.glb"
+  ],
+  "schema": "ascent_v1_4_vpr_shadow_split_v1",
+  "selection_inputs": "scene_id_and_source_order_only",
+  "selection_rule": "all episodes from the first 25 hash-ranked scenes having exactly two source episodes",
+  "source_manifest_name": "hm3d150_relocated.json",
+  "source_manifest_sha256": "23297001bb08e22c48e073d4438918b74973712e5cbe99b06a9e62b4cd3ccc02",
+  "split_salt": "ascent_v1.4_vpr_shadow_scene_split_20260809_v1"
+}

@@ -1,0 +1,171 @@
+#!/bin/bash
+#PBS -N asv14vpr
+#PBS -P CFP04-SF-109
+#PBS -q auto
+#PBS -l select=1:ngpus=1
+#PBS -l walltime=96:00:00
+#PBS -j oe
+
+set -euo pipefail
+
+PROJECT=/scratch/e1538633/liuyi/drift-aware-submap-exploration
+SOURCE_ROOT=$PROJECT/external/ascent_vo_submap_v1_4
+ARTIFACT_ROOT=$PROJECT/artifacts/objectnav/vpr_shadow
+ASCENT_ENV=/scratch/e1538633/liuyi/micromamba/envs/ascent_nav
+ASCENT_PYTHON=$ASCENT_ENV/bin/python
+
+ROLE=${ASCENT_VPR_OFFLINE_ROLE:?required}
+RETRIEVER=${ASCENT_VPR_OFFLINE_RETRIEVER:?required}
+CAPTURE_SUMMARY=${ASCENT_VPR_OFFLINE_CAPTURE_SUMMARY:?required}
+CAPTURE_EPISODES=${ASCENT_VPR_OFFLINE_CAPTURE_EPISODES:?required}
+SPLIT_MANIFEST=${ASCENT_VPR_OFFLINE_SPLIT_MANIFEST:?required}
+CALIBRATION_FILE=${ASCENT_VPR_OFFLINE_CALIBRATION_FILE:-}
+SOURCE_COMMIT=${ASCENT_VPR_OFFLINE_SOURCE_COMMIT:?required}
+RUNNER_SHA256=${ASCENT_VPR_OFFLINE_RUNNER_SHA256:?required}
+MODEL_REGISTRY_SHA256=${ASCENT_VPR_OFFLINE_MODEL_REGISTRY_SHA256:?required}
+CAPTURE_SUMMARY_SHA256=${ASCENT_VPR_OFFLINE_CAPTURE_SUMMARY_SHA256:?required}
+CAPTURE_EPISODES_SHA256=${ASCENT_VPR_OFFLINE_CAPTURE_EPISODES_SHA256:?required}
+SPLIT_MANIFEST_SHA256=${ASCENT_VPR_OFFLINE_SPLIT_MANIFEST_SHA256:?required}
+CALIBRATION_FILE_SHA256=${ASCENT_VPR_OFFLINE_CALIBRATION_FILE_SHA256:-}
+STAMP=${ASCENT_VPR_OFFLINE_STAMP:?required}
+
+MODEL_REGISTRY=$SOURCE_ROOT/experiments/vpr_shadow/model_registry.json
+BATCH_RUNNER=$SOURCE_ROOT/scripts/run_vpr_shadow_offline_batch.py
+CALIBRATOR=$SOURCE_ROOT/scripts/calibrate_vpr_shadow_threshold.py
+EVALUATOR=$SOURCE_ROOT/scripts/evaluate_vpr_shadow_threshold.py
+RUN_ROOT=$ARTIFACT_ROOT/offline/${ROLE}/${RETRIEVER}_${PBS_JOBID:-manual}_${STAMP}
+
+case "$ROLE" in hm3d_cal50|hm3d_test100|mp3d_test150) ;; *) echo invalid_role; exit 20 ;; esac
+case "$RETRIEVER" in mixvpr|megaloc) ;; *) echo invalid_retriever; exit 20 ;; esac
+for path in "$CAPTURE_SUMMARY" "$CAPTURE_EPISODES" "$SPLIT_MANIFEST" \
+  "$MODEL_REGISTRY" "$BATCH_RUNNER" "$CALIBRATOR" "$EVALUATOR"; do
+  [ -f "$path" ] || { echo "missing_file=$path"; exit 21; }
+done
+[ "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" = "$SOURCE_COMMIT" ] || {
+  echo source_commit_mismatch; exit 22;
+}
+[ -z "$(git -C "$SOURCE_ROOT" status --porcelain --untracked-files=all)" ] || {
+  echo source_worktree_not_clean; exit 23;
+}
+[ "$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')" = "$RUNNER_SHA256" ] || {
+  echo runner_hash_mismatch; exit 22;
+}
+[ "$(sha256sum "$MODEL_REGISTRY" | awk '{print $1}')" = "$MODEL_REGISTRY_SHA256" ] || {
+  echo model_registry_hash_mismatch; exit 22;
+}
+[ "$(sha256sum "$CAPTURE_SUMMARY" | awk '{print $1}')" = "$CAPTURE_SUMMARY_SHA256" ] || {
+  echo capture_summary_hash_mismatch; exit 22;
+}
+[ "$(sha256sum "$CAPTURE_EPISODES" | awk '{print $1}')" = "$CAPTURE_EPISODES_SHA256" ] || {
+  echo capture_episodes_hash_mismatch; exit 22;
+}
+[ "$(sha256sum "$SPLIT_MANIFEST" | awk '{print $1}')" = "$SPLIT_MANIFEST_SHA256" ] || {
+  echo split_manifest_hash_mismatch; exit 22;
+}
+if [ "$ROLE" = hm3d_cal50 ]; then
+  [ -z "$CALIBRATION_FILE" ] && [ -z "$CALIBRATION_FILE_SHA256" ] || {
+    echo calibration_forbidden_for_cal50; exit 20;
+  }
+else
+  [ -f "$CALIBRATION_FILE" ] || { echo calibration_required_for_locked_test; exit 21; }
+  [ "$(sha256sum "$CALIBRATION_FILE" | awk '{print $1}')" = \
+    "$CALIBRATION_FILE_SHA256" ] || { echo calibration_hash_mismatch; exit 22; }
+fi
+[ ! -e "$RUN_ROOT" ] || { echo "run_root_exists=$RUN_ROOT"; exit 24; }
+mkdir -p "$RUN_ROOT"/{batch,decision,mpl_config,xdg_cache}
+
+export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1
+export LD_LIBRARY_PATH="$ASCENT_ENV/lib:$ASCENT_ENV/lib64:$ASCENT_ENV/lib/python3.9/site-packages/torch/lib:${LD_LIBRARY_PATH:-}"
+export PYTHONPATH="$SOURCE_ROOT"
+export XDG_CACHE_HOME=$RUN_ROOT/xdg_cache
+export MPLCONFIGDIR=$RUN_ROOT/mpl_config
+export TORCH_HOME=$ARTIFACT_ROOT/model_cache/torch
+export HF_HOME=$ARTIFACT_ROOT/model_cache/huggingface
+export HUGGINGFACE_HUB_CACHE=$HF_HOME/hub
+export TRANSFORMERS_OFFLINE=1 HF_HUB_OFFLINE=1
+
+"$ASCENT_PYTHON" - "$CAPTURE_SUMMARY" "$SOURCE_COMMIT" "$ROLE" \
+  "$RETRIEVER" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["schema"] == "ascent_v1_4_vpr_shadow_capture_gate_v1"
+assert value["technical_status"] == "PASS"
+assert value["strict_error_count"] == 0
+assert value["provenance"]["source_commit"] == sys.argv[2]
+expected = {
+    "hm3d_cal50": "threshold_calibration_only",
+    "hm3d_test100": "locked_in_distribution_test",
+    "mp3d_test150": "locked_cross_dataset_transfer_test",
+}[sys.argv[3]]
+assert value["role"] == expected
+assert value["association_scores_emitted"] is False
+PY
+
+{
+  echo schema=ascent_v1_4_vpr_shadow_offline_pbs_v1
+  echo scientific_role=offline_same_place_association_diagnostic
+  echo pbs_jobid=${PBS_JOBID:-manual}
+  echo host=$(hostname)
+  echo role=$ROLE
+  echo retriever=$RETRIEVER
+  echo source_commit=$SOURCE_COMMIT
+  echo capture_summary=$CAPTURE_SUMMARY
+  echo capture_summary_sha256=$CAPTURE_SUMMARY_SHA256
+  echo capture_episodes_sha256=$CAPTURE_EPISODES_SHA256
+  echo split_manifest_sha256=$SPLIT_MANIFEST_SHA256
+  echo model_registry_sha256=$MODEL_REGISTRY_SHA256
+  echo calibration_file_sha256=$CALIBRATION_FILE_SHA256
+  echo runtime_policy_access_to_gt=0
+  echo planner_action_change=0
+  echo gpu_justification=global_descriptor_and_ALIKED_LightGlue_RGBD_inference
+  qstat -f "${PBS_JOBID:-}" 2>/dev/null || true
+  nvidia-smi || true
+} > "$RUN_ROOT/preflight.txt"
+
+BATCH_ARGS=(
+  --project-root "$PROJECT"
+  --model-registry "$MODEL_REGISTRY"
+  --capture-summary "$CAPTURE_SUMMARY"
+  --capture-episodes "$CAPTURE_EPISODES"
+  --split-manifest "$SPLIT_MANIFEST"
+  --retriever "$RETRIEVER"
+  --output-dir "$RUN_ROOT/batch/result"
+  --device cuda
+  --batch-size 16
+)
+if [ -n "$CALIBRATION_FILE" ]; then
+  BATCH_ARGS+=(--calibration-file "$CALIBRATION_FILE")
+fi
+"$ASCENT_PYTHON" "$BATCH_RUNNER" "${BATCH_ARGS[@]}" \
+  > "$RUN_ROOT/batch.log" 2>&1
+
+if [ "$ROLE" = hm3d_cal50 ]; then
+  "$ASCENT_PYTHON" "$CALIBRATOR" \
+    --labeled-candidates "$RUN_ROOT/batch/result/merged/labeled_candidates.jsonl" \
+    --split-manifest "$SPLIT_MANIFEST" \
+    --output "$RUN_ROOT/decision/calibration.json" \
+    > "$RUN_ROOT/decision.log" 2>&1
+  VERDICT=$(
+    "$ASCENT_PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["calibration_gate"])' \
+      "$RUN_ROOT/decision/calibration.json"
+  )
+else
+  "$ASCENT_PYTHON" "$EVALUATOR" \
+    --threshold-file "$CALIBRATION_FILE" \
+    --labeled-candidates "$RUN_ROOT/batch/result/merged/labeled_candidates.jsonl" \
+    --events "$RUN_ROOT/batch/result/merged/events.jsonl" \
+    --split-manifest "$SPLIT_MANIFEST" \
+    --output "$RUN_ROOT/decision/evaluation.json" \
+    > "$RUN_ROOT/decision.log" 2>&1
+  VERDICT=$(
+    "$ASCENT_PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["association_gate"])' \
+      "$RUN_ROOT/decision/evaluation.json"
+  )
+fi
+
+[ -z "$(git -C "$SOURCE_ROOT" status --porcelain --untracked-files=all)" ] || {
+  echo source_changed_during_run; exit 47;
+}
+printf 'controller_exit_status=0 stage=complete role=%s retriever=%s technical_status=PASS scientific_verdict=%s time=%s\n' \
+  "$ROLE" "$RETRIEVER" "$VERDICT" "$(date -Is)" > "$RUN_ROOT/terminal_status.txt"
+exit 0

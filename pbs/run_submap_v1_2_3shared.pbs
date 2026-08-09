@@ -9,7 +9,7 @@
 set -euo pipefail
 
 PROJECT=/scratch/e1538633/liuyi/drift-aware-submap-exploration
-SOURCE_ROOT=$PROJECT/external/ascent_vo_submap_v1_2
+SOURCE_ROOT=${ASCENT_SUBMAP_V12_SOURCE_ROOT:-$PROJECT/external/ascent_vo_submap_v1_2}
 RESOURCE_ROOT=$PROJECT/external/ascent
 POINTNAV_VO_ROOT=$PROJECT/external/PointNav-VO
 ARTIFACT_ROOT=${ASCENT_SUBMAP_V12_ARTIFACT_ROOT:-$PROJECT/artifacts/objectnav/submap_v1_2}
@@ -19,6 +19,8 @@ LOADING_CHECK=$SOURCE_ROOT/scripts/check_submap_habitat_loading.py
 TASK_RESET_CHECK=$SOURCE_ROOT/scripts/check_submap_task_reset.py
 SUMMARIZER=$SOURCE_ROOT/scripts/summarize_submap_v1_2_screen.py
 PORT_SELECTOR=$SOURCE_ROOT/scripts/select_submap_port_block.py
+VPR_CAPTURE_VALIDATOR=$SOURCE_ROOT/scripts/validate_vpr_shadow_capture.py
+VPR_CONTROL_VALIDATOR=$SOURCE_ROOT/scripts/validate_vpr_shadow_control.py
 
 DATASET=${ASCENT_SUBMAP_V12_DATASET:?required}
 MODE=${ASCENT_SUBMAP_V12_MODE:?required}
@@ -35,6 +37,11 @@ CONTROLLER_SHA256=${ASCENT_SUBMAP_V12_CONTROLLER_SHA256:?required}
 WORKER_SHA256=${ASCENT_SUBMAP_V12_WORKER_SHA256:?required}
 STAMP=${ASCENT_SUBMAP_V12_STAMP:?required}
 BASELINE_CSVS=${ASCENT_SUBMAP_V12_BASELINE_CSVS:-}
+VPR_SHADOW_ROLE=${ASCENT_VPR_SHADOW_ROLE:-}
+VPR_SHADOW_SPLIT_MANIFEST=${ASCENT_VPR_SHADOW_SPLIT_MANIFEST:-}
+VPR_SHADOW_SPLIT_MANIFEST_SHA256=${ASCENT_VPR_SHADOW_SPLIT_MANIFEST_SHA256:-}
+VPR_SHADOW_ACTION_REFERENCE=${ASCENT_VPR_SHADOW_ACTION_REFERENCE:-}
+VPR_SHADOW_ACTION_REFERENCE_SHA256=${ASCENT_VPR_SHADOW_ACTION_REFERENCE_SHA256:-}
 
 case "$DATASET" in
   hm3d)
@@ -63,6 +70,47 @@ case "$MODE" in
     DEADLINE_OFFSET=$((90 * 3600))
     TASK_RESET_TIMEOUT_SECONDS=3600
     ;;
+  shadow)
+    case "$VPR_SHADOW_ROLE" in
+      hm3d_sentinel5)
+        [ "$DATASET" = hm3d ] && [ "$EXPECTED_CHUNKS" = 1 ] && \
+          [ "$EXPECTED_EPISODES" = 5 ] || { echo shadow_sentinel_contract; exit 20; }
+        [ -n "$VPR_SHADOW_ACTION_REFERENCE" ] || { echo missing_action_reference; exit 20; }
+        LANE_COUNT=1
+        DEADLINE_OFFSET=$((22 * 3600))
+        TASK_RESET_TIMEOUT_SECONDS=1800
+        ;;
+      hm3d_cal50)
+        [ "$DATASET" = hm3d ] && [ "$EXPECTED_CHUNKS" = 5 ] && \
+          [ "$EXPECTED_EPISODES" = 50 ] || { echo shadow_cal50_contract; exit 20; }
+        [ -z "$VPR_SHADOW_ACTION_REFERENCE" ] || { echo unexpected_action_reference; exit 20; }
+        LANE_COUNT=3
+        DEADLINE_OFFSET=$((66 * 3600))
+        TASK_RESET_TIMEOUT_SECONDS=3600
+        ;;
+      hm3d_test100)
+        [ "$DATASET" = hm3d ] && [ "$EXPECTED_CHUNKS" = 5 ] && \
+          [ "$EXPECTED_EPISODES" = 100 ] || { echo shadow_test100_contract; exit 20; }
+        [ -z "$VPR_SHADOW_ACTION_REFERENCE" ] || { echo unexpected_action_reference; exit 20; }
+        LANE_COUNT=3
+        DEADLINE_OFFSET=$((90 * 3600))
+        TASK_RESET_TIMEOUT_SECONDS=3600
+        ;;
+      mp3d_test150)
+        [ "$DATASET" = mp3d ] && [ "$EXPECTED_CHUNKS" = 5 ] && \
+          [ "$EXPECTED_EPISODES" = 150 ] || { echo shadow_mp3d150_contract; exit 20; }
+        [ -z "$VPR_SHADOW_ACTION_REFERENCE" ] || { echo unexpected_action_reference; exit 20; }
+        LANE_COUNT=3
+        DEADLINE_OFFSET=$((90 * 3600))
+        TASK_RESET_TIMEOUT_SECONDS=3600
+        ;;
+      *) echo invalid_vpr_shadow_role; exit 20 ;;
+    esac
+    [ -n "$VPR_SHADOW_SPLIT_MANIFEST" ] && \
+      [ -n "$VPR_SHADOW_SPLIT_MANIFEST_SHA256" ] || {
+        echo missing_vpr_shadow_split_manifest; exit 20;
+      }
+    ;;
   *) echo "invalid_mode=$MODE"; exit 20 ;;
 esac
 
@@ -73,12 +121,29 @@ ASCENT_ENV=$SCRATCH_ROOT/micromamba/envs/ascent_nav
 ASCENT_PYTHON=$ASCENT_ENV/bin/python
 JOB_START_EPOCH=$(date +%s)
 DEADLINE_EPOCH=$((JOB_START_EPOCH + DEADLINE_OFFSET))
-RUN_ROOT=$ARTIFACT_ROOT/runs/submap_v1_2_${DATASET}_${MODE}_${PBS_JOBID:-manual}_${STAMP}
+if [ "$MODE" = shadow ]; then
+  RUN_ROOT=$ARTIFACT_ROOT/runs/vpr_shadow_${VPR_SHADOW_ROLE}_${PBS_JOBID:-manual}_${STAMP}
+else
+  RUN_ROOT=$ARTIFACT_ROOT/runs/submap_v1_2_${DATASET}_${MODE}_${PBS_JOBID:-manual}_${STAMP}
+fi
 
 for path in "$MANIFEST" "$GATE_MANIFEST" "$WORKER" "$PREFLIGHT" \
   "$LOADING_CHECK" "$TASK_RESET_CHECK" "$SUMMARIZER" "$PORT_SELECTOR"; do
   [ -f "$path" ] || { echo "missing_file=$path"; exit 21; }
 done
+if [ "$MODE" = shadow ]; then
+  for path in "$VPR_CAPTURE_VALIDATOR" "$VPR_CONTROL_VALIDATOR" \
+    "$VPR_SHADOW_SPLIT_MANIFEST"; do
+    [ -f "$path" ] || { echo "missing_file=$path"; exit 21; }
+  done
+  [ "$(sha256sum "$VPR_SHADOW_SPLIT_MANIFEST" | awk '{print $1}')" = \
+    "$VPR_SHADOW_SPLIT_MANIFEST_SHA256" ] || { echo split_manifest_hash_mismatch; exit 22; }
+  if [ -n "$VPR_SHADOW_ACTION_REFERENCE" ]; then
+    [ -f "$VPR_SHADOW_ACTION_REFERENCE" ] || { echo missing_action_reference; exit 21; }
+    [ "$(sha256sum "$VPR_SHADOW_ACTION_REFERENCE" | awk '{print $1}')" = \
+      "$VPR_SHADOW_ACTION_REFERENCE_SHA256" ] || { echo action_reference_hash_mismatch; exit 22; }
+  fi
+fi
 [ "$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')" = "$CONTROLLER_SHA256" ] || {
   echo controller_hash_mismatch; exit 22;
 }
@@ -150,8 +215,13 @@ BASE_PORT_ROOT=$(
     --seed "${PBS_JOBID:-manual}:$STAMP" --lanes 3
 )
 {
-  echo schema=ascent_vo_submap_v1_2_three_shared_controller_v1
-  echo scientific_role=b2_only_method_screen
+  if [ "$MODE" = shadow ]; then
+    echo schema=ascent_v1_4_vpr_shadow_capture_controller_v1
+    echo scientific_role=vpr_shadow_passive_capture
+  else
+    echo schema=ascent_vo_submap_v1_2_three_shared_controller_v1
+    echo scientific_role=b2_only_method_screen
+  fi
   echo pbs_jobid=${PBS_JOBID:-manual}
   echo host=$(hostname)
   echo start_time=$(date -Is)
@@ -179,6 +249,13 @@ BASE_PORT_ROOT=$(
   echo method_version=submap_v1.2
   echo handoff_enabled=1
   echo exhaustion_recovery_enabled=1
+  echo vpr_shadow_role=$VPR_SHADOW_ROLE
+  echo vpr_shadow_split_manifest=$VPR_SHADOW_SPLIT_MANIFEST
+  echo vpr_shadow_split_manifest_sha256=$VPR_SHADOW_SPLIT_MANIFEST_SHA256
+  echo vpr_shadow_action_reference=$VPR_SHADOW_ACTION_REFERENCE
+  echo vpr_shadow_action_reference_sha256=$VPR_SHADOW_ACTION_REFERENCE_SHA256
+  echo vpr_shadow_capture_enabled=$([ "$MODE" = shadow ] && echo 1 || echo 0)
+  echo vpr_shadow_association_runtime_enabled=0
   echo baseline_csvs=$BASELINE_CSVS
   echo base_port_root=$BASE_PORT_ROOT
   echo deadline_epoch=$DEADLINE_EPOCH
@@ -189,6 +266,7 @@ BASE_PORT_ROOT=$(
 run_lane() {
   local run_mode=$1 manifest=$2 manifest_sha=$3 lane_id=$4 lanes=$5
   local expected_chunks=$6 expected_episodes=$7 stage_root=$8 base_port=$9
+  local capture_enabled=${10}
   (
     export ASCENT_SUBMAP_V12_DATASET=$DATASET
     export ASCENT_SUBMAP_V12_MODE=$run_mode
@@ -205,6 +283,7 @@ run_lane() {
     export ASCENT_SUBMAP_V12_STAGE_ROOT=$stage_root
     export ASCENT_SUBMAP_V12_BASE_PORT=$base_port
     export ASCENT_SUBMAP_V12_DEADLINE_EPOCH=$DEADLINE_EPOCH
+    export ASCENT_VPR_SHADOW_CAPTURE_ENABLED=$capture_enabled
     bash "$WORKER"
   )
 }
@@ -212,7 +291,7 @@ run_lane() {
 if [ "$MODE" = full ]; then
   mkdir -p "$RUN_ROOT/placement_gate"
   run_lane smoke "$GATE_MANIFEST" "$GATE_MANIFEST_SHA256" \
-    0 1 1 5 "$RUN_ROOT/placement_gate" "$BASE_PORT_ROOT" \
+    0 1 1 5 "$RUN_ROOT/placement_gate" "$BASE_PORT_ROOT" 0 \
     > "$RUN_ROOT/placement_gate/lane_0.log" 2>&1
   printf 'lane_id,inventory\n0,%s\n' \
     "$RUN_ROOT/placement_gate/lane_0/inventory.csv" \
@@ -231,6 +310,36 @@ if [ "$MODE" = full ]; then
   [ "$("$ASCENT_PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["technical_status"])' "$RUN_ROOT/placement_gate/final_gate/summary.json")" = PASS ] || {
     echo placement_gate_failed; exit 46;
   }
+fi
+
+WORKER_MODE=$MODE
+if [ "$MODE" = shadow ]; then WORKER_MODE=full; fi
+DYNAMIC_ACTION_REFERENCE=$VPR_SHADOW_ACTION_REFERENCE
+CONTROL_SUMMARY=
+
+if [ "$MODE" = shadow ] && [ "$VPR_SHADOW_ROLE" = hm3d_sentinel5 ]; then
+  mkdir -p "$RUN_ROOT/passive_control"
+  run_lane full "$MANIFEST" "$MANIFEST_SHA256" \
+    0 1 1 5 "$RUN_ROOT/passive_control" "$BASE_PORT_ROOT" 0 \
+    > "$RUN_ROOT/passive_control/lane_0.log" 2>&1
+  printf 'lane_id,inventory\n0,%s\n' \
+    "$RUN_ROOT/passive_control/lane_0/inventory.csv" \
+    > "$RUN_ROOT/passive_control/registry.csv"
+  "$ASCENT_PYTHON" "$VPR_CONTROL_VALIDATOR" \
+    --manifest "$MANIFEST" \
+    --split-manifest "$VPR_SHADOW_SPLIT_MANIFEST" \
+    --registry "$RUN_ROOT/passive_control/registry.csv" \
+    --expected-dataset "$DATASET" \
+    --expected-episodes 5 \
+    --source-commit "$SOURCE_COMMIT" \
+    --historical-action-reference "$VPR_SHADOW_ACTION_REFERENCE" \
+    --output-dir "$RUN_ROOT/passive_control/final_gate" \
+    > "$RUN_ROOT/passive_control/final_gate.log" 2>&1
+  CONTROL_SUMMARY=$RUN_ROOT/passive_control/final_gate/summary.json
+  [ "$("$ASCENT_PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["technical_status"])' "$CONTROL_SUMMARY")" = PASS ] || {
+    echo passive_control_gate_failed; exit 46;
+  }
+  DYNAMIC_ACTION_REFERENCE=$RUN_ROOT/passive_control/final_gate/action_reference.json
 fi
 
 mapfile -t LANE_ROWS < <(
@@ -254,9 +363,10 @@ LANE_LOGS=()
 for lane_row in "${LANE_ROWS[@]}"; do
   IFS=$'\t' read -r lane_id lane_chunks lane_episodes <<< "$lane_row"
   lane_log=$RUN_ROOT/lanes/lane_${lane_id}.log
-  run_lane "$MODE" "$MANIFEST" "$MANIFEST_SHA256" \
+  run_lane "$WORKER_MODE" "$MANIFEST" "$MANIFEST_SHA256" \
     "$lane_id" "$LANE_COUNT" "$lane_chunks" "$lane_episodes" \
     "$RUN_ROOT/lanes" "$((BASE_PORT_ROOT + lane_id * 20))" \
+    "$([ "$MODE" = shadow ] && echo 1 || echo 0)" \
     > "$lane_log" 2>&1 &
   PIDS+=("$!")
   LANE_IDS+=("$lane_id")
@@ -285,39 +395,66 @@ for lane_id in "${LANE_IDS[@]}"; do
     "$RUN_ROOT/lanes/lane_${lane_id}/inventory.csv" >> "$REGISTRY"
 done
 
-SUMMARY_ARGS=()
-if [ "$MODE" = full ]; then
-  IFS=: read -r -a BASELINE_PATHS <<< "$BASELINE_CSVS"
-  for baseline_path in "${BASELINE_PATHS[@]}"; do
-    [ -f "$baseline_path" ] || { echo "missing_baseline=$baseline_path"; exit 21; }
-    SUMMARY_ARGS+=(--baseline-episodes-csv "$baseline_path")
-  done
-fi
 SUMMARY_DIR=$RUN_ROOT/final_gate
-set +e
-"$ASCENT_PYTHON" "$SUMMARIZER" \
-  --manifest "$MANIFEST" \
-  --registry "$REGISTRY" \
-  --mode "$MODE" \
-  --expected-dataset "$DATASET" \
-  --expected-episodes "$EXPECTED_EPISODES" \
-  --source-commit "$SOURCE_COMMIT" \
-  --forward-checkpoint-sha256 "$FORWARD_SHA256" \
-  --turn-checkpoint-sha256 "$TURN_SHA256" \
-  "${SUMMARY_ARGS[@]}" \
-  --output-dir "$SUMMARY_DIR" \
-  > "$RUN_ROOT/final_gate.log" 2>&1
-SUMMARY_STATUS=$?
-set -e
+if [ "$MODE" = shadow ]; then
+  SHADOW_ARGS=()
+  if [ -n "$DYNAMIC_ACTION_REFERENCE" ]; then
+    SHADOW_ARGS+=(--action-reference "$DYNAMIC_ACTION_REFERENCE")
+  fi
+  if [ -n "$CONTROL_SUMMARY" ]; then
+    SHADOW_ARGS+=(--control-summary "$CONTROL_SUMMARY")
+  fi
+  set +e
+  "$ASCENT_PYTHON" "$VPR_CAPTURE_VALIDATOR" \
+    --manifest "$MANIFEST" \
+    --split-manifest "$VPR_SHADOW_SPLIT_MANIFEST" \
+    --registry "$REGISTRY" \
+    --expected-dataset "$DATASET" \
+    --expected-episodes "$EXPECTED_EPISODES" \
+    --source-commit "$SOURCE_COMMIT" \
+    "${SHADOW_ARGS[@]}" \
+    --output-dir "$SUMMARY_DIR" \
+    > "$RUN_ROOT/final_gate.log" 2>&1
+  SUMMARY_STATUS=$?
+  set -e
+else
+  SUMMARY_ARGS=()
+  if [ "$MODE" = full ]; then
+    IFS=: read -r -a BASELINE_PATHS <<< "$BASELINE_CSVS"
+    for baseline_path in "${BASELINE_PATHS[@]}"; do
+      [ -f "$baseline_path" ] || { echo "missing_baseline=$baseline_path"; exit 21; }
+      SUMMARY_ARGS+=(--baseline-episodes-csv "$baseline_path")
+    done
+  fi
+  set +e
+  "$ASCENT_PYTHON" "$SUMMARIZER" \
+    --manifest "$MANIFEST" \
+    --registry "$REGISTRY" \
+    --mode "$MODE" \
+    --expected-dataset "$DATASET" \
+    --expected-episodes "$EXPECTED_EPISODES" \
+    --source-commit "$SOURCE_COMMIT" \
+    --forward-checkpoint-sha256 "$FORWARD_SHA256" \
+    --turn-checkpoint-sha256 "$TURN_SHA256" \
+    "${SUMMARY_ARGS[@]}" \
+    --output-dir "$SUMMARY_DIR" \
+    > "$RUN_ROOT/final_gate.log" 2>&1
+  SUMMARY_STATUS=$?
+  set -e
+fi
 
 if [ "$WORKER_STATUS" -ne 0 ]; then echo "worker_failure=$WORKER_STATUS"; exit "$WORKER_STATUS"; fi
 if [ "$SUMMARY_STATUS" -ne 0 ]; then echo "summary_gate_failure=$SUMMARY_STATUS"; exit 46; fi
 read -r TECHNICAL_STATUS VALID MECHANISM PERFORMANCE < <(
-  "$ASCENT_PYTHON" - "$SUMMARY_DIR/summary.json" <<'PY'
+  "$ASCENT_PYTHON" - "$SUMMARY_DIR/summary.json" "$MODE" <<'PY'
 import json, sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))
-print(value["technical_status"], value["b2_valid_episodes"],
-      value["mechanism_exposure"], value["performance_verdict"])
+if sys.argv[2] == "shadow":
+    print(value["technical_status"], value["valid_episodes"],
+          "PASSIVE_CAPTURE", "NOT_EVALUATED")
+else:
+    print(value["technical_status"], value["b2_valid_episodes"],
+          value["mechanism_exposure"], value["performance_verdict"])
 PY
 )
 [ "$TECHNICAL_STATUS" = PASS ] || exit 46
@@ -325,7 +462,7 @@ PY
 [ -z "$(git -C "$SOURCE_ROOT" status --porcelain --untracked-files=all)" ] || {
   echo source_changed_during_run; exit 47;
 }
-printf 'controller_exit_status=0 stage=complete dataset=%s mode=%s b2_valid=%s technical_status=%s mechanism_exposure=%s performance_verdict=%s time=%s\n' \
+printf 'controller_exit_status=0 stage=complete dataset=%s mode=%s valid=%s technical_status=%s mechanism=%s performance_verdict=%s time=%s\n' \
   "$DATASET" "$MODE" "$VALID" "$TECHNICAL_STATUS" "$MECHANISM" \
   "$PERFORMANCE" "$(date -Is)" > "$RUN_ROOT/terminal_status.txt"
 exit 0

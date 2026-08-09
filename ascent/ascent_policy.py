@@ -43,6 +43,8 @@ from ascent.submaps import (
     SubmapLifecycleConfig,
     SubmapManager,
     RemoteRoute,
+    VPRShadowKeyframeConfig,
+    VPRShadowKeyframeWriter,
     ViewOverlapConfig,
     estimate_view_overlap,
     replay_depth_geometry,
@@ -282,13 +284,26 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             ),
             "exhaustion_recovery_enabled",
         )
+        self._vpr_shadow_enabled = _as_config_bool(
+            _submap_config_value(config, "vpr_shadow_enabled", False),
+            "vpr_shadow_enabled",
+        )
         if (
             self._submap_handoff_enabled
             or self._submap_exhaustion_recovery_enabled
+            or self._vpr_shadow_enabled
         ) and not self._submap_enabled:
             raise RuntimeError(
                 "ASCENT submap continuity features require "
                 "ascent_submaps.enabled=true"
+            )
+        if self._vpr_shadow_enabled and not (
+            self._submap_handoff_enabled
+            and self._submap_exhaustion_recovery_enabled
+        ):
+            raise RuntimeError(
+                "v1.4 VPR shadow capture requires the frozen v1.2 "
+                "Handoff + Exhaustion Recovery behavior"
             )
         allow_provisional = _as_config_bool(
             _submap_config_value(
@@ -358,6 +373,9 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         self._submap_diagnostics: Optional[
             SubmapDiagnosticsWriter
         ] = None
+        self._vpr_shadow_writer: Optional[
+            VPRShadowKeyframeWriter
+        ] = None
         if self._submap_enabled:
             diagnostics_path = Path(
                 str(
@@ -404,6 +422,35 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                         key: getattr(self._submap_overlap_config, key)
                         for key in self._submap_overlap_config.__dataclass_fields__
                     },
+                },
+            )
+        if self._vpr_shadow_enabled:
+            shadow_output_dir = Path(
+                str(
+                    _submap_config_value(
+                        config,
+                        "vpr_shadow_output_dir",
+                        "debug/ascent_vpr_shadow",
+                    )
+                )
+            )
+            self._vpr_shadow_writer = VPRShadowKeyframeWriter(
+                shadow_output_dir,
+                config=VPRShadowKeyframeConfig(),
+                metadata={
+                    "run_id": os.environ.get(
+                        "ASCENT_VPR_SHADOW_RUN_ID", "unrecorded"
+                    ),
+                    "ascent_source_commit": os.environ.get(
+                        "ASCENT_VPR_SHADOW_SOURCE_COMMIT",
+                        os.environ.get(
+                            "ASCENT_SUBMAP_SOURCE_COMMIT", "unrecorded"
+                        ),
+                    ),
+                    "dataset": self._dataset_type,
+                    "pose_source": "zhao_rgbd_2021",
+                    "navigation_behavior": "frozen_submap_v1.2",
+                    "capture_point": "pre_planner_policy_visible_observation",
                 },
             )
         
@@ -455,6 +502,11 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             self.llm_planner.reset_submap_local_state(env)
             if self._submap_diagnostics is not None:
                 self._submap_diagnostics.record_episode_reset(
+                    env=env,
+                    episode_sequence=self._submap_episode_sequence[env],
+                )
+            if self._vpr_shadow_writer is not None:
+                self._vpr_shadow_writer.reset_env(
                     env=env,
                     episode_sequence=self._submap_episode_sequence[env],
                 )
@@ -742,6 +794,27 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             self._submap_boundary_frames[env] = (
                 self._submap_boundary_frames[env][-4:]
             )
+            if self._vpr_shadow_writer is not None:
+                self._vpr_shadow_writer.observe(
+                    env=env,
+                    episode_sequence=self._submap_episode_sequence[env],
+                    action_step=int(self._num_steps[env]),
+                    submap_id=bundle.submap_id,
+                    floor_id=bundle.floor_id,
+                    world_pose_vo=cache["world_pose_vo"],
+                    local_pose=[
+                        cache["robot_xy"][0],
+                        cache["robot_xy"][1],
+                        cache["robot_heading"],
+                    ],
+                    tf_camera_to_submap=cache["tf_camera_to_episodic"],
+                    rgb=rgb,
+                    normalized_depth=depth,
+                    min_depth=float(cache["min_depth"]),
+                    max_depth=float(cache["max_depth"]),
+                    fx=float(cache["fx"]),
+                    fy=float(cache["fy"]),
+                )
             if (
                 self._submap_handoff_enabled
                 or self._submap_exhaustion_recovery_enabled

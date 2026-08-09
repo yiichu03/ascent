@@ -1,0 +1,44 @@
+{
+  "action_hash_contract": "sha256(json_compact_integer_action_list_plus_lf)",
+  "baseline_episodes_sha256": "38ddf6efa753fd643b4a06d7a0fef9e16e55a7cde446569c10f0f4fc534215f6",
+  "baseline_summary_sha256": "aa29a5227930f01dd71d39655ada407e96a245fc25ede5f6aca6255477175dfa",
+  "behavior_reference": "frozen_submap_v1.2",
+  "episode_count": 5,
+  "episodes": [
+    {
+      "action_count": 146,
+      "action_hash": "c87e1de2f6e5757378deed59c14064d89c2bec9dbd23ab40cd4ff97a943bf3be",
+      "chunk_id": "hm3d_screen150_c000",
+      "logical_case_id": "hm3d_train_0010"
+    },
+    {
+      "action_count": 211,
+      "action_hash": "f524aded412e65ea2d341f910075d2bd22418b3b01fc6edf705e83000f51e195",
+      "chunk_id": "hm3d_screen150_c001",
+      "logical_case_id": "hm3d_train_0050"
+    },
+    {
+      "action_count": 150,
+      "action_hash": "1e2289207efd588306d6c4e01d335b0f26686693a47701d771882ee1e7af2d59",
+      "chunk_id": "hm3d_screen150_c002",
+      "logical_case_id": "hm3d_train_0066"
+    },
+    {
+      "action_count": 174,
+      "action_hash": "e84cffd6945743ae08b1279a90a1f34a7e527bc305ba7d0884b8470a7ff4d94d",
+      "chunk_id": "hm3d_screen150_c002",
+      "logical_case_id": "hm3d_train_0078"
+    },
+    {
+      "action_count": 500,
+      "action_hash": "81f2d7a4ca1b11dfe25173ab6cb67e3ad1f830a3d0e601d2069153b12c53ed60",
+      "chunk_id": "hm3d_screen150_c003",
+      "logical_case_id": "hm3d_train_0118"
+    }
+  ],
+  "role": "engineering_sentinel",
+  "schema": "ascent_v1_4_vpr_shadow_action_reference_v1",
+  "source_commit": "e427878a3a199775581a43b77d9d2e6288ec904c",
+  "source_manifest_sha256": "23297001bb08e22c48e073d4438918b74973712e5cbe99b06a9e62b4cd3ccc02",
+  "split_manifest_sha256": "b65a59fdbbb1d5ba343b90f227337380d39d7527c4d23413e9617ee8e807ebe4"
+}

@@ -1,0 +1,10 @@
+{
+  "files": {
+    "hm3d_cal50.json": "fd2e7fb539aaa42b1cbfe49bf2ec5e53bb6a20c2338819a7f7d73e182736728e",
+    "hm3d_sentinel5.json": "b65a59fdbbb1d5ba343b90f227337380d39d7527c4d23413e9617ee8e807ebe4",
+    "hm3d_test100.json": "bad23aae597b2436da0691da9b870d22c0bbdbf892232b241953f78e4acb8e8b",
+    "mp3d_test150.json": "4ceb799a2aa2b4935b6780cb2cab642fa1a915b22af8717203917903373ba154"
+  },
+  "schema": "ascent_v1_4_vpr_shadow_split_registry_v1",
+  "split_salt": "ascent_v1.4_vpr_shadow_scene_split_20260809_v1"
+}

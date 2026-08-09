@@ -27,6 +27,10 @@ from ascent.submaps.continuity import (
 )
 from ascent.submaps.query_view import SubmapQueryView
 from ascent.submaps.routes import RemoteRoute, RouteWaypoint
+from ascent.submaps.vpr_shadow import (
+    VPRShadowKeyframeConfig,
+    VPRShadowKeyframeWriter,
+)
 from ascent.submaps.types import (
     FrontierRecord,
     FrontierStatus,
@@ -57,6 +61,8 @@ __all__ = [
     "SubmapQueryView",
     "SubmapState",
     "ViewOverlapConfig",
+    "VPRShadowKeyframeConfig",
+    "VPRShadowKeyframeWriter",
     "estimate_view_overlap",
     "matrix_to_pose",
     "pose_to_matrix",
