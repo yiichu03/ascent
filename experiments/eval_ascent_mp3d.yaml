@@ -42,6 +42,22 @@ ascent_submaps:
   allow_provisional_thresholds: ${oc.env:ASCENT_SUBMAP_ALLOW_PROVISIONAL,false}
   diagnostics_path: ${oc.env:ASCENT_SUBMAP_DIAGNOSTICS_PATH,debug/ascent_submap_mp3d_diagnostics.jsonl}
 
+ascent_place_memory:
+  enabled: ${oc.env:ASCENT_PLACE_MEMORY_ENABLED,false}
+  oracle_enabled: ${oc.env:ASCENT_PLACE_ORACLE_ENABLED,false}
+  low_gain_area_m2: 0.5
+  shadow_low_gain_area_m2: 1.0
+  branch_association_radius_m: 0.5
+  branch_match_radius_m: 1.0
+  branch_match_margin_m: 0.25
+  persistent_frontier_observations: 2
+  oracle_physical_planar_radius_m: 0.75
+  oracle_physical_height_radius_m: 0.75
+  oracle_min_step_separation: 30
+  oracle_min_excursion_m: 2.0
+  oracle_vo_consistent_radius_m: 1.5
+  oracle_diagnostics_path: ${oc.env:ASCENT_PLACE_ORACLE_DIAGNOSTICS_PATH,debug/ascent_oracle_place_mp3d.jsonl}
+
 habitat:
   environment:
     iterator_options:

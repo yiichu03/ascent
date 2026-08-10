@@ -189,7 +189,11 @@ def validate_submap_metadata(
         errors.append("submap_metadata:enabled")
         return errors
     method_version = metadata.get("method_version")
-    if method_version in {"submap_v1.1", "submap_v1.2"}:
+    if method_version in {
+        "submap_v1.1",
+        "submap_v1.2",
+        "submap_v1.4_oracle_task_memory",
+    }:
         v1_1_expected = {
             "split_contract": "vo_anchor_and_rgbd_overlap_joint",
             "fallback_contract": "ascent_local_first_persistent_route",
@@ -217,7 +221,10 @@ def validate_submap_metadata(
                     f"submap_metadata:fixed_config:{key}:"
                     f"{config.get(key)!r}:{value!r}"
                 )
-        if method_version == "submap_v1.2":
+        if method_version in {
+            "submap_v1.2",
+            "submap_v1.4_oracle_task_memory",
+        }:
             v1_2_expected = {
                 "handoff_enabled": True,
                 "exhaustion_recovery_enabled": True,
@@ -231,6 +238,32 @@ def validate_submap_metadata(
                         f"submap_metadata:{key}:"
                         f"{metadata.get(key)!r}:{value!r}"
                     )
+        if method_version == "submap_v1.4_oracle_task_memory":
+            if metadata.get("place_memory_enabled") is not True:
+                errors.append("submap_metadata:place_memory_enabled")
+            if metadata.get("place_memory_contract") != (
+                "opaque_same_place_identity_then_vo_branch_query"
+            ):
+                errors.append("submap_metadata:place_memory_contract")
+            place_config = metadata.get("place_memory_config")
+            expected_place_config = {
+                "enabled": True,
+                "low_gain_area_m2": 0.5,
+                "shadow_low_gain_area_m2": 1.0,
+                "branch_association_radius_m": 0.5,
+                "branch_match_radius_m": 1.0,
+                "branch_match_margin_m": 0.25,
+                "persistent_frontier_observations": 2,
+            }
+            if not isinstance(place_config, Mapping):
+                errors.append("submap_metadata:place_memory_config")
+            else:
+                for key, value in expected_place_config.items():
+                    if place_config.get(key) != value:
+                        errors.append(
+                            f"submap_metadata:place_memory:{key}:"
+                            f"{place_config.get(key)!r}:{value!r}"
+                        )
         return errors
     if calibration is None and mode == "smoke":
         if config.get("provisional_thresholds") is not True:
@@ -445,6 +478,7 @@ def parse_attempt(
             if submap_method_version in {
                 "submap_v1.1",
                 "submap_v1.2",
+                "submap_v1.4_oracle_task_memory",
             }:
                 selected_candidates = Counter(
                     str(item.get("candidate_key"))
@@ -496,7 +530,10 @@ def parse_attempt(
                     ):
                         local_errors.append("joint_split_contract")
                         break
-            if submap_method_version == "submap_v1.2":
+            if submap_method_version in {
+                "submap_v1.2",
+                "submap_v1.4_oracle_task_memory",
+            }:
                 if events["submap_exhaustion_recovery"] > 1:
                     local_errors.append("recovery_repeated")
                 if events["exhaustion_recovery_started"] > 1:
@@ -544,6 +581,43 @@ def parse_attempt(
                 + "|".join(local_errors)
             )
             continue
+        association_events = [
+            item
+            for item in episode_submap_events
+            if item.get("event") == "place_association_accepted"
+        ]
+        finished_search_events = [
+            item
+            for item in episode_submap_events
+            if item.get("event") == "search_attempt_finished"
+        ]
+        association_to_productive_costs = []
+        first_association_by_place: Dict[str, int] = {}
+        for item in association_events:
+            place_id = str(item.get("place_id") or "")
+            step = int(item.get("step", -1))
+            if place_id and step >= 0:
+                first_association_by_place.setdefault(place_id, step)
+        for place_id, association_step in first_association_by_place.items():
+            productive_steps = [
+                int(item.get("step", -1))
+                for item in finished_search_events
+                if str(item.get("place_id") or "") == place_id
+                and item.get("status") == "productive"
+                and int(item.get("step", -1)) >= association_step
+            ]
+            if productive_steps:
+                association_to_productive_costs.append(
+                    min(productive_steps) - association_step
+                )
+        search_statuses = Counter(
+            str(item.get("status")) for item in finished_search_events
+        )
+        rerank_events = [
+            item
+            for item in episode_submap_events
+            if item.get("event") == "place_rerank_evaluated"
+        ]
         accepted[identity["logical_case_id"]] = {
             "logical_case_id": identity["logical_case_id"],
             "chunk_id": row["chunk_id"],
@@ -657,6 +731,60 @@ def parse_attempt(
                     if item.get("event")
                     == "exhaustion_recovery_skipped"
                 )
+            ),
+            "place_association_accepted_count": events[
+                "place_association_accepted"
+            ],
+            "place_association_rejected_count": events[
+                "place_association_rejected"
+            ],
+            "place_association_rejection_reasons": dict(
+                Counter(
+                    str(item.get("reason"))
+                    for item in episode_submap_events
+                    if item.get("event") == "place_association_rejected"
+                )
+            ),
+            "search_attempt_started_count": events[
+                "search_attempt_started"
+            ],
+            "search_attempt_finished_count": events[
+                "search_attempt_finished"
+            ],
+            "search_status_counts": dict(search_statuses),
+            "search_coverage_delta_m2": sum(
+                float(item.get("coverage_delta_m2", 0.0))
+                for item in finished_search_events
+            ),
+            "search_action_cost": sum(
+                int(item.get("action_cost", 0))
+                for item in finished_search_events
+            ),
+            "search_target_gain_count": sum(
+                item.get("target_gain") is True
+                for item in finished_search_events
+            ),
+            "search_exit_gain_count": sum(
+                item.get("exit_gain") is True
+                for item in finished_search_events
+            ),
+            "place_rerank_evaluated_count": len(rerank_events),
+            "place_rerank_changed_count": sum(
+                item.get("decision_changed") is True
+                for item in rerank_events
+            ),
+            "place_intervention_types": dict(
+                Counter(
+                    str(item.get("intervention"))
+                    for item in rerank_events
+                    if item.get("decision_changed") is True
+                )
+            ),
+            "association_to_productive_count": len(
+                association_to_productive_costs
+            ),
+            "association_to_productive_action_cost": sum(
+                association_to_productive_costs
             ),
             "evidence_vo_diagnostics": str(vo_path),
             "evidence_submap_diagnostics": submap_path_text,

@@ -1,0 +1,352 @@
+#!/bin/bash
+#PBS -N asv14
+#PBS -P CFP04-SF-109
+#PBS -q auto
+#PBS -l select=1:ncpus=24:ngpus=1:mem=384gb
+#PBS -l walltime=96:00:00
+#PBS -j oe
+
+set -euo pipefail
+
+PROJECT=/scratch/e1538633/liuyi/drift-aware-submap-exploration
+SOURCE_ROOT=$PROJECT/external/ascent_vo_submap_v1_4_oracle_task_memory
+RESOURCE_ROOT=$PROJECT/external/ascent
+POINTNAV_VO_ROOT=$PROJECT/external/PointNav-VO
+ARTIFACT_ROOT=${ASCENT_PLACE_MEMORY_V14_ARTIFACT_ROOT:-$PROJECT/artifacts/objectnav/submap_v1_4_oracle_task_memory}
+WORKER=$SOURCE_ROOT/pbs/run_place_memory_lane.sh
+PREFLIGHT=$SOURCE_ROOT/scripts/preflight_submap_screen.py
+LOADING_CHECK=$SOURCE_ROOT/scripts/check_submap_habitat_loading.py
+TASK_RESET_CHECK=$SOURCE_ROOT/scripts/check_submap_task_reset.py
+SUMMARIZER=$SOURCE_ROOT/scripts/summarize_place_memory_screen.py
+PORT_SELECTOR=$SOURCE_ROOT/scripts/select_submap_port_block.py
+
+DATASET=${ASCENT_PLACE_MEMORY_V14_DATASET:?required}
+MODE=${ASCENT_PLACE_MEMORY_V14_MODE:?required}
+EXPERIMENT=${ASCENT_PLACE_MEMORY_V14_EXPERIMENT:?required}
+MANIFEST=${ASCENT_PLACE_MEMORY_V14_MANIFEST:?required}
+MANIFEST_SHA256=${ASCENT_PLACE_MEMORY_V14_MANIFEST_SHA256:?required}
+EXPECTED_CHUNKS=${ASCENT_PLACE_MEMORY_V14_EXPECTED_CHUNKS:?required}
+EXPECTED_EPISODES=${ASCENT_PLACE_MEMORY_V14_EXPECTED_EPISODES:?required}
+GATE_MANIFEST=${ASCENT_PLACE_MEMORY_V14_GATE_MANIFEST:?required}
+GATE_MANIFEST_SHA256=${ASCENT_PLACE_MEMORY_V14_GATE_MANIFEST_SHA256:?required}
+SOURCE_COMMIT=${ASCENT_PLACE_MEMORY_V14_SOURCE_COMMIT:?required}
+RESOURCE_COMMIT=${ASCENT_PLACE_MEMORY_V14_RESOURCE_COMMIT:?required}
+POINTNAV_VO_COMMIT=${ASCENT_PLACE_MEMORY_V14_POINTNAV_VO_COMMIT:?required}
+CONTROLLER_SHA256=${ASCENT_PLACE_MEMORY_V14_CONTROLLER_SHA256:?required}
+WORKER_SHA256=${ASCENT_PLACE_MEMORY_V14_WORKER_SHA256:?required}
+STAMP=${ASCENT_PLACE_MEMORY_V14_STAMP:?required}
+BASELINE_CSVS=${ASCENT_PLACE_MEMORY_V14_BASELINE_CSVS:-}
+
+case "$DATASET" in
+  hm3d)
+    SCENES_ROOT=/scratch/Projects/CFP-04/CFP04-SF-109/shared/HM3D/versioned_data/hm3d-0.1
+    ;;
+  mp3d)
+    SCENES_ROOT=$RESOURCE_ROOT/data/scene_datasets
+    ;;
+  *) echo "invalid_dataset=$DATASET"; exit 20 ;;
+esac
+case "$EXPERIMENT" in
+  train150) ;;
+  mechanism_subset)
+    SCENES_ROOT=$RESOURCE_ROOT/data/scene_datasets
+    ;;
+  *) echo "invalid_experiment=$EXPERIMENT"; exit 20 ;;
+esac
+case "$MODE" in
+  smoke)
+    [ "$EXPECTED_CHUNKS" = 1 ] && [ "$EXPECTED_EPISODES" = 5 ] || {
+      echo smoke_contract; exit 20;
+    }
+    LANE_COUNT=1
+    DEADLINE_OFFSET=$((22 * 3600))
+    TASK_RESET_TIMEOUT_SECONDS=1800
+    ;;
+  full)
+    case "$EXPERIMENT" in
+      train150)
+        [ "$EXPECTED_CHUNKS" = 5 ] && [ "$EXPECTED_EPISODES" = 150 ] || {
+          echo train150_contract; exit 20;
+        }
+        ;;
+      mechanism_subset)
+        [ "$EXPECTED_CHUNKS" = 6 ] && [ "$EXPECTED_EPISODES" = 60 ] || {
+          echo mechanism_subset_contract; exit 20;
+        }
+        ;;
+    esac
+    [ -n "$BASELINE_CSVS" ] || { echo missing_baseline_csvs; exit 20; }
+    LANE_COUNT=3
+    DEADLINE_OFFSET=$((22 * 3600))
+    TASK_RESET_TIMEOUT_SECONDS=3600
+    ;;
+  *) echo "invalid_mode=$MODE"; exit 20 ;;
+esac
+
+FORWARD_SHA256=6b571bb717366f7d80f61e919b33a45ac2f45925201c4e3011b3239a2c42e586
+TURN_SHA256=c469643f9ab35c9e1058f31fbb672a5fa3adf582987a4388bdd020dd89faf1d9
+SCRATCH_ROOT=/scratch/e1538633/liuyi
+ASCENT_ENV=$SCRATCH_ROOT/micromamba/envs/ascent_nav
+ASCENT_PYTHON=$ASCENT_ENV/bin/python
+JOB_START_EPOCH=$(date +%s)
+DEADLINE_EPOCH=$((JOB_START_EPOCH + DEADLINE_OFFSET))
+RUN_ROOT=$ARTIFACT_ROOT/runs/${EXPERIMENT}_${PBS_JOBID:-manual}_${STAMP}
+
+for path in "$MANIFEST" "$GATE_MANIFEST" "$WORKER" "$PREFLIGHT" \
+  "$LOADING_CHECK" "$TASK_RESET_CHECK" "$SUMMARIZER" "$PORT_SELECTOR"; do
+  [ -f "$path" ] || { echo "missing_file=$path"; exit 21; }
+done
+[ "$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')" = "$CONTROLLER_SHA256" ] || {
+  echo controller_hash_mismatch; exit 22;
+}
+[ "$(sha256sum "$WORKER" | awk '{print $1}')" = "$WORKER_SHA256" ] || {
+  echo worker_hash_mismatch; exit 22;
+}
+[ "$(sha256sum "$MANIFEST" | awk '{print $1}')" = "$MANIFEST_SHA256" ] || {
+  echo manifest_hash_mismatch; exit 22;
+}
+[ "$(sha256sum "$GATE_MANIFEST" | awk '{print $1}')" = "$GATE_MANIFEST_SHA256" ] || {
+  echo gate_manifest_hash_mismatch; exit 22;
+}
+[ "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" = "$SOURCE_COMMIT" ] || {
+  echo source_commit_mismatch; exit 22;
+}
+[ -z "$(git -C "$SOURCE_ROOT" status --porcelain --untracked-files=all)" ] || {
+  echo source_worktree_not_clean
+  git -C "$SOURCE_ROOT" status --short
+  exit 23
+}
+[ "$(git -C "$RESOURCE_ROOT" rev-parse HEAD)" = "$RESOURCE_COMMIT" ] || {
+  echo resource_commit_mismatch; exit 22;
+}
+[ "$(git -C "$POINTNAV_VO_ROOT" rev-parse HEAD)" = "$POINTNAV_VO_COMMIT" ] || {
+  echo pointnav_vo_commit_mismatch; exit 22;
+}
+[ ! -e "$RUN_ROOT" ] || { echo "run_root_exists=$RUN_ROOT"; exit 24; }
+mkdir -p "$RUN_ROOT"/{checks,lanes,mpl_config,xdg_cache}
+
+export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1
+export LD_LIBRARY_PATH="$ASCENT_ENV/lib:$ASCENT_ENV/lib64:$ASCENT_ENV/lib/python3.9/site-packages/torch/lib:${LD_LIBRARY_PATH:-}"
+export PYTHONPATH="$SOURCE_ROOT:$SOURCE_ROOT/third_party/vlfm:$SOURCE_ROOT/third_party/habitat-lab/habitat-lab:$SOURCE_ROOT/third_party/habitat-lab/habitat-baselines:$SOURCE_ROOT/third_party/frontier_exploration:$SOURCE_ROOT/third_party/depth_camera_filtering:$SOURCE_ROOT/third_party/MobileSAM:$SOURCE_ROOT/third_party/GroundingDINO:$SOURCE_ROOT/third_party/D-FINE:$SOURCE_ROOT/third_party/recognize-anything:$SOURCE_ROOT/third_party/places365"
+export XDG_CACHE_HOME=$RUN_ROOT/xdg_cache
+export MPLCONFIGDIR=$RUN_ROOT/mpl_config
+
+preflight_manifest() {
+  local label=$1 manifest=$2 expected_episodes=$3 expected_chunks=$4
+  "$ASCENT_PYTHON" "$PREFLIGHT" \
+    --manifest "$manifest" \
+    --scene-root "$SCENES_ROOT" \
+    --expected-dataset "$DATASET" \
+    --expected-episodes "$expected_episodes" \
+    --expected-chunks "$expected_chunks" \
+    --output-json "$RUN_ROOT/checks/${label}_preflight.json" \
+    > "$RUN_ROOT/checks/${label}_preflight.log"
+  "$ASCENT_PYTHON" "$LOADING_CHECK" \
+    --manifest "$manifest" \
+    --config-dir "$SOURCE_ROOT/experiments" \
+    --scene-root "$SCENES_ROOT" \
+    --output-json "$RUN_ROOT/checks/${label}_habitat_loading.json" \
+    > "$RUN_ROOT/checks/${label}_habitat_loading.log"
+  timeout --signal=TERM --kill-after=30s \
+    "${TASK_RESET_TIMEOUT_SECONDS}s" \
+    "$ASCENT_PYTHON" "$TASK_RESET_CHECK" \
+      --manifest "$manifest" \
+      --config-dir "$SOURCE_ROOT/experiments" \
+      --scene-root "$SCENES_ROOT" \
+      --gpu-device-id 0 \
+      --output-json "$RUN_ROOT/checks/${label}_task_reset.json" \
+      > "$RUN_ROOT/checks/${label}_task_reset.log" 2>&1
+}
+preflight_manifest main "$MANIFEST" "$EXPECTED_EPISODES" "$EXPECTED_CHUNKS"
+if [ "$MODE" = full ]; then
+  preflight_manifest placement_gate "$GATE_MANIFEST" 5 1
+fi
+
+BASE_PORT_ROOT=$(
+  "$ASCENT_PYTHON" "$PORT_SELECTOR" \
+    --seed "${PBS_JOBID:-manual}:$STAMP" --lanes 3
+)
+{
+  echo schema=ascent_vo_submap_v1_4_oracle_task_memory_three_shared_controller_v1
+  echo scientific_role=oracle_identity_only_task_memory_screen
+  echo pbs_jobid=${PBS_JOBID:-manual}
+  echo host=$(hostname)
+  echo start_time=$(date -Is)
+  echo mode=$MODE
+  echo experiment=$EXPERIMENT
+  echo dataset=$DATASET
+  echo source_root=$SOURCE_ROOT
+  echo source_commit=$SOURCE_COMMIT
+  echo resource_commit=$RESOURCE_COMMIT
+  echo pointnav_vo_commit=$POINTNAV_VO_COMMIT
+  echo manifest=$MANIFEST
+  echo manifest_sha256=$MANIFEST_SHA256
+  echo gate_manifest=$GATE_MANIFEST
+  echo gate_manifest_sha256=$GATE_MANIFEST_SHA256
+  echo expected_chunks=$EXPECTED_CHUNKS
+  echo expected_episodes=$EXPECTED_EPISODES
+  echo lane_count=$LANE_COUNT
+  echo resource_contract=one_H200_up_to_three_independent_service_lanes
+  echo placement_contract=five_episode_method_gate_before_full
+  echo pose_source=zhao_rgbd_2021
+  echo policy_gt_isolation=1
+  echo evaluation_gt_only=1
+  echo historical_v1_2_read_only=1
+  echo no_metric_driven_retry=1
+  echo placement_gate_technical_retry=one_fixed_per_failed_unit
+  echo method_version=submap_v1.4_oracle_task_memory
+  echo gt_policy_output_fields=event_sequence,reference_submap_id
+  echo oracle_scope=vo_consistent_graph_nondirect_fragmentation_only
+  echo handoff_enabled=1
+  echo exhaustion_recovery_enabled=1
+  echo baseline_csvs=$BASELINE_CSVS
+  echo base_port_root=$BASE_PORT_ROOT
+  echo deadline_epoch=$DEADLINE_EPOCH
+  qstat -f "${PBS_JOBID:-}" 2>/dev/null || true
+  nvidia-smi || true
+} > "$RUN_ROOT/controller_preflight.txt"
+
+run_lane() {
+  local run_mode=$1 manifest=$2 manifest_sha=$3 lane_id=$4 lanes=$5
+  local expected_chunks=$6 expected_episodes=$7 stage_root=$8 base_port=$9
+  (
+    export ASCENT_PLACE_MEMORY_V14_DATASET=$DATASET
+    export ASCENT_PLACE_MEMORY_V14_MODE=$run_mode
+    export ASCENT_PLACE_MEMORY_V14_EXPERIMENT=$EXPERIMENT
+    export ASCENT_PLACE_MEMORY_V14_SCENES_ROOT=$SCENES_ROOT
+    export ASCENT_PLACE_MEMORY_V14_MANIFEST=$manifest
+    export ASCENT_PLACE_MEMORY_V14_MANIFEST_SHA256=$manifest_sha
+    export ASCENT_PLACE_MEMORY_V14_SOURCE_COMMIT=$SOURCE_COMMIT
+    export ASCENT_PLACE_MEMORY_V14_RESOURCE_COMMIT=$RESOURCE_COMMIT
+    export ASCENT_PLACE_MEMORY_V14_POINTNAV_VO_COMMIT=$POINTNAV_VO_COMMIT
+    export ASCENT_PLACE_MEMORY_V14_LANE_ID=$lane_id
+    export ASCENT_PLACE_MEMORY_V14_LANE_COUNT=$lanes
+    export ASCENT_PLACE_MEMORY_V14_LANE_EXPECTED_CHUNKS=$expected_chunks
+    export ASCENT_PLACE_MEMORY_V14_LANE_EXPECTED_EPISODES=$expected_episodes
+    export ASCENT_PLACE_MEMORY_V14_STAGE_ROOT=$stage_root
+    export ASCENT_PLACE_MEMORY_V14_BASE_PORT=$base_port
+    export ASCENT_PLACE_MEMORY_V14_DEADLINE_EPOCH=$DEADLINE_EPOCH
+    bash "$WORKER"
+  )
+}
+
+if [ "$MODE" = full ]; then
+  mkdir -p "$RUN_ROOT/placement_gate"
+  run_lane smoke "$GATE_MANIFEST" "$GATE_MANIFEST_SHA256" \
+    0 1 1 5 "$RUN_ROOT/placement_gate" "$BASE_PORT_ROOT" \
+    > "$RUN_ROOT/placement_gate/lane_0.log" 2>&1
+  printf 'lane_id,inventory\n0,%s\n' \
+    "$RUN_ROOT/placement_gate/lane_0/inventory.csv" \
+    > "$RUN_ROOT/placement_gate/registry.csv"
+  "$ASCENT_PYTHON" "$SUMMARIZER" \
+    --manifest "$GATE_MANIFEST" \
+    --registry "$RUN_ROOT/placement_gate/registry.csv" \
+    --mode smoke \
+    --expected-dataset "$DATASET" \
+    --expected-episodes 5 \
+    --source-commit "$SOURCE_COMMIT" \
+    --forward-checkpoint-sha256 "$FORWARD_SHA256" \
+    --turn-checkpoint-sha256 "$TURN_SHA256" \
+    --output-dir "$RUN_ROOT/placement_gate/final_gate" \
+    > "$RUN_ROOT/placement_gate/final_gate.log" 2>&1
+  [ "$("$ASCENT_PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["technical_status"])' "$RUN_ROOT/placement_gate/final_gate/summary.json")" = PASS ] || {
+    echo placement_gate_failed; exit 46;
+  }
+fi
+
+mapfile -t LANE_ROWS < <(
+  "$ASCENT_PYTHON" - "$MANIFEST" "$LANE_COUNT" <<'PY'
+import json, sys
+from collections import Counter
+manifest, lanes = json.load(open(sys.argv[1], encoding="utf-8")), int(sys.argv[2])
+chunks, episodes = Counter(), Counter()
+for index, chunk in enumerate(manifest["chunks"]):
+    lane = index % lanes
+    chunks[lane] += 1
+    episodes[lane] += int(chunk["episode_count"])
+for lane in range(lanes):
+    print(f"{lane}\t{chunks[lane]}\t{episodes[lane]}")
+PY
+)
+
+PIDS=()
+LANE_IDS=()
+LANE_LOGS=()
+for lane_row in "${LANE_ROWS[@]}"; do
+  IFS=$'\t' read -r lane_id lane_chunks lane_episodes <<< "$lane_row"
+  lane_log=$RUN_ROOT/lanes/lane_${lane_id}.log
+  run_lane "$MODE" "$MANIFEST" "$MANIFEST_SHA256" \
+    "$lane_id" "$LANE_COUNT" "$lane_chunks" "$lane_episodes" \
+    "$RUN_ROOT/lanes" "$((BASE_PORT_ROOT + lane_id * 20))" \
+    > "$lane_log" 2>&1 &
+  PIDS+=("$!")
+  LANE_IDS+=("$lane_id")
+  LANE_LOGS+=("$lane_log")
+done
+
+printf 'lane_id,pid,exit_status,lane_log,inventory\n' > "$RUN_ROOT/lane_status.csv"
+WORKER_STATUS=0
+for index in "${!PIDS[@]}"; do
+  set +e
+  wait "${PIDS[$index]}"
+  status=$?
+  set -e
+  lane_id=${LANE_IDS[$index]}
+  printf '%s,%s,%s,%s,%s\n' \
+    "$lane_id" "${PIDS[$index]}" "$status" "${LANE_LOGS[$index]}" \
+    "$RUN_ROOT/lanes/lane_${lane_id}/inventory.csv" \
+    >> "$RUN_ROOT/lane_status.csv"
+  [ "$status" = 0 ] || WORKER_STATUS=$status
+done
+
+REGISTRY=$RUN_ROOT/evidence_registry.csv
+printf 'lane_id,inventory\n' > "$REGISTRY"
+for lane_id in "${LANE_IDS[@]}"; do
+  printf '%s,%s\n' "$lane_id" \
+    "$RUN_ROOT/lanes/lane_${lane_id}/inventory.csv" >> "$REGISTRY"
+done
+
+SUMMARY_ARGS=()
+if [ "$MODE" = full ]; then
+  IFS=: read -r -a BASELINE_PATHS <<< "$BASELINE_CSVS"
+  for baseline_path in "${BASELINE_PATHS[@]}"; do
+    [ -f "$baseline_path" ] || { echo "missing_baseline=$baseline_path"; exit 21; }
+    SUMMARY_ARGS+=(--baseline-episodes-csv "$baseline_path")
+  done
+fi
+SUMMARY_DIR=$RUN_ROOT/final_gate
+set +e
+"$ASCENT_PYTHON" "$SUMMARIZER" \
+  --manifest "$MANIFEST" \
+  --registry "$REGISTRY" \
+  --mode "$MODE" \
+  --expected-dataset "$DATASET" \
+  --expected-episodes "$EXPECTED_EPISODES" \
+  --source-commit "$SOURCE_COMMIT" \
+  --forward-checkpoint-sha256 "$FORWARD_SHA256" \
+  --turn-checkpoint-sha256 "$TURN_SHA256" \
+  "${SUMMARY_ARGS[@]}" \
+  --output-dir "$SUMMARY_DIR" \
+  > "$RUN_ROOT/final_gate.log" 2>&1
+SUMMARY_STATUS=$?
+set -e
+
+if [ "$WORKER_STATUS" -ne 0 ]; then echo "worker_failure=$WORKER_STATUS"; exit "$WORKER_STATUS"; fi
+if [ "$SUMMARY_STATUS" -ne 0 ]; then echo "summary_gate_failure=$SUMMARY_STATUS"; exit 46; fi
+read -r TECHNICAL_STATUS VALID MECHANISM PERFORMANCE < <(
+  "$ASCENT_PYTHON" - "$SUMMARY_DIR/summary.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+print(value["technical_status"], value["v14_valid_episodes"],
+      value["mechanism_exposure"], value["performance_verdict"])
+PY
+)
+[ "$TECHNICAL_STATUS" = PASS ] || exit 46
+[ "$VALID" = "$EXPECTED_EPISODES" ] || exit 46
+[ -z "$(git -C "$SOURCE_ROOT" status --porcelain --untracked-files=all)" ] || {
+  echo source_changed_during_run; exit 47;
+}
+printf 'controller_exit_status=0 stage=complete dataset=%s experiment=%s mode=%s v14_valid=%s technical_status=%s mechanism_exposure=%s performance_verdict=%s time=%s\n' \
+  "$DATASET" "$EXPERIMENT" "$MODE" "$VALID" "$TECHNICAL_STATUS" "$MECHANISM" \
+  "$PERFORMANCE" "$(date -Is)" > "$RUN_ROOT/terminal_status.txt"
+exit 0
