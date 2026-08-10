@@ -269,15 +269,19 @@ def submap_transform_from_pair(
 def aggregate_multiframe_support(
     pair_records: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    supported = [record for record in pair_records if record["pair_supported"]]
+    supported = [
+        (index, record)
+        for index, record in enumerate(pair_records)
+        if record["pair_supported"]
+    ]
     best_support = 0
     best_indices: list[int] = []
-    for anchor_index, anchor in enumerate(supported):
+    for _, anchor in supported:
         anchor_transform = np.asarray(
             anchor["submap_transform_target_from_source"], dtype=np.float64
         )
         compatible: dict[str, tuple[int, Mapping[str, Any]]] = {}
-        for index, candidate in enumerate(supported):
+        for original_index, candidate in supported:
             transform = np.asarray(
                 candidate["submap_transform_target_from_source"],
                 dtype=np.float64,
@@ -297,7 +301,7 @@ def aggregate_multiframe_support(
             if incumbent is None or int(candidate["inlier_count"]) > int(
                 incumbent[1]["inlier_count"]
             ):
-                compatible[query_id] = (index, candidate)
+                compatible[query_id] = (original_index, candidate)
         if len(compatible) > best_support:
             best_support = len(compatible)
             best_indices = sorted(index for index, _ in compatible.values())

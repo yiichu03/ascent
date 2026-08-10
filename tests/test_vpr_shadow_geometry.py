@@ -118,6 +118,34 @@ def test_multiframe_support_requires_two_consistent_query_frames() -> None:
     aggregate = aggregate_multiframe_support(records)
     assert aggregate["geometry_pass"] is True
     assert aggregate["distinct_query_frame_support"] == 2
+    assert aggregate["supporting_pair_indices"] == [0, 1]
 
     duplicate_query = [dict(records[0]), dict(records[1], query_frame_id="q0")]
     assert aggregate_multiframe_support(duplicate_query)["geometry_pass"] is False
+
+
+def test_multiframe_support_indices_refer_to_original_pair_records() -> None:
+    base = _transform(0.2, (0.5, -0.1, 0.0))
+    records = [
+        {
+            "query_frame_id": "unsupported",
+            "pair_supported": False,
+            "inlier_count": 0,
+            "submap_transform_target_from_source": None,
+        },
+        {
+            "query_frame_id": "q0",
+            "pair_supported": True,
+            "inlier_count": 50,
+            "submap_transform_target_from_source": base.tolist(),
+        },
+        {
+            "query_frame_id": "q1",
+            "pair_supported": True,
+            "inlier_count": 45,
+            "submap_transform_target_from_source": base.tolist(),
+        },
+    ]
+    aggregate = aggregate_multiframe_support(records)
+    assert aggregate["geometry_pass"] is True
+    assert aggregate["supporting_pair_indices"] == [1, 2]
