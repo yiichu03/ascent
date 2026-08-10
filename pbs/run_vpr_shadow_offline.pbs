@@ -39,7 +39,7 @@ COMPATIBILITY_CHECKER=$SOURCE_ROOT/scripts/check_vpr_shadow_offline_compatibilit
 RUN_ROOT=$ARTIFACT_ROOT/offline/${ROLE}/${RETRIEVER}_${PBS_JOBID:-manual}_${STAMP}
 
 case "$ROLE" in hm3d_cal50|hm3d_test100|mp3d_test150) ;; *) echo invalid_role; exit 20 ;; esac
-case "$RETRIEVER" in mixvpr|megaloc) ;; *) echo invalid_retriever; exit 20 ;; esac
+case "$RETRIEVER" in netvlad|eigenplaces|boq) ;; *) echo invalid_retriever; exit 20 ;; esac
 for path in "$CAPTURE_SUMMARY" "$CAPTURE_EPISODES" "$SPLIT_MANIFEST" \
   "$MODEL_REGISTRY" "$BATCH_RUNNER" "$CALIBRATOR" "$EVALUATOR" \
   "$COMPATIBILITY_CHECKER"; do

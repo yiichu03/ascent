@@ -32,6 +32,7 @@ try:
     from vpr_shadow_models import (
         GlobalRetriever,
         LocalGeometryMatcher,
+        SUPPORTED_RETRIEVERS,
         load_and_validate_registry,
     )
 except ImportError:  # imported through the repository root in unit tests
@@ -54,6 +55,7 @@ except ImportError:  # imported through the repository root in unit tests
     from scripts.vpr_shadow_models import (
         GlobalRetriever,
         LocalGeometryMatcher,
+        SUPPORTED_RETRIEVERS,
         load_and_validate_registry,
     )
 
@@ -72,7 +74,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--registry", type=Path, required=True)
     parser.add_argument("--capture-manifest", type=Path, required=True)
     parser.add_argument("--submap-diagnostics", type=Path, required=True)
-    parser.add_argument("--retriever", choices=("mixvpr", "megaloc"), required=True)
+    parser.add_argument("--retriever", choices=SUPPORTED_RETRIEVERS, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--batch-size", type=int, default=16)

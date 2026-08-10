@@ -20,8 +20,10 @@ from typing import Any, Mapping, Sequence
 
 try:
     from vpr_shadow_data import read_jsonl, sha256
+    from vpr_shadow_models import SUPPORTED_RETRIEVERS
 except ImportError:
     from scripts.vpr_shadow_data import read_jsonl, sha256
+    from scripts.vpr_shadow_models import SUPPORTED_RETRIEVERS
 
 
 CAL_ROLE = "threshold_calibration_only"
@@ -42,7 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--capture-summary", type=Path, required=True)
     parser.add_argument("--capture-episodes", type=Path, required=True)
     parser.add_argument("--split-manifest", type=Path, required=True)
-    parser.add_argument("--retriever", choices=("mixvpr", "megaloc"), required=True)
+    parser.add_argument("--retriever", choices=SUPPORTED_RETRIEVERS, required=True)
     parser.add_argument("--calibration-file", type=Path)
     parser.add_argument("--offline-source-commit", required=True)
     parser.add_argument("--offline-compatibility-sha256", required=True)

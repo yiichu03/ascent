@@ -11,6 +11,7 @@ from scripts.run_vpr_shadow_offline_batch import (
 )
 from scripts.check_vpr_shadow_offline_compatibility import classify_changed_paths
 from scripts.vpr_shadow_data import sha256
+from scripts.vpr_shadow_models import SUPPORTED_RETRIEVERS
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -184,3 +185,21 @@ def test_post_capture_compatibility_scope_excludes_runtime_policy() -> None:
     assert classify_changed_paths(["ascent/submaps/vpr_shadow.py"]) == [
         "ascent/submaps/vpr_shadow.py"
     ]
+
+
+def test_retriever_screen_is_explicit_and_offline_only() -> None:
+    assert {"netvlad", "eigenplaces", "boq"}.issubset(SUPPORTED_RETRIEVERS)
+    assert classify_changed_paths(
+        [
+            "experiments/vpr_shadow/model_registry.json",
+            "scripts/check_vpr_shadow_models.py",
+            "scripts/run_vpr_shadow_association.py",
+            "scripts/vpr_shadow_models.py",
+        ]
+    ) == []
+    submitter = (ROOT / "pbs/submit_vpr_shadow_offline.sh").read_text()
+    runner = (ROOT / "pbs/run_vpr_shadow_offline.pbs").read_text()
+    for retriever in ("netvlad", "eigenplaces", "boq"):
+        assert retriever in submitter
+        assert retriever in runner
+    assert 'sys.argv[9] in model_gate["global_retrievers"]' in submitter

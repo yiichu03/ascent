@@ -17,19 +17,23 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 SOURCE_ROOT=$(realpath "$SCRIPT_DIR/..")
 ARTIFACT_ROOT=$PROJECT/artifacts/objectnav/vpr_shadow
 MODEL_REGISTRY=$SOURCE_ROOT/experiments/vpr_shadow/model_registry.json
-MODEL_GATE=$ARTIFACT_ROOT/local_model_gate_20260809_v2/model_gate.json
+MODEL_GATE=$ARTIFACT_ROOT/local_model_gate_retriever_screen_20260810_v1/model_gate.json
 RUNNER=$SOURCE_ROOT/pbs/run_vpr_shadow_offline.pbs
 COMPATIBILITY_CHECKER=$SOURCE_ROOT/scripts/check_vpr_shadow_offline_compatibility.py
 ASCENT_PYTHON=/scratch/e1538633/liuyi/micromamba/envs/ascent_nav/bin/python
 
 case "$QUEUE" in auto|autox) ;; *) echo queue_must_be_auto_or_autox; exit 20 ;; esac
-case "$RETRIEVER" in mixvpr|megaloc) ;; *) echo invalid_retriever; exit 20 ;; esac
+case "$RETRIEVER" in netvlad|eigenplaces|boq) ;; *) echo invalid_retriever; exit 20 ;; esac
 [[ "$STAMP" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo invalid_stamp; exit 20; }
 case "$ROLE" in
   hm3d_cal50)
     SPLIT_NAME=hm3d_cal50.json
     EXPECTED_ROLE=threshold_calibration_only
-    JOB_NAME=av14c${RETRIEVER:0:1}
+    case "$RETRIEVER" in
+      netvlad) JOB_NAME=av14cn ;;
+      eigenplaces) JOB_NAME=av14ce ;;
+      boq) JOB_NAME=av14cb ;;
+    esac
     WALLTIME=48:00:00
     [ -z "$CALIBRATION_FILE" ] || { echo calibration_forbidden_for_cal50; exit 20; }
     ;;
@@ -111,6 +115,7 @@ model_gate = json.load(open(sys.argv[1], encoding="utf-8"))
 assert model_gate["schema"] == "ascent_v1_4_vpr_shadow_model_gate_v1"
 assert model_gate["technical_status"] == "PASS"
 assert model_gate["registry_sha256"] == sys.argv[2]
+assert sys.argv[9] in model_gate["global_retrievers"]
 capture = json.load(open(sys.argv[3], encoding="utf-8"))
 assert capture["schema"] == "ascent_v1_4_vpr_shadow_capture_gate_v2"
 assert capture["technical_status"] == "PASS"

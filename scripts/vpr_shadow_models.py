@@ -20,6 +20,13 @@ except ImportError:  # imported as scripts.vpr_shadow_models in unit tests
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
+SUPPORTED_RETRIEVERS = (
+    "mixvpr",
+    "megaloc",
+    "netvlad",
+    "eigenplaces",
+    "boq",
+)
 
 
 def load_and_validate_registry(
@@ -142,6 +149,103 @@ class GlobalRetriever:
             model = module.MegaLoc()
             model.load_state_dict(load_file(str(weights)), strict=True)
             return model
+        if self.name == "netvlad":
+            torch_hub = (
+                self.project_root
+                / "artifacts/objectnav/vpr_shadow/model_cache/torch/hub"
+            ).resolve()
+            torch.hub.set_dir(str(torch_hub))
+            hub_checkpoint = (
+                torch_hub / self.record["torch_hub_relative_weights_path"]
+            ).resolve()
+            if not hub_checkpoint.is_file() or sha256(hub_checkpoint) != self.record[
+                "weights_sha256"
+            ]:
+                raise ValueError("pinned NetVLAD torch-hub checkpoint mismatch")
+            sys.path.insert(0, str(repository))
+            try:
+                from hloc.extractors.netvlad import NetVLAD
+            finally:
+                sys.path.pop(0)
+
+            base = NetVLAD(
+                {
+                    "model_name": "VGG16-NetVLAD-Pitts30K",
+                    "whiten": True,
+                }
+            )
+
+            class InferenceNetVLAD(torch.nn.Module):
+                def __init__(self, value) -> None:
+                    super().__init__()
+                    self.base = value
+
+                def forward(self, value):
+                    return self.base({"image": value})["global_descriptor"]
+
+            return InferenceNetVLAD(base)
+        if self.name == "eigenplaces":
+            sys.path.insert(0, str(repository))
+            try:
+                from eigenplaces_model.layers import Flatten, GeM, L2Norm
+            finally:
+                sys.path.pop(0)
+            import torchvision
+
+            class InferenceEigenPlaces(torch.nn.Module):
+                def __init__(self) -> None:
+                    super().__init__()
+                    backbone = torchvision.models.resnet50(weights=None)
+                    self.backbone = torch.nn.Sequential(
+                        *list(backbone.children())[:-2]
+                    )
+                    self.aggregation = torch.nn.Sequential(
+                        L2Norm(),
+                        GeM(),
+                        Flatten(),
+                        torch.nn.Linear(2048, 2048),
+                        L2Norm(),
+                    )
+
+                def forward(self, value):
+                    return self.aggregation(self.backbone(value))
+
+            model = InferenceEigenPlaces()
+            model.load_state_dict(torch.load(weights, map_location="cpu"), strict=True)
+            return model
+        if self.name == "boq":
+            source = repository / "src"
+            sys.path.insert(0, str(source))
+            try:
+                from backbones import ResNet
+                from boq import BoQ
+            finally:
+                sys.path.pop(0)
+
+            class InferenceBoQ(torch.nn.Module):
+                def __init__(self) -> None:
+                    super().__init__()
+                    self.backbone = ResNet(
+                        backbone_name="resnet50",
+                        pretrained=False,
+                        unfreeze_n_blocks=0,
+                        crop_last_block=True,
+                    )
+                    self.aggregator = BoQ(
+                        in_channels=self.backbone.out_channels,
+                        proj_channels=512,
+                        num_queries=64,
+                        num_layers=2,
+                        row_dim=32,
+                    )
+
+                def forward(self, value):
+                    descriptor, _ = self.aggregator(self.backbone(value))
+                    return descriptor
+
+            model = InferenceBoQ()
+            model.load_state_dict(torch.load(weights, map_location="cpu"), strict=True)
+            return model
         raise ValueError(f"unknown retriever {self.name}")
 
     def encode(
@@ -154,15 +258,22 @@ class GlobalRetriever:
         height, width = map(int, self.record["input_size"])
         mean = torch.tensor(IMAGENET_MEAN).view(3, 1, 1)
         std = torch.tensor(IMAGENET_STD).view(3, 1, 1)
+        effective_batch_size = min(
+            int(batch_size), int(self.record.get("max_inference_batch_size", batch_size))
+        )
+        preprocessing = str(self.record.get("preprocessing", "imagenet"))
+        if preprocessing not in {"imagenet", "unit_range"}:
+            raise ValueError(f"unknown preprocessing contract {preprocessing}")
         with torch.inference_mode():
-            for start in range(0, len(frames), int(batch_size)):
-                subset = frames[start : start + int(batch_size)]
+            for start in range(0, len(frames), effective_batch_size):
+                subset = frames[start : start + effective_batch_size]
                 tensors = []
                 for frame in subset:
                     image = torch.from_numpy(
                         _rgb(frame.rgb_path).copy()
                     ).permute(2, 0, 1).float() / 255.0
-                    image = (image - mean) / std
+                    if preprocessing == "imagenet":
+                        image = (image - mean) / std
                     image = functional.interpolate(
                         image[None],
                         size=(height, width),

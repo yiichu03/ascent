@@ -20,6 +20,7 @@ try:
     from vpr_shadow_models import (
         GlobalRetriever,
         LocalGeometryMatcher,
+        SUPPORTED_RETRIEVERS,
         load_and_validate_registry,
     )
 except ImportError:
@@ -31,6 +32,7 @@ except ImportError:
     from scripts.vpr_shadow_models import (
         GlobalRetriever,
         LocalGeometryMatcher,
+        SUPPORTED_RETRIEVERS,
         load_and_validate_registry,
     )
 
@@ -41,6 +43,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--registry", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument(
+        "--retrievers",
+        nargs="+",
+        choices=SUPPORTED_RETRIEVERS,
+        default=list(SUPPORTED_RETRIEVERS),
+    )
     return parser.parse_args()
 
 
@@ -87,7 +95,7 @@ def main() -> int:
     frames = [_frame(fixture_path, 0), _frame(fixture_path, 1)]
     registry = load_and_validate_registry(project_root, args.registry)
     global_results = {}
-    for name in ("mixvpr", "megaloc"):
+    for name in args.retrievers:
         model = GlobalRetriever(
             name=name,
             project_root=project_root,

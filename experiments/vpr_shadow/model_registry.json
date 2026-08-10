@@ -9,6 +9,7 @@
       "weights_sha256": "97528606773e9920e93ca4d211daeabf1c7312480f38b45379ee5551a1b4dd24",
       "weights_source": "official README Google Drive id 1vuz3PvnR7vxnDDLQrdHJaOA04SQrtk5L",
       "input_size": [320, 320],
+      "preprocessing": "imagenet",
       "descriptor_dimension": 4096
     },
     "megaloc": {
@@ -19,7 +20,43 @@
       "weights_sha256": "d4f9f2bcb60018f91eb6a8e061ed054fd55654e10c2569cf13841ea986ffb4f8",
       "huggingface_revision": "37bb43d65dd6388d1578052de5eb0bcdceb497e7",
       "input_size": [322, 322],
+      "preprocessing": "imagenet",
       "descriptor_dimension": 8448
+    },
+    "netvlad": {
+      "repository_path": "external/vpr_references/Hierarchical-Localization",
+      "repository_commit": "c13273bd0ecc2917a35910fd843712a1c6243193",
+      "license": "Apache-2.0",
+      "weights_path": "artifacts/objectnav/vpr_shadow/model_cache/retriever_screen/netvlad/Pitts30K_struct.mat",
+      "weights_sha256": "a67d9d897d3b7942f206478e3a22a4c4c9653172ae2447041d35f6cb278fdc67",
+      "weights_source": "official HLoc VGG16-NetVLAD-Pitts30K checkpoint",
+      "torch_hub_relative_weights_path": "netvlad/VGG16-NetVLAD-Pitts30K.mat",
+      "input_size": [480, 640],
+      "preprocessing": "unit_range",
+      "max_inference_batch_size": 1,
+      "descriptor_dimension": 4096
+    },
+    "eigenplaces": {
+      "repository_path": "external/vpr_references/EigenPlaces",
+      "repository_commit": "a2969f71d5ea31017443af490b15273ca4c50af1",
+      "license": "MIT",
+      "weights_path": "artifacts/objectnav/vpr_shadow/model_cache/retriever_screen/eigenplaces/ResNet50_2048_eigenplaces.pth",
+      "weights_sha256": "98e8e21e9364a7e0990a9d7e1de5853b6d830f7f73d6bd9ee4f397575e0d41d1",
+      "weights_source": "official EigenPlaces v1.0 GitHub release",
+      "input_size": [480, 640],
+      "preprocessing": "imagenet",
+      "descriptor_dimension": 2048
+    },
+    "boq": {
+      "repository_path": "external/vpr_references/Bag-of-Queries",
+      "repository_commit": "1a4965ea7dfd9bd0dd846adf7a0e430f68101d12",
+      "license": "MIT",
+      "weights_path": "artifacts/objectnav/vpr_shadow/model_cache/retriever_screen/boq/resnet50_16384.pth",
+      "weights_sha256": "4691d1545db847da2c0ba911f34e6c520a5da63f8b94c6415fe87d0d8800ebaa",
+      "weights_source": "official Bag-of-Queries v1.0 GitHub release",
+      "input_size": [384, 384],
+      "preprocessing": "imagenet",
+      "descriptor_dimension": 16384
     }
   },
   "local_verifier": {
