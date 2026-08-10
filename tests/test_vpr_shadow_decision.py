@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import json
+
+import pytest
+
 from scripts.vpr_shadow_decision import (
     PRIMARY_STRATUM,
     choose_zero_false_positive_threshold,
+    load_labeled,
     simulate_acceptance,
 )
 
@@ -66,3 +71,20 @@ def test_reused_local_event_indices_do_not_merge_across_episodes() -> None:
     )
     assert result["accepted_event_count"] == 2
     assert result["true_accepted_episode_count"] == 2
+
+
+def test_legacy_identity_unsafe_scorer_output_is_rejected(tmp_path) -> None:
+    labeled = tmp_path / "labeled.jsonl"
+    labeled.write_text(
+        json.dumps(
+            {
+                "record_type": "vpr_shadow_gt_metadata",
+                "schema": "ascent_v1_4_vpr_shadow_gt_labeled_candidates_v1",
+                "evaluation_only_gt": True,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="legacy or unsupported"):
+        load_labeled(labeled)

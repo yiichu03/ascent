@@ -11,19 +11,28 @@ from typing import Any, Mapping, Sequence
 
 PRIMARY_STRATUM = "vo_consistent_fragmentation"
 DIAGNOSTIC_STRATUM = "vo_inconsistent_revisit"
+LABELED_SCHEMA = "ascent_v1_4_vpr_shadow_gt_labeled_candidates_v2"
+EPISODE_JOIN_CONTRACT = "capture_sequence_to_logical_to_runtime_v1"
 
 
 def load_labeled(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     values = [json.loads(line) for line in path.read_text().splitlines()]
     if not values or values[0].get("record_type") != "vpr_shadow_gt_metadata":
         raise ValueError("missing labeled-candidate metadata")
-    if values[0].get("evaluation_only_gt") is not True:
+    metadata = values[0]
+    if metadata.get("schema") != LABELED_SCHEMA:
+        raise ValueError("legacy or unsupported GT scorer schema")
+    if metadata.get("episode_join_contract") != EPISODE_JOIN_CONTRACT:
+        raise ValueError("GT scorer episode identity join is not authoritative")
+    if not str(metadata.get("capture_episodes_sha256", "")):
+        raise ValueError("GT scorer is not bound to the capture episode ledger")
+    if metadata.get("evaluation_only_gt") is not True:
         raise ValueError("labeled candidates are not isolated evaluation data")
     rows = [
         value for value in values[1:]
         if value.get("record_type") == "vpr_shadow_candidate"
     ]
-    return values[0], rows
+    return metadata, rows
 
 
 def simulate_acceptance(
