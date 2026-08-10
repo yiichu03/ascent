@@ -21,6 +21,7 @@ ALLOWED_CHANGED_PATHS = frozenset(
         "scripts/check_vpr_shadow_offline_compatibility.py",
         "scripts/run_vpr_shadow_association.py",
         "scripts/run_vpr_shadow_offline_batch.py",
+        "scripts/rescore_vpr_shadow_batch.py",
         "scripts/validate_vpr_shadow_capture.py",
         "scripts/vpr_shadow_capture_gate.py",
         "scripts/vpr_shadow_data.py",
