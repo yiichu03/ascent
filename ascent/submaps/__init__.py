@@ -15,6 +15,13 @@ from ascent.submaps.lifecycle import (
     SubmapManager,
 )
 from ascent.submaps.overlap import ViewOverlapConfig, estimate_view_overlap
+from ascent.submaps.place_memory import (
+    OracleSamePlaceEvent,
+    PlaceConditionedResidualMemory,
+    PlaceMemoryConfig,
+    RerankDecision,
+    SearchBranchStatus,
+)
 from ascent.submaps.topology import transfer_stair_topology
 from ascent.submaps.continuity import (
     BoundaryHandoff,
@@ -46,8 +53,13 @@ __all__ = [
     "FrontierStatus",
     "GatewayEdge",
     "MapPayload",
+    "OracleSamePlaceEvent",
+    "PlaceConditionedResidualMemory",
+    "PlaceMemoryConfig",
     "RemoteRoute",
     "RouteWaypoint",
+    "RerankDecision",
+    "SearchBranchStatus",
     "SplitDecision",
     "SubmapDiagnosticsWriter",
     "SubmapBundle",

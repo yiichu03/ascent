@@ -40,6 +40,11 @@ from gym import spaces
 import time
 from ascent.vo.diagnostics import VODiagnosticsWriter
 from ascent.vo.habitat_extensions import configure_gt_isolated_vo
+from ascent.vo.oracle_place import (
+    OraclePlaceConfig,
+    OraclePlaceDiagnosticsWriter,
+    SamePlaceOracle,
+)
 from ascent.vo.pose_provider import VOInferenceError, ZhaoRGBDPoseProvider
 from ascent.vo.zhao_model import (
     DEPTH_INVALID_POLICY,
@@ -56,9 +61,26 @@ def extract_scalars_from_info(info: Dict[str, Any]) -> Dict[str, float]:
     info_filtered = {
         k: v
         for k, v in info.items()
-        if not isinstance(v, list) and not k.startswith("submap_")
+        if not isinstance(v, list)
+        and not k.startswith("submap_")
+        and not k.startswith("place_")
     }
     return extract_scalars_from_info_habitat(info_filtered)
+
+
+def _config_bool(config: Any, path: str, default: bool = False) -> bool:
+    value = OmegaConf.select(config, path, default=default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off", ""}:
+            return False
+    if isinstance(value, (int, np.integer)) and value in (0, 1):
+        return bool(value)
+    raise ValueError(f"{path} must be boolean, got {value!r}")
 
 
 @baseline_registry.register_trainer(name="ascent")
@@ -182,6 +204,96 @@ class AscentTrainer(PPOTrainer):
                 "depth_validity_schema": "depth_validity_v1",
             },
         )
+        place_memory_enabled = _config_bool(
+            config, "ascent_place_memory.enabled"
+        )
+        oracle_enabled = _config_bool(
+            config, "ascent_place_memory.oracle_enabled"
+        )
+        if place_memory_enabled != oracle_enabled:
+            raise RuntimeError(
+                "v1.4 oracle branch requires ascent_place_memory.enabled "
+                "and oracle_enabled to be enabled together"
+            )
+        self._same_place_oracle = None
+        self._oracle_place_diagnostics = None
+        if oracle_enabled:
+            if not _config_bool(config, "ascent_submaps.enabled"):
+                raise RuntimeError("same-place oracle requires submaps")
+            oracle_config = OraclePlaceConfig(
+                enabled=True,
+                physical_planar_radius_m=float(
+                    OmegaConf.select(
+                        config,
+                        "ascent_place_memory.oracle_physical_planar_radius_m",
+                        default=0.75,
+                    )
+                ),
+                physical_height_radius_m=float(
+                    OmegaConf.select(
+                        config,
+                        "ascent_place_memory.oracle_physical_height_radius_m",
+                        default=0.75,
+                    )
+                ),
+                min_step_separation=int(
+                    OmegaConf.select(
+                        config,
+                        "ascent_place_memory.oracle_min_step_separation",
+                        default=30,
+                    )
+                ),
+                min_excursion_m=float(
+                    OmegaConf.select(
+                        config,
+                        "ascent_place_memory.oracle_min_excursion_m",
+                        default=2.0,
+                    )
+                ),
+                vo_consistent_radius_m=float(
+                    OmegaConf.select(
+                        config,
+                        "ascent_place_memory.oracle_vo_consistent_radius_m",
+                        default=1.5,
+                    )
+                ),
+            )
+            self._same_place_oracle = SamePlaceOracle(
+                num_envs=self.envs.num_envs, config=oracle_config
+            )
+            oracle_diagnostics_path = Path(
+                str(
+                    OmegaConf.select(
+                        config,
+                        "ascent_place_memory.oracle_diagnostics_path",
+                        default="debug/ascent_oracle_place_diagnostics.jsonl",
+                    )
+                )
+            )
+            self._oracle_place_diagnostics = OraclePlaceDiagnosticsWriter(
+                oracle_diagnostics_path,
+                metadata={
+                    "method": "v1.4_oracle_task_memory",
+                    "dataset": (
+                        "hm3d"
+                        if "hm3d" in config.habitat.dataset.data_path
+                        else "mp3d"
+                    ),
+                    "seed": int(config.habitat.seed),
+                    "run_id": os.environ.get(
+                        "ASCENT_VO_RUN_ID", "unrecorded"
+                    ),
+                    "gt_policy_isolation": True,
+                    "policy_event_fields": [
+                        "event_sequence",
+                        "reference_submap_id",
+                    ],
+                    "oracle_config": {
+                        key: getattr(oracle_config, key)
+                        for key in oracle_config.__dataclass_fields__
+                    },
+                },
+            )
         # 环境 reset：取得第一帧 observation 这是 episode 真正开始的位置。 1. Habitat 原始 observation
         observations = self.envs.reset()
         self._vo_pose_provider.reset_batch(observations)
@@ -361,6 +473,7 @@ class AscentTrainer(PPOTrainer):
                 raise
             for i, pose_update in enumerate(pose_updates):
                 vo_action_steps[i] += 1
+                completed_action_steps = vo_action_steps[i]
                 gt_pose = infos[i].pop("gt_start_aligned_pose", None)
                 self._vo_diagnostics.record_step(
                     dataset=vo_dataset,
@@ -380,6 +493,56 @@ class AscentTrainer(PPOTrainer):
                         action_steps=vo_action_steps[i],
                         native_metrics=extract_scalars_from_info(infos[i]),
                     )
+                if self._same_place_oracle is not None:
+                    assert self._oracle_place_diagnostics is not None
+                    if dones[i]:
+                        self._oracle_place_diagnostics.record(
+                            {
+                                "record_type": "oracle_place_episode_end",
+                                "dataset": vo_dataset,
+                                "scene_id": current_episodes_info[i].scene_id,
+                                "episode_id": str(
+                                    current_episodes_info[i].episode_id
+                                ),
+                                "env": i,
+                                "action_steps": completed_action_steps,
+                            }
+                        )
+                        self._same_place_oracle.reset(i)
+                    else:
+                        if gt_pose is None:
+                            raise RuntimeError(
+                                "same-place oracle requires isolated evaluation "
+                                "pose on every non-terminal action"
+                            )
+                        policy_info = action_data.policy_info[i]
+                        submap_id = policy_info.get(
+                            "submap_id_after_action"
+                        )
+                        if not submap_id:
+                            raise RuntimeError(
+                                "same-place oracle missing post-action submap id"
+                            )
+                        oracle_observation = self._same_place_oracle.observe(
+                            env=i,
+                            dataset=vo_dataset,
+                            scene_id=current_episodes_info[i].scene_id,
+                            episode_id=str(
+                                current_episodes_info[i].episode_id
+                            ),
+                            action_step=vo_action_steps[i],
+                            gt_pose=gt_pose,
+                            vo_pose=pose_update.pose_after,
+                            current_submap_id=str(submap_id),
+                        )
+                        self._oracle_place_diagnostics.record(
+                            oracle_observation.diagnostic
+                        )
+                        for policy_event in oracle_observation.policy_events:
+                            self._agent.actor_critic.queue_oracle_same_place_event(
+                                i, policy_event
+                            )
+                if dones[i]:
                     vo_action_steps[i] = 0
             self._vo_pose_provider.inject_estimated_pose(observations)
             
@@ -585,4 +748,6 @@ class AscentTrainer(PPOTrainer):
             writer.add_scalar(f"eval_metrics/{k}", v, step_id)
 
         self._vo_diagnostics.close()
+        if self._oracle_place_diagnostics is not None:
+            self._oracle_place_diagnostics.close()
         self.envs.close()

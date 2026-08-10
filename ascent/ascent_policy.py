@@ -39,6 +39,9 @@ from ascent.submaps import (
     BoundaryHandoff,
     DepthGeometryFrame,
     ExhaustionRecovery,
+    OracleSamePlaceEvent,
+    PlaceConditionedResidualMemory,
+    PlaceMemoryConfig,
     SubmapDiagnosticsWriter,
     SubmapLifecycleConfig,
     SubmapManager,
@@ -72,6 +75,16 @@ def _submap_config_value(config: DictConfig, key: str, default: Any) -> Any:
     )
 
 
+def _place_memory_config_value(
+    config: DictConfig, key: str, default: Any
+) -> Any:
+    if config is None:
+        return default
+    return OmegaConf.select(
+        config, f"ascent_place_memory.{key}", default=default
+    )
+
+
 def _as_config_bool(value: Any, key: str) -> bool:
     if isinstance(value, bool):
         return value
@@ -84,6 +97,22 @@ def _as_config_bool(value: Any, key: str) -> bool:
     if isinstance(value, (int, np.integer)) and value in (0, 1):
         return bool(value)
     raise ValueError(f"ascent_submaps.{key} must be boolean, got {value!r}")
+
+
+def _as_place_config_bool(value: Any, key: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off", ""}:
+            return False
+    if isinstance(value, (int, np.integer)) and value in (0, 1):
+        return bool(value)
+    raise ValueError(
+        f"ascent_place_memory.{key} must be boolean, got {value!r}"
+    )
 
 @baseline_registry.register_policy
 class Ascent_Policy(HabitatMixin, ITMPolicyV2):
@@ -290,6 +319,56 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 "ASCENT submap continuity features require "
                 "ascent_submaps.enabled=true"
             )
+        self._place_memory_config = PlaceMemoryConfig(
+            enabled=_as_place_config_bool(
+                _place_memory_config_value(config, "enabled", False),
+                "enabled",
+            ),
+            low_gain_area_m2=float(
+                _place_memory_config_value(
+                    config, "low_gain_area_m2", 0.5
+                )
+            ),
+            shadow_low_gain_area_m2=float(
+                _place_memory_config_value(
+                    config, "shadow_low_gain_area_m2", 1.0
+                )
+            ),
+            branch_association_radius_m=float(
+                _place_memory_config_value(
+                    config, "branch_association_radius_m", 0.5
+                )
+            ),
+            branch_match_radius_m=float(
+                _place_memory_config_value(
+                    config, "branch_match_radius_m", 1.0
+                )
+            ),
+            branch_match_margin_m=float(
+                _place_memory_config_value(
+                    config, "branch_match_margin_m", 0.25
+                )
+            ),
+            persistent_frontier_observations=int(
+                _place_memory_config_value(
+                    config, "persistent_frontier_observations", 2
+                )
+            ),
+        )
+        if self._place_memory_config.enabled and not self._submap_enabled:
+            raise RuntimeError(
+                "place-conditioned memory requires ascent_submaps.enabled=true"
+            )
+        self._place_memory = (
+            PlaceConditionedResidualMemory(
+                self._num_envs, self._place_memory_config
+            )
+            if self._place_memory_config.enabled
+            else None
+        )
+        self._pending_oracle_place_events: List[
+            List[OracleSamePlaceEvent]
+        ] = [[] for _ in range(self._num_envs)]
         allow_provisional = _as_config_bool(
             _submap_config_value(
                 config, "allow_provisional_thresholds", False
@@ -380,7 +459,9 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     "pose_source": "zhao_rgbd_2021",
                     "policy_gt_isolation": True,
                     "method_version": (
-                        "submap_v1.2"
+                        "submap_v1.4_oracle_task_memory"
+                        if self._place_memory is not None
+                        else "submap_v1.2"
                         if (
                             self._submap_handoff_enabled
                             or self._submap_exhaustion_recovery_enabled
@@ -396,6 +477,16 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     "continuity_contract": (
                         "single_connected_handoff_and_one_shot_360_recovery"
                     ),
+                    "place_memory_enabled": self._place_memory is not None,
+                    "place_memory_contract": (
+                        "opaque_same_place_identity_then_vo_branch_query"
+                        if self._place_memory is not None
+                        else None
+                    ),
+                    "place_memory_config": {
+                        key: getattr(self._place_memory_config, key)
+                        for key in self._place_memory_config.__dataclass_fields__
+                    },
                     "config": {
                         key: getattr(self._submap_config, key)
                         for key in self._submap_config.__dataclass_fields__
@@ -452,6 +543,9 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             self._submap_depth_frames[env] = []
             self._submap_handoff[env] = None
             self._submap_exhaustion_recovery[env] = ExhaustionRecovery()
+            if self._place_memory is not None:
+                self._place_memory.reset(env)
+                self._pending_oracle_place_events[env] = []
             self.llm_planner.reset_submap_local_state(env)
             if self._submap_diagnostics is not None:
                 self._submap_diagnostics.record_episode_reset(
@@ -589,6 +683,12 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     ),
                 }
             )
+        if getattr(self, "_place_memory", None) is not None:
+            policy_info["place_memory"] = self._place_memory.trace(env)
+            if "place_rerank" in self._observations_cache[env]:
+                policy_info["place_rerank"] = dict(
+                    self._observations_cache[env]["place_rerank"]
+                )
 
         # 若不需要可视化,直接返回
         if not self._visualize:
@@ -683,6 +783,8 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 print(e)
                 print("Reached edge of map, stopping.")
                 raise StopIteration
+            if getattr(self, "_place_memory", None) is not None:
+                self._apply_oracle_place_events(env)
             self._policy_info.append({})
 
     def _get_target_object_location(self, position: np.ndarray, env: int = 0) -> Union[None, np.ndarray]:
@@ -795,6 +897,91 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     event=event,
                 )
         self._submap_event_cursor[env] = len(events)
+
+    def queue_oracle_same_place_event(
+        self, env: int, event: OracleSamePlaceEvent
+    ) -> None:
+        """Sealed trainer-to-policy boundary for same-place identity only."""
+
+        if getattr(self, "_place_memory", None) is None:
+            raise RuntimeError("oracle event received while place memory is disabled")
+        if type(event) is not OracleSamePlaceEvent:
+            raise TypeError("policy accepts only OracleSamePlaceEvent")
+        self._pending_oracle_place_events[int(env)].append(event)
+
+    def _flush_place_memory_events(self, env: int) -> None:
+        if getattr(self, "_place_memory", None) is None:
+            return
+        for event in self._place_memory.drain_events(env):
+            name = str(event.pop("event"))
+            self._record_submap_policy_event(env, name, **event)
+
+    def _apply_oracle_place_events(self, env: int) -> None:
+        if getattr(self, "_place_memory", None) is None:
+            return
+        pending = self._pending_oracle_place_events[env]
+        if not pending:
+            return
+        active = self._submap_manager.active_bundle(env)
+        graph = self._submap_manager.graph(env)
+        for event in pending:
+            self._place_memory.accept_oracle_event(
+                env=env,
+                event=event,
+                current_submap_id=active.submap_id,
+                graph=graph,
+                step=self._num_steps[env],
+            )
+        self._pending_oracle_place_events[env] = []
+        self._flush_place_memory_events(env)
+
+    def _place_memory_stair_presence(self, env: int) -> Tuple[bool, bool]:
+        obstacle = self._map_controller._obstacle_map[env]
+        return (
+            bool(obstacle._has_up_stair or len(obstacle._up_stair_frontiers)),
+            bool(
+                obstacle._has_down_stair
+                or len(obstacle._down_stair_frontiers)
+            ),
+        )
+
+    def _observe_place_memory(self, env: int) -> None:
+        if getattr(self, "_place_memory", None) is None:
+            return
+        active = self._submap_manager.active_bundle(env)
+        obstacle = self._map_controller._obstacle_map[env]
+        target = self._map_controller._target_object[env]
+        up_present, down_present = self._place_memory_stair_presence(env)
+        self._place_memory.observe(
+            env=env,
+            target=target,
+            source_submap_id=active.submap_id,
+            floor_id=active.floor_id,
+            step=self._num_steps[env],
+            robot_xy=self._observations_cache[env]["robot_xy"],
+            obstacle_map=obstacle,
+            target_present=self._map_controller._object_map[env].has_object(
+                target
+            ),
+            up_stair_present=up_present,
+            down_stair_present=down_present,
+            frontiers=self._observations_cache[env]["frontier_sensor"],
+            arrival_radius_m=self._pointnav_stop_radius,
+        )
+        self._flush_place_memory_events(env)
+
+    def _interrupt_place_attempt(self, env: int, reason: str) -> None:
+        """Settle a local search attempt before another policy mode owns control."""
+
+        if getattr(self, "_place_memory", None) is None:
+            return
+        self._place_memory.interrupt_active(
+            env=env,
+            reason=str(reason),
+            step=self._num_steps[env],
+            obstacle_map=self._map_controller._obstacle_map[env],
+        )
+        self._flush_place_memory_events(env)
 
     def _record_submap_policy_event(
         self, env: int, event: str, **payload: object
@@ -1160,6 +1347,12 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
             old_bundle.payload, frontiers
         )
         if recovery_requested or decision.should_split:
+            self._interrupt_place_attempt(
+                env,
+                "submap_exhaustion_boundary"
+                if recovery_requested
+                else "submap_lifecycle_boundary",
+            )
             self._snapshot_submap_policy_state(env, old_bundle)
             new_payload = self._map_controller.create_empty_map_payload(
                 allow_step_zero_frontier_projection=True
@@ -1677,6 +1870,9 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
         self._map_controller._update_obstacle_map(self._observations_cache, self.red_semantic_pred_list, self._pitch_angle) # observations
         self._map_controller._update_value_map(self._observations_cache)
         self._map_controller._update_distance_on_object_map(self._observations_cache)
+        if getattr(self, "_place_memory", None) is not None:
+            for env in range(self._num_envs):
+                self._observe_place_memory(env)
         
         pointnav_action_env_list = []
 
@@ -1907,6 +2103,10 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 "submap_exhaustion_recovery_request", False
             ):
                 mode = "exhaustion_recovery_scan_start"
+            if not mode.startswith("explore"):
+                self._interrupt_place_attempt(
+                    env, f"policy_mode_changed:{mode}"
+                )
             self._observations_cache[env]["policy_mode"] = mode
 
             if pointnav_action is None:
@@ -1941,6 +2141,7 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     print("Continuous forward to force turn right.")
 
             if self._num_steps[env] == self.max_episode_steps - 1:
+                self._interrupt_place_attempt(env, "episode_action_limit")
                 action_numpy = 0
                 pointnav_action = torch.tensor([[action_numpy]], dtype=torch.int64, device=masks.device)
                 print("Force stop.")
@@ -1961,6 +2162,17 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 self._finish_submap_action(
                     env=env,
                     action_step=self._num_steps[env] - 1,
+                )
+                active_after_action = self._submap_manager.active_bundle(env)
+                self._policy_info[env].update(
+                    {
+                        "submap_id_after_action": (
+                            active_after_action.submap_id
+                        ),
+                        "submap_floor_id_after_action": int(
+                            active_after_action.floor_id
+                        ),
+                    }
                 )
 
             self._observations_cache[env] = {}
@@ -1993,6 +2205,14 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
 
         # 场景一：当前楼层没有有效 Frontier (包括初始为全零或列表为空的情况)
         if np.array_equal(frontiers, np.zeros((1, 2))) or len(frontiers) == 0:
+            if getattr(self, "_place_memory", None) is not None:
+                self._place_memory.interrupt_active(
+                    env=env,
+                    reason="no_live_local_frontier",
+                    step=self._num_steps[env],
+                    obstacle_map=self._map_controller._obstacle_map[env],
+                )
+                self._flush_place_memory_events(env)
             # 如果还没有初始化过，并且在该楼层步数很短，并且有没探索过的高层或者低层并且没有找到对应的楼梯，如果在楼梯间且未探索完（防止卡在楼梯间），尝试重置并初始化.
             if not self._map_controller._obstacle_map[env]._reinitialize_flag and \
                self._map_controller._obstacle_map[env]._floor_num_steps < 50 and \
@@ -2028,6 +2248,39 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
 
         # 场景二：当前楼层有有效 Frontier，使用 LLM 规划器选择最佳 Frontier
         else:
+            place_rerank_decision = None
+
+            def place_candidate_arbitrator(
+                base_frontier: np.ndarray,
+                base_value: float,
+                sorted_frontiers: np.ndarray,
+                sorted_values: List[float],
+            ) -> Tuple[np.ndarray, float]:
+                nonlocal place_rerank_decision
+                if (
+                    getattr(self, "_place_memory", None) is None
+                    or base_value in {-100.0, -200.0}
+                ):
+                    return base_frontier, base_value
+                active = self._submap_manager.active_bundle(env)
+                place_rerank_decision = self._place_memory.arbitrate(
+                    env=env,
+                    target=self._map_controller._target_object[env],
+                    active=active,
+                    graph=self._submap_manager.graph(env),
+                    base_frontier=base_frontier,
+                    base_value=base_value,
+                    sorted_frontiers=sorted_frontiers,
+                    sorted_values=sorted_values,
+                    topk=self.topk,
+                    step=self._num_steps[env],
+                )
+                self._flush_place_memory_events(env)
+                return (
+                    place_rerank_decision.final_frontier,
+                    place_rerank_decision.final_value,
+                )
+
             best_frontier, best_value = self.llm_planner._get_best_frontier_with_llm(
                 self._observations_cache, self._map_controller._obstacle_map, self._map_controller._value_map, self._map_controller._object_map,
                 self._map_controller._obstacle_map_list, self._map_controller._value_map_list, self._map_controller._object_map_list,
@@ -2035,20 +2288,70 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 cur_floor_index=self._map_controller._cur_floor_index, num_steps=self._num_steps,
                 last_frontier_distance=self._last_frontier_distance,
                 frontier_stick_step=self._map_controller._frontier_stick_step,
+                candidate_arbitrator=(
+                    place_candidate_arbitrator
+                    if getattr(self, "_place_memory", None) is not None
+                    else None
+                ),
             )
 
             # LLM 判断上楼或下楼的保底机制
             if best_value == -100: # LLM 判断上楼
                 action = self._navigate_stair_if_unexplored_floor(observations, env, 'up')
-                if action: return action
+                if action is not None:
+                    self._interrupt_place_attempt(env, "llm_selected_upstairs")
+                    return action
                 print(f"Environment {env}: Can't go upstairs or have already fully explored upstairs, exploring current floor instead.")
             elif best_value == -200: # LLM 判断下楼
                 action = self._navigate_stair_if_unexplored_floor(observations, env, 'down')
-                if action: return action
+                if action is not None:
+                    self._interrupt_place_attempt(env, "llm_selected_downstairs")
+                    return action
                 print(f"Environment {env}: Can't go downstairs or have already fully explored downstairs, exploring current floor instead.")
             
             # 执行点导航到最佳 Frontier
             self.cur_frontier[env] = best_frontier
+            if getattr(self, "_place_memory", None) is not None:
+                active = self._submap_manager.active_bundle(env)
+                target = self._map_controller._target_object[env]
+                up_present, down_present = self._place_memory_stair_presence(env)
+                self._place_memory.register_selection(
+                    env=env,
+                    target=target,
+                    source_submap_id=active.submap_id,
+                    floor_id=active.floor_id,
+                    selected_frontier=best_frontier,
+                    step=self._num_steps[env],
+                    obstacle_map=self._map_controller._obstacle_map[env],
+                    robot_xy=self._observations_cache[env]["robot_xy"],
+                    target_present=self._map_controller._object_map[
+                        env
+                    ].has_object(target),
+                    up_stair_present=up_present,
+                    down_stair_present=down_present,
+                    frontiers=frontiers,
+                )
+                if tuple(best_frontier) in self._map_controller._obstacle_map[
+                    env
+                ]._disabled_frontiers:
+                    self._place_memory.mark_execution_failure(
+                        env=env,
+                        reason="frontier_disabled_by_original_planner",
+                        step=self._num_steps[env],
+                        obstacle_map=self._map_controller._obstacle_map[env],
+                    )
+                self._flush_place_memory_events(env)
+                if place_rerank_decision is not None:
+                    self._observations_cache[env]["place_rerank"] = {
+                        "changed": place_rerank_decision.changed,
+                        "reason": place_rerank_decision.reason,
+                        "base_frontier": (
+                            place_rerank_decision.base_frontier.tolist()
+                        ),
+                        "final_frontier": (
+                            place_rerank_decision.final_frontier.tolist()
+                        ),
+                    }
             pointnav_action = self._pointnav(observations, self.cur_frontier[env], stop=False, env=env, stop_radius=self._pointnav_stop_radius)
             
             # 如果点导航动作是停止（0），则强制前进（1），以避免卡死

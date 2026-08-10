@@ -1,4 +1,4 @@
-from typing import Dict, Tuple, Any, Union, List
+from typing import Callable, Dict, Tuple, Any, Union, List, Optional
 import numpy as np
 import cv2
 import os
@@ -82,6 +82,12 @@ class Ascent_LLM_Planner:
             num_steps: List[int] = [1],
             last_frontier_distance: List[float] = [1],
             frontier_stick_step: List[int] = [1],
+            candidate_arbitrator: Optional[
+                Callable[
+                    [np.ndarray, float, np.ndarray, List[float]],
+                    Tuple[np.ndarray, float],
+                ]
+            ] = None,
         ) -> Tuple[np.ndarray, float]:
             """Returns the best frontier and its value based on self._value_map.
 
@@ -122,6 +128,37 @@ class Ascent_LLM_Planner:
             if best_frontier is None:
                 best_frontier, best_value = self._decide_frontier_with_llm(obstacle_map, object_map, sorted_pts, sorted_values, env, topk, use_multi_floor, 
                                                                            floor_num, cur_floor_index, num_steps,obstacle_map_list,object_map_list)
+
+            # A task-memory caller may arbitrate only after the unchanged
+            # ASCENT decision exists, but before sticky/disable state is
+            # committed.  The callback receives copies and must return one of
+            # the already-live candidates; it cannot create a goal or action.
+            if candidate_arbitrator is not None and best_value not in {
+                -100.0,
+                -200.0,
+            }:
+                arbitrated_frontier, arbitrated_value = candidate_arbitrator(
+                    np.asarray(best_frontier, dtype=np.float64).copy(),
+                    float(best_value),
+                    np.asarray(sorted_pts, dtype=np.float64).copy(),
+                    list(map(float, sorted_values)),
+                )
+                arbitrated_frontier = np.asarray(
+                    arbitrated_frontier, dtype=np.float64
+                )
+                if (
+                    arbitrated_frontier.shape != (2,)
+                    or not np.isfinite(arbitrated_frontier).all()
+                    or not any(
+                        np.array_equal(arbitrated_frontier, candidate)
+                        for candidate in sorted_pts
+                    )
+                ):
+                    raise RuntimeError(
+                        "candidate arbitration returned a non-live frontier"
+                    )
+                best_frontier = arbitrated_frontier
+                best_value = float(arbitrated_value)
 
             # 5. 处理前沿点粘滞/循环检测和禁用
             # 这一部分逻辑相对独立且复杂，可以封装
