@@ -22,6 +22,7 @@ ALLOWED_CHANGED_PATHS = frozenset(
         "scripts/run_vpr_shadow_association.py",
         "scripts/run_vpr_shadow_offline_batch.py",
         "scripts/rescore_vpr_shadow_batch.py",
+        "scripts/score_vpr_shadow_gt.py",
         "scripts/validate_vpr_shadow_capture.py",
         "scripts/vpr_shadow_capture_gate.py",
         "scripts/vpr_shadow_data.py",
@@ -29,6 +30,7 @@ ALLOWED_CHANGED_PATHS = frozenset(
         "tests/test_vpr_shadow_capture_gate.py",
         "tests/test_vpr_shadow_data.py",
         "tests/test_vpr_shadow_offline_batch.py",
+        "tests/test_score_vpr_shadow_gt.py",
     }
 )
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
