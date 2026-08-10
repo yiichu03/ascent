@@ -28,7 +28,9 @@ except ImportError:  # imported as scripts.score_vpr_shadow_gt in tests
     )
 
 
-LABELED_SCHEMA = "ascent_v1_4_vpr_shadow_gt_labeled_candidates_v1"
+LABELED_SCHEMA = "ascent_v1_4_vpr_shadow_gt_labeled_candidates_v2"
+SUMMARY_SCHEMA = "ascent_v1_4_vpr_shadow_gt_score_summary_v2"
+EPISODE_JOIN_CONTRACT = "capture_sequence_to_logical_to_runtime_v1"
 RETURN_RADIUS_M = 0.75
 SAME_FLOOR_HEIGHT_M = 0.75
 MIN_GAP_STEPS = 30
@@ -41,6 +43,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vo-diagnostics", type=Path, required=True)
     parser.add_argument("--submap-diagnostics", type=Path, required=True)
     parser.add_argument("--episode-identity", type=Path, required=True)
+    parser.add_argument("--capture-episodes", type=Path, required=True)
+    parser.add_argument("--chunk-id", required=True)
     parser.add_argument("--split-manifest", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     return parser.parse_args()
@@ -80,6 +84,50 @@ def _gt_tracks(path: Path) -> dict[int, dict[int, np.ndarray]]:
             raise ValueError(f"duplicate GT action step e{episode}/s{step}")
         tracks[episode][step] = value
     return {episode: dict(values) for episode, values in tracks.items()}
+
+
+def _sequence_runtime_map(
+    *,
+    capture_rows: Sequence[Mapping[str, Any]],
+    chunk_id: str,
+    identities: Mapping[int, Mapping[str, str]],
+    tracks: Mapping[int, Mapping[int, np.ndarray]],
+    graphs: Mapping[int, EpisodeGraph],
+) -> dict[int, int]:
+    """Join asynchronous policy sequence IDs to Habitat runtime IDs."""
+
+    rows = [row for row in capture_rows if str(row.get("chunk_id")) == chunk_id]
+    logical_to_runtime = {
+        str(identity["logical_case_id"]): int(runtime)
+        for runtime, identity in identities.items()
+    }
+    if not rows or len(rows) != len(identities):
+        raise ValueError("capture episode join does not cover the scored unit")
+    output: dict[int, int] = {}
+    seen_runtime: set[int] = set()
+    for row in rows:
+        logical_id = str(row["logical_case_id"])
+        if logical_id not in logical_to_runtime:
+            raise ValueError("capture episode logical identity is absent")
+        sequence = int(row["episode_sequence"])
+        runtime = logical_to_runtime[logical_id]
+        if sequence in output or runtime in seen_runtime:
+            raise ValueError("capture episode join is not one-to-one")
+        if sequence not in graphs or runtime not in tracks:
+            raise ValueError("capture episode join misses graph or GT track")
+        action_count = int(row["action_count"])
+        graph_steps = set(graphs[sequence].submap_by_step)
+        track_steps = set(tracks[runtime])
+        if (
+            graph_steps != set(range(action_count))
+            or track_steps != set(range(1, action_count + 1))
+        ):
+            raise ValueError("capture episode join action-count mismatch")
+        output[sequence] = runtime
+        seen_runtime.add(runtime)
+    if set(output) != set(graphs) or seen_runtime != set(tracks):
+        raise ValueError("capture episode join leaves unmatched identities")
+    return output
 
 
 def _candidate_label(
@@ -185,17 +233,36 @@ def main() -> int:
     identities = _identity(args.episode_identity)
     tracks = _gt_tracks(args.vo_diagnostics)
     graphs = load_submap_graphs(args.submap_diagnostics)
+    capture_rows = read_jsonl(args.capture_episodes)
     split = json.loads(args.split_manifest.read_text(encoding="utf-8"))
     allowed_ids = {
         str(row["logical_case_id"]) for row in split.get("episodes", [])
     }
     if not identities or set(identities) != set(tracks):
         raise ValueError("identity and GT episode sets differ")
-    if not set(identities).issubset(graphs):
-        raise ValueError("submap diagnostics miss an evaluated episode")
+    if len(identities) != len(graphs):
+        raise ValueError("submap and runtime episode counts differ")
     for runtime, identity in identities.items():
         if identity["logical_case_id"] not in allowed_ids:
             raise ValueError("captured episode is outside the frozen split role")
+    for row in capture_rows:
+        if str(row.get("chunk_id")) != str(args.chunk_id):
+            continue
+        expected_paths = {
+            "vo_diagnostics": args.vo_diagnostics,
+            "submap_diagnostics": args.submap_diagnostics,
+            "identity_path": args.episode_identity,
+        }
+        for key, expected in expected_paths.items():
+            if Path(str(row.get(key, ""))).resolve() != expected.resolve():
+                raise ValueError(f"capture episode {key} differs from scored unit")
+    sequence_to_runtime = _sequence_runtime_map(
+        capture_rows=capture_rows,
+        chunk_id=str(args.chunk_id),
+        identities=identities,
+        tracks=tracks,
+        graphs=graphs,
+    )
 
     by_event: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in candidates:
@@ -208,9 +275,12 @@ def main() -> int:
         rows.sort(key=lambda row: int(row["retrieval_rank"]))
         exemplar = rows[0]
         sequence = int(exemplar["episode_sequence"])
+        if sequence not in sequence_to_runtime:
+            raise ValueError("raw event has no capture episode identity join")
+        runtime = sequence_to_runtime[sequence]
         graph = graphs[sequence]
-        track = tracks[sequence]
-        identity = identities[sequence]
+        track = tracks[runtime]
+        identity = identities[runtime]
         query_steps = [int(value) for value in exemplar["query_frame_steps"]]
         eligible = _eligible_candidate_ids(
             query_submap_id=str(exemplar["query_submap_id"]),
@@ -286,6 +356,9 @@ def main() -> int:
                         args.submap_diagnostics
                     ),
                     "episode_identity_sha256": sha256(args.episode_identity),
+                    "capture_episodes_sha256": sha256(args.capture_episodes),
+                    "episode_join_contract": EPISODE_JOIN_CONTRACT,
+                    "chunk_id": str(args.chunk_id),
                     "split_manifest_sha256": sha256(args.split_manifest),
                     "thresholds": {
                         "return_radius_m": RETURN_RADIUS_M,
@@ -306,7 +379,7 @@ def main() -> int:
             stream.write(json.dumps(row, sort_keys=True, allow_nan=False) + "\n")
     exposure_events = [row for row in event_rows if row["gt_revisit_exposure"]]
     summary = {
-        "schema": "ascent_v1_4_vpr_shadow_gt_score_summary_v1",
+        "schema": SUMMARY_SCHEMA,
         "technical_status": "PASS",
         "retriever": raw_metadata["retriever"],
         "candidate_count": len(labeled_rows),
@@ -326,6 +399,8 @@ def main() -> int:
         ),
         "labeled_candidates_sha256": sha256(labeled_path),
         "events_sha256": sha256(events_path),
+        "capture_episodes_sha256": sha256(args.capture_episodes),
+        "episode_join_contract": EPISODE_JOIN_CONTRACT,
     }
     with (output_dir / "summary.json").open("x", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2, sort_keys=True)

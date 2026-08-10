@@ -185,6 +185,7 @@ def merge_scored_units(
     events: list[dict[str, Any]] = []
     source_records = []
     thresholds: Mapping[str, Any] | None = None
+    capture_episodes_hash: str | None = None
     covered: list[str] = []
     for unit in scored_units:
         score_dir = Path(str(unit["score_dir"])).resolve()
@@ -198,14 +199,18 @@ def merge_scored_units(
         metadata = labeled[0]
         if (
             metadata.get("schema")
-            != "ascent_v1_4_vpr_shadow_gt_labeled_candidates_v1"
+            != "ascent_v1_4_vpr_shadow_gt_labeled_candidates_v2"
             or metadata.get("evaluation_only_gt") is not True
             or metadata.get("runtime_policy_access") is not False
             or metadata.get("split_manifest_sha256") != split_hash
             or metadata.get("retriever") != retriever
             or summary.get("schema")
-            != "ascent_v1_4_vpr_shadow_gt_score_summary_v1"
+            != "ascent_v1_4_vpr_shadow_gt_score_summary_v2"
             or summary.get("technical_status") != "PASS"
+            or metadata.get("episode_join_contract")
+            != "capture_sequence_to_logical_to_runtime_v1"
+            or summary.get("episode_join_contract")
+            != "capture_sequence_to_logical_to_runtime_v1"
         ):
             raise ValueError(f"unit scorer contract mismatch: {score_dir}")
         unit_ids = [str(value) for value in unit["logical_case_ids"]]
@@ -216,6 +221,10 @@ def merge_scored_units(
             thresholds = dict(metadata["thresholds"])
         elif dict(metadata["thresholds"]) != dict(thresholds):
             raise ValueError("GT scorer threshold drift across units")
+        if capture_episodes_hash is None:
+            capture_episodes_hash = str(metadata["capture_episodes_sha256"])
+        elif str(metadata["capture_episodes_sha256"]) != capture_episodes_hash:
+            raise ValueError("capture episode provenance drift across units")
         unit_candidates = [
             row for row in labeled[1:]
             if row.get("record_type") == "vpr_shadow_candidate"
@@ -285,12 +294,14 @@ def merge_scored_units(
             json.dumps(
                 {
                     "record_type": "vpr_shadow_gt_metadata",
-                    "schema": "ascent_v1_4_vpr_shadow_gt_labeled_candidates_v1",
+                    "schema": "ascent_v1_4_vpr_shadow_gt_labeled_candidates_v2",
                     "evaluation_only_gt": True,
                     "runtime_policy_access": False,
                     "retriever": retriever,
                     "split_manifest_sha256": split_hash,
                     "thresholds": dict(thresholds or {}),
+                    "capture_episodes_sha256": capture_episodes_hash,
+                    "episode_join_contract": "capture_sequence_to_logical_to_runtime_v1",
                     "merged_unit_count": len(scored_units),
                     "source_units": source_records,
                 },
@@ -306,7 +317,7 @@ def merge_scored_units(
             stream.write(json.dumps(row, sort_keys=True, allow_nan=False) + "\n")
     exposed = [row for row in events if row["gt_revisit_exposure"]]
     summary = {
-        "schema": "ascent_v1_4_vpr_shadow_merged_score_summary_v1",
+        "schema": "ascent_v1_4_vpr_shadow_merged_score_summary_v2",
         "technical_status": "PASS",
         "dataset": split["dataset"],
         "role": split["role"],
@@ -332,6 +343,8 @@ def merge_scored_units(
         "labeled_candidates_sha256": sha256(labeled_path),
         "events_sha256": sha256(events_path),
         "split_manifest_sha256": split_hash,
+        "capture_episodes_sha256": capture_episodes_hash,
+        "episode_join_contract": "capture_sequence_to_logical_to_runtime_v1",
     }
     with (output_dir / "summary.json").open("x", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2, sort_keys=True)
@@ -433,6 +446,10 @@ def main() -> int:
             str(unit["submap_diagnostics"]),
             "--episode-identity",
             str(unit["identity_path"]),
+            "--capture-episodes",
+            str(episodes_path),
+            "--chunk-id",
+            str(unit["chunk_id"]),
             "--split-manifest",
             str(split_path),
             "--output-dir",

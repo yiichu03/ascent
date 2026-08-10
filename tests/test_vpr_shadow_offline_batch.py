@@ -47,9 +47,11 @@ def _score_unit(
     }
     metadata = {
         "record_type": "vpr_shadow_gt_metadata",
-        "schema": "ascent_v1_4_vpr_shadow_gt_labeled_candidates_v1",
+        "schema": "ascent_v1_4_vpr_shadow_gt_labeled_candidates_v2",
         "evaluation_only_gt": True,
         "runtime_policy_access": False,
+        "episode_join_contract": "capture_sequence_to_logical_to_runtime_v1",
+        "capture_episodes_sha256": "capture-episodes-hash",
         "retriever": "mixvpr",
         "split_manifest_sha256": split_hash,
         "thresholds": {"return_radius_m": 0.75},
@@ -68,8 +70,9 @@ def _score_unit(
     (root / "summary.json").write_text(
         json.dumps(
             {
-                "schema": "ascent_v1_4_vpr_shadow_gt_score_summary_v1",
+                "schema": "ascent_v1_4_vpr_shadow_gt_score_summary_v2",
                 "technical_status": "PASS",
+                "episode_join_contract": "capture_sequence_to_logical_to_runtime_v1",
                 "candidate_count": 1,
                 "query_event_count": 1,
                 "evaluated_episode_count": 1,
@@ -171,6 +174,8 @@ def test_offline_pbs_is_hash_bound_and_calibration_staged() -> None:
     assert "OFFLINE_SOURCE_COMMIT" in runner
     assert batch.index("# Pass 1:") < batch.index("# Pass 2:")
     assert "locked test association requires a frozen Cal50 PASS file" in batch
+    assert '"--capture-episodes"' in batch
+    assert '"--chunk-id"' in batch
 
 
 def test_post_capture_compatibility_scope_excludes_runtime_policy() -> None:
