@@ -500,6 +500,7 @@ def test_same_place_identity_requires_matched_repeat_low_gain_before_rerank() ->
         sorted_values=[0.9, 0.8, 0.7],
         topk=3,
         step=45,
+        obstacle_map=FakeObstacleMap(),
     )
     assert not first_revisit.changed
     assert first_revisit.base_status == SearchBranchStatus.UNRESOLVED.value
@@ -525,7 +526,7 @@ def test_same_place_identity_requires_matched_repeat_low_gain_before_rerank() ->
     assert memory.active_attempt(0).historical_branch_ids == (
         historical.branch_id,
     )
-    for step in (55, 56):
+    for step in (55, 56, 57):
         assert (
             memory.observe(
                 env=0,
@@ -549,7 +550,7 @@ def test_same_place_identity_requires_matched_repeat_low_gain_before_rerank() ->
         source_submap_id="submap-c",
         floor_id=0,
         selected_frontier=frontiers[1],
-        step=57,
+        step=58,
         obstacle_map=obstacle,
         robot_xy=frontiers[0],
         target_present=False,
@@ -565,7 +566,7 @@ def test_same_place_identity_requires_matched_repeat_low_gain_before_rerank() ->
     ]
     assert consumed_events
     assert all(
-        item["last_arrival_observations"] >= 2
+        item["last_arrival_observations"] >= 3
         and item["last_start_robot_distance_m"] >= 1.4
         and item["reason"] == "matched_repeat_low_gain_excursion"
         for item in consumed_events
@@ -582,6 +583,7 @@ def test_same_place_identity_requires_matched_repeat_low_gain_before_rerank() ->
         sorted_values=[0.9, 0.8, 0.7],
         topk=3,
         step=60,
+        obstacle_map=obstacle,
     )
     assert decision.changed
     assert decision.reason == "consumed_to_residual"
@@ -598,9 +600,227 @@ def test_same_place_identity_requires_matched_repeat_low_gain_before_rerank() ->
         sorted_values=[0.9],
         topk=3,
         step=46,
+        obstacle_map=obstacle,
     )
     assert not no_alternative.changed
     assert no_alternative.reason == "no_live_residual_alternative"
+
+
+def test_live_repeat_low_gain_is_settled_inside_the_decision_window() -> None:
+    graph, current = _three_node_graph()
+    memory = _enabled_memory()
+    assert _finish_branch(
+        memory, FakeObstacleMap()
+    ) is SearchBranchStatus.UNRESOLVED
+    historical = memory.branches(0)[0]
+    assert memory.accept_oracle_event(
+        env=0,
+        event=OracleSamePlaceEvent(1, "submap-a"),
+        current_submap_id="submap-c",
+        graph=graph,
+        step=40,
+    )
+    obstacle = FakeObstacleMap()
+    frontiers = np.asarray([[2.0, 0.0], [4.0, 0.0], [5.0, 0.0]])
+    initial = memory.arbitrate(
+        env=0,
+        target="chair",
+        active=current,
+        graph=graph,
+        base_frontier=frontiers[0],
+        base_value=0.9,
+        sorted_frontiers=frontiers,
+        sorted_values=[0.9, 0.8, 0.7],
+        topk=3,
+        step=45,
+        obstacle_map=obstacle,
+    )
+    assert not initial.changed
+    memory.register_selection(
+        env=0,
+        target="chair",
+        source_submap_id="submap-c",
+        floor_id=0,
+        selected_frontier=initial.final_frontier,
+        step=45,
+        obstacle_map=obstacle,
+        robot_xy=np.zeros(2),
+        target_present=False,
+        up_stair_present=False,
+        down_stair_present=False,
+        frontiers=frontiers,
+        historical_branch_ids=initial.final_branch_ids,
+    )
+    for step in (55, 56, 57):
+        assert memory.observe(
+            env=0,
+            target="chair",
+            source_submap_id="submap-c",
+            floor_id=0,
+            step=step,
+            robot_xy=frontiers[0],
+            obstacle_map=obstacle,
+            target_present=False,
+            up_stair_present=False,
+            down_stair_present=False,
+            frontiers=frontiers,
+            arrival_radius_m=0.5,
+        ) is None
+
+    decision = memory.arbitrate(
+        env=0,
+        target="chair",
+        active=current,
+        graph=graph,
+        base_frontier=frontiers[0],
+        base_value=0.9,
+        sorted_frontiers=frontiers,
+        sorted_values=[0.9, 0.8, 0.7],
+        topk=3,
+        step=57,
+        obstacle_map=obstacle,
+    )
+    assert decision.changed
+    assert decision.reason == "consumed_to_residual"
+    np.testing.assert_allclose(decision.final_frontier, frontiers[1])
+    assert memory.active_attempt(0) is None
+    assert historical.status is SearchBranchStatus.CONSUMED
+    events = memory.drain_events(0)
+    cutoff = [
+        item for item in events
+        if item["event"] == "search_branch_repeat_cutoff"
+    ]
+    assert len(cutoff) == 1
+    assert cutoff[0]["arrival_observations"] == 3
+    assert cutoff[0]["coverage_delta_m2"] == pytest.approx(0.0)
+
+
+def test_repeat_cutoff_requires_three_views_and_a_live_alternative() -> None:
+    graph, current = _three_node_graph()
+    memory = _enabled_memory()
+    assert _finish_branch(
+        memory, FakeObstacleMap()
+    ) is SearchBranchStatus.UNRESOLVED
+    historical = memory.branches(0)[0]
+    assert memory.accept_oracle_event(
+        env=0,
+        event=OracleSamePlaceEvent(1, "submap-a"),
+        current_submap_id="submap-c",
+        graph=graph,
+        step=40,
+    )
+    obstacle = FakeObstacleMap()
+    frontiers = np.asarray([[2.0, 0.0], [4.0, 0.0]])
+    initial = memory.arbitrate(
+        env=0,
+        target="chair",
+        active=current,
+        graph=graph,
+        base_frontier=frontiers[0],
+        base_value=0.9,
+        sorted_frontiers=frontiers,
+        sorted_values=[0.9, 0.8],
+        topk=2,
+        step=45,
+        obstacle_map=obstacle,
+    )
+    memory.register_selection(
+        env=0,
+        target="chair",
+        source_submap_id="submap-c",
+        floor_id=0,
+        selected_frontier=initial.final_frontier,
+        step=45,
+        obstacle_map=obstacle,
+        robot_xy=np.zeros(2),
+        target_present=False,
+        up_stair_present=False,
+        down_stair_present=False,
+        frontiers=frontiers,
+        historical_branch_ids=initial.final_branch_ids,
+    )
+    for step in (55, 56):
+        assert memory.observe(
+            env=0,
+            target="chair",
+            source_submap_id="submap-c",
+            floor_id=0,
+            step=step,
+            robot_xy=frontiers[0],
+            obstacle_map=obstacle,
+            target_present=False,
+            up_stair_present=False,
+            down_stair_present=False,
+            frontiers=frontiers,
+            arrival_radius_m=0.5,
+        ) is None
+    too_short = memory.arbitrate(
+        env=0,
+        target="chair",
+        active=current,
+        graph=graph,
+        base_frontier=frontiers[0],
+        base_value=0.9,
+        sorted_frontiers=frontiers,
+        sorted_values=[0.9, 0.8],
+        topk=2,
+        step=56,
+        obstacle_map=obstacle,
+    )
+    assert not too_short.changed
+    assert historical.status is SearchBranchStatus.UNRESOLVED
+
+    assert memory.observe(
+        env=0,
+        target="chair",
+        source_submap_id="submap-c",
+        floor_id=0,
+        step=57,
+        robot_xy=frontiers[0],
+        obstacle_map=obstacle,
+        target_present=False,
+        up_stair_present=False,
+        down_stair_present=False,
+        frontiers=frontiers,
+        arrival_radius_m=0.5,
+    ) is None
+    no_alternative = memory.arbitrate(
+        env=0,
+        target="chair",
+        active=current,
+        graph=graph,
+        base_frontier=frontiers[0],
+        base_value=0.9,
+        sorted_frontiers=[frontiers[0], [2.2, 0.0]],
+        sorted_values=[0.9, 0.85],
+        topk=2,
+        step=57,
+        obstacle_map=obstacle,
+    )
+    assert not no_alternative.changed
+    assert memory.active_attempt(0) is not None
+    assert historical.status is SearchBranchStatus.UNRESOLVED
+    assert not any(
+        item["event"] == "search_branch_repeat_cutoff"
+        for item in memory.drain_events(0)
+    )
+    obstacle.explored_area.flat[:50] = True
+    coverage_protected = memory.arbitrate(
+        env=0,
+        target="chair",
+        active=current,
+        graph=graph,
+        base_frontier=frontiers[0],
+        base_value=0.9,
+        sorted_frontiers=frontiers,
+        sorted_values=[0.9, 0.8],
+        topk=2,
+        step=58,
+        obstacle_map=obstacle,
+    )
+    assert not coverage_protected.changed
+    assert historical.status is SearchBranchStatus.UNRESOLVED
+    assert memory.active_attempt(0) is not None
 
 
 def test_productive_repeat_trial_revokes_provisional_suppression() -> None:
@@ -626,6 +846,7 @@ def test_productive_repeat_trial_revokes_provisional_suppression() -> None:
         sorted_values=[0.9, 0.8],
         topk=2,
         step=45,
+        obstacle_map=FakeObstacleMap(),
     )
     obstacle = FakeObstacleMap()
     memory.register_selection(

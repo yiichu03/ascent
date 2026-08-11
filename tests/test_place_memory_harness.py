@@ -47,7 +47,9 @@ def test_harness_freezes_oracle_and_two_experiment_contracts() -> None:
         "oracle_vo_consistent_radius_m=1.5",
         "place_low_gain_area_m2=0.5",
         "place_minimum_arrival_observations=2",
+        "place_minimum_repeat_arrival_observations=3",
         "place_minimum_excursion_start_distance_m=1.4",
+        "place_repeat_settlement=online_when_evidence_complete_and_residual_live",
         "oracle_place_diagnostics.jsonl",
     ):
         assert token in worker

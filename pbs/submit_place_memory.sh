@@ -171,6 +171,7 @@ print(json.dumps({
     "oracle_scope": "vo_consistent_graph_nondirect_fragmentation_only",
     "same_place_identity_grants_consumption": False,
     "place_consumption_authority": "matched_repeat_low_gain_excursion",
+    "place_repeat_settlement": "online_when_evidence_complete_and_residual_live",
     "method_version": "submap_v1.4_oracle_task_memory",
     "handoff_enabled": True,
     "exhaustion_recovery_enabled": True,

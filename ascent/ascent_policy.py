@@ -359,6 +359,11 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     config, "minimum_arrival_observations", 2
                 )
             ),
+            minimum_repeat_arrival_observations=int(
+                _place_memory_config_value(
+                    config, "minimum_repeat_arrival_observations", 3
+                )
+            ),
             minimum_excursion_start_distance_m=float(
                 _place_memory_config_value(
                     config, "minimum_excursion_start_distance_m", 1.4
@@ -2284,6 +2289,7 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     sorted_values=sorted_values,
                     topk=self.topk,
                     step=self._num_steps[env],
+                    obstacle_map=self._map_controller._obstacle_map[env],
                 )
                 self._flush_place_memory_events(env)
                 return (

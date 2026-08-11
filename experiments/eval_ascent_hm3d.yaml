@@ -52,6 +52,7 @@ ascent_place_memory:
   branch_match_margin_m: 0.25
   persistent_frontier_observations: 2
   minimum_arrival_observations: 2
+  minimum_repeat_arrival_observations: 3
   minimum_excursion_start_distance_m: 1.4
   oracle_physical_planar_radius_m: 0.75
   oracle_physical_height_radius_m: 0.75
