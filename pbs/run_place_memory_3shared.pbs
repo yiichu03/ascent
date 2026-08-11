@@ -199,6 +199,7 @@ BASE_PORT_ROOT=$(
   echo oracle_scope=vo_consistent_graph_nondirect_fragmentation_only
   echo same_place_identity_grants_consumption=0
   echo place_consumption_authority=matched_repeat_low_gain_excursion
+  echo place_repeat_settlement=online_when_evidence_complete_and_residual_live
   echo handoff_enabled=1
   echo exhaustion_recovery_enabled=1
   echo baseline_csvs=$BASELINE_CSVS

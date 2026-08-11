@@ -49,6 +49,7 @@ class PlaceMemoryConfig:
     branch_match_margin_m: float = 0.25
     persistent_frontier_observations: int = 2
     minimum_arrival_observations: int = 2
+    minimum_repeat_arrival_observations: int = 3
     minimum_excursion_start_distance_m: float = 1.4
 
     def __post_init__(self) -> None:
@@ -68,6 +69,13 @@ class PlaceMemoryConfig:
             raise ValueError("persistent frontier evidence needs at least two views")
         if self.minimum_arrival_observations < 2:
             raise ValueError("a settled excursion needs at least two arrival views")
+        if (
+            self.minimum_repeat_arrival_observations
+            < self.minimum_arrival_observations
+        ):
+            raise ValueError(
+                "a repeat cutoff cannot use fewer views than excursion settlement"
+            )
         if self.minimum_excursion_start_distance_m <= 0.0:
             raise ValueError("minimum excursion distance must be positive")
 
@@ -829,6 +837,8 @@ class PlaceConditionedResidualMemory:
         if not (
             outcome == "completed"
             and excursion_qualified
+            and attempt.arrival_observations
+            >= self.config.minimum_repeat_arrival_observations
             and provisional_low_gain
         ):
             self._events[env].append(
@@ -841,6 +851,12 @@ class PlaceConditionedResidualMemory:
                     "reason": "repeat_trial_not_qualified_low_gain",
                     "outcome": str(outcome),
                     "excursion_qualified": bool(excursion_qualified),
+                    "arrival_observations": int(
+                        attempt.arrival_observations
+                    ),
+                    "minimum_repeat_arrival_observations": (
+                        self.config.minimum_repeat_arrival_observations
+                    ),
                 }
             )
             return
@@ -1127,6 +1143,119 @@ class PlaceConditionedResidualMemory:
             "matched",
         )
 
+    def _residual_candidates(
+        self,
+        *,
+        env: int,
+        target: str,
+        active: SubmapBundle,
+        graph: SubmapGraph,
+        base: np.ndarray,
+        sorted_frontiers: Sequence[Sequence[float]],
+        sorted_values: Sequence[float],
+        topk: int,
+        excluded_branch_ids: Sequence[str] = (),
+    ) -> List[Tuple[np.ndarray, float, str, Tuple[str, ...]]]:
+        points = _frontier_array(sorted_frontiers)
+        values = [float(value) for value in sorted_values]
+        candidates: List[
+            Tuple[np.ndarray, float, str, Tuple[str, ...]]
+        ] = []
+        excluded = set(str(item) for item in excluded_branch_ids)
+        limit = min(len(points), max(2, int(topk)))
+        for point, value in zip(points[:limit], values[:limit]):
+            # A frontier micro-refresh is still the same search branch and
+            # cannot serve as the residual opportunity that justifies a
+            # cutoff.
+            if (
+                _distance(point, base)
+                <= self.config.branch_association_radius_m
+            ):
+                continue
+            match, match_reason = self.match_historical_branch(
+                env=env,
+                target=target,
+                active=active,
+                graph=graph,
+                frontier=point,
+            )
+            if match is None and match_reason == "untried":
+                candidates.append((point.copy(), value, "untried", ()))
+            elif (
+                match is not None
+                and match.status is SearchBranchStatus.UNRESOLVED
+                and not excluded.intersection(match.branch_ids)
+            ):
+                candidates.append(
+                    (point.copy(), value, "unresolved", match.branch_ids)
+                )
+        return candidates
+
+    def _repeat_cutoff_ready(
+        self,
+        *,
+        env: int,
+        target: str,
+        active: SubmapBundle,
+        base: np.ndarray,
+        base_match: BranchMatch,
+        obstacle_map: Any,
+    ) -> Tuple[bool, str, float]:
+        """Return whether the current repeat has enough task evidence to stop.
+
+        The first historical low-gain excursion remains only provisional.  A
+        second aliased-submap trial can gain suppression authority while it is
+        still the live ASCENT choice, but only after physical travel, a
+        multi-frame arrival, and no target, exit, or coverage gain.  This keeps
+        settlement inside the useful decision window instead of waiting until
+        ASCENT has already departed for another branch.
+        """
+
+        attempt = self._active[env]
+        if attempt is None:
+            return False, "no_active_attempt", 0.0
+        coverage = self._coverage_delta_m2(attempt, obstacle_map)
+        if (
+            attempt.target != str(target)
+            or attempt.source_submap_id != active.submap_id
+            or attempt.floor_id != active.floor_id
+        ):
+            return False, "active_context_mismatch", coverage
+        if (
+            _distance(attempt.frontier_local, base)
+            > self.config.branch_association_radius_m
+        ):
+            return False, "active_branch_mismatch", coverage
+        if not set(base_match.branch_ids).issubset(
+            attempt.historical_branch_ids
+        ):
+            return False, "not_a_matched_repeat", coverage
+        if any(
+            record.target == attempt.target
+            and record.source_submap_id == attempt.source_submap_id
+            and record.floor_id == attempt.floor_id
+            and record.status is SearchBranchStatus.PRODUCTIVE
+            and _distance(record.local_xy, attempt.frontier_local)
+            <= self.config.branch_association_radius_m
+            for record in self._branches[env]
+        ):
+            return False, "current_branch_already_productive", coverage
+        qualified, qualification_reason = self._excursion_qualification(
+            attempt
+        )
+        if not qualified:
+            return False, qualification_reason, coverage
+        if (
+            attempt.arrival_observations
+            < self.config.minimum_repeat_arrival_observations
+        ):
+            return False, "insufficient_repeat_arrival_observations", coverage
+        if attempt.target_gain or attempt.exit_gain:
+            return False, "repeat_found_discrete_information", coverage
+        if coverage >= self.config.low_gain_area_m2:
+            return False, "repeat_found_coverage", coverage
+        return True, "qualified_repeat_low_gain", coverage
+
     def arbitrate(
         self,
         *,
@@ -1140,6 +1269,7 @@ class PlaceConditionedResidualMemory:
         sorted_values: Sequence[float],
         topk: int,
         step: int,
+        obstacle_map: Any,
     ) -> RerankDecision:
         base = _xy(base_frontier)
         place_id = self.place_for_submap(env, active.submap_id)
@@ -1155,6 +1285,88 @@ class PlaceConditionedResidualMemory:
             graph=graph,
             frontier=base,
         )
+        candidates: Optional[
+            List[Tuple[np.ndarray, float, str, Tuple[str, ...]]]
+        ] = None
+        if (
+            base_match is not None
+            and base_match.status is SearchBranchStatus.UNRESOLVED
+        ):
+            candidates = self._residual_candidates(
+                env=env,
+                target=target,
+                active=active,
+                graph=graph,
+                base=base,
+                sorted_frontiers=sorted_frontiers,
+                sorted_values=sorted_values,
+                topk=topk,
+                excluded_branch_ids=base_match.branch_ids,
+            )
+            ready, cutoff_reason, coverage = self._repeat_cutoff_ready(
+                env=env,
+                target=target,
+                active=active,
+                base=base,
+                base_match=base_match,
+                obstacle_map=obstacle_map,
+            )
+            # Do not settle the live repeat unless ASCENT already exposes a
+            # live residual alternative.  Without one, exact v1.2 behavior is
+            # the only safe fallback.
+            if ready and candidates:
+                attempt = self._active[env]
+                assert attempt is not None
+                self._events[env].append(
+                    {
+                        "event": "search_branch_repeat_cutoff",
+                        "step": int(step),
+                        "attempt_id": attempt.attempt_id,
+                        "place_id": place_id,
+                        "source_submap_id": attempt.source_submap_id,
+                        "historical_branch_ids": list(
+                            attempt.historical_branch_ids
+                        ),
+                        "reason": cutoff_reason,
+                        "arrival_observations": int(
+                            attempt.arrival_observations
+                        ),
+                        "minimum_repeat_arrival_observations": (
+                            self.config.minimum_repeat_arrival_observations
+                        ),
+                        "start_robot_distance_m": float(
+                            attempt.start_robot_distance_m
+                        ),
+                        "coverage_delta_m2": float(coverage),
+                        "low_gain_threshold_m2": (
+                            self.config.low_gain_area_m2
+                        ),
+                        "residual_alternative_count": len(candidates),
+                    }
+                )
+                self.finish_attempt(
+                    env=env,
+                    outcome="completed",
+                    reason="matched_repeat_low_gain_cutoff",
+                    step=int(step),
+                    obstacle_map=obstacle_map,
+                )
+                base_match, base_match_reason = (
+                    self.match_historical_branch(
+                        env=env,
+                        target=target,
+                        active=active,
+                        graph=graph,
+                        frontier=base,
+                    )
+                )
+                if (
+                    base_match is None
+                    or base_match.status is not SearchBranchStatus.CONSUMED
+                ):
+                    raise RuntimeError(
+                        "qualified repeat cutoff did not consume its historical lineage"
+                    )
         if base_match is None or base_match.status is not SearchBranchStatus.CONSUMED:
             reason = (
                 f"base_{base_match_reason}"
@@ -1193,31 +1405,18 @@ class PlaceConditionedResidualMemory:
             )
             return decision
 
-        points = _frontier_array(sorted_frontiers)
-        values = [float(value) for value in sorted_values]
-        candidates: List[
-            Tuple[np.ndarray, float, str, Tuple[str, ...]]
-        ] = []
-        limit = min(len(points), max(2, int(topk)))
-        for point, value in zip(points[:limit], values[:limit]):
-            if _distance(point, base) <= 1e-6:
-                continue
-            match, match_reason = self.match_historical_branch(
+        if candidates is None:
+            candidates = self._residual_candidates(
                 env=env,
                 target=target,
                 active=active,
                 graph=graph,
-                frontier=point,
+                base=base,
+                sorted_frontiers=sorted_frontiers,
+                sorted_values=sorted_values,
+                topk=topk,
+                excluded_branch_ids=base_match.branch_ids,
             )
-            if match is None and match_reason == "untried":
-                candidates.append((point.copy(), value, "untried", ()))
-            elif (
-                match is not None
-                and match.status is SearchBranchStatus.UNRESOLVED
-            ):
-                candidates.append(
-                    (point.copy(), value, "unresolved", match.branch_ids)
-                )
         if not candidates:
             decision = RerankDecision(
                 base,

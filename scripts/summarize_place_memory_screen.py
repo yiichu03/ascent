@@ -336,6 +336,9 @@ def main() -> int:
                 "search_revisit_inconclusive_count": v14[
                     "search_branch_revisit_inconclusive_count"
                 ],
+                "search_repeat_cutoff_count": v14[
+                    "search_branch_repeat_cutoff_count"
+                ],
                 "search_finished_consumed_count": v14[
                     "search_status_counts"
                 ].get("consumed", 0),
@@ -545,6 +548,10 @@ def main() -> int:
             ),
             "search_revisit_inconclusive_count": sum(
                 row["search_revisit_inconclusive_count"]
+                for row in episode_rows
+            ),
+            "search_repeat_cutoff_count": sum(
+                row["search_repeat_cutoff_count"]
                 for row in episode_rows
             ),
             "search_finished_consumed_count": sum(

@@ -255,6 +255,7 @@ def validate_submap_metadata(
                 "branch_match_margin_m": 0.25,
                 "persistent_frontier_observations": 2,
                 "minimum_arrival_observations": 2,
+                "minimum_repeat_arrival_observations": 3,
                 "minimum_excursion_start_distance_m": 1.4,
             }
             if not isinstance(place_config, Mapping):
@@ -602,7 +603,7 @@ def parse_attempt(
                                 item.get("confirmation_source_submap_id")
                                 or ""
                             )
-                            or int(item.get("last_arrival_observations", 0)) < 2
+                            or int(item.get("last_arrival_observations", 0)) < 3
                             or float(
                                 item.get("last_start_robot_distance_m", 0.0)
                             )
@@ -610,6 +611,41 @@ def parse_attempt(
                         ):
                             local_errors.append(
                                 "place_memory_consumed_promotion_contract"
+                            )
+                            break
+                    elif item.get("event") == "search_branch_repeat_cutoff":
+                        if (
+                            item.get("reason") != "qualified_repeat_low_gain"
+                            or int(item.get("arrival_observations", 0)) < 3
+                            or int(
+                                item.get(
+                                    "minimum_repeat_arrival_observations", 0
+                                )
+                            )
+                            != 3
+                            or float(
+                                item.get("start_robot_distance_m", 0.0)
+                            )
+                            < 1.4
+                            or float(item.get("coverage_delta_m2", 1.0))
+                            >= 0.5
+                            or int(
+                                item.get("residual_alternative_count", 0)
+                            )
+                            < 1
+                        ):
+                            local_errors.append(
+                                "place_memory_repeat_cutoff_contract"
+                            )
+                            break
+                        if not any(
+                            event.get("event") == "place_rerank_evaluated"
+                            and event.get("step") == item.get("step")
+                            and event.get("decision_changed") is True
+                            for event in episode_submap_events
+                        ):
+                            local_errors.append(
+                                "place_memory_repeat_cutoff_without_rerank"
                             )
                             break
         else:
@@ -805,6 +841,9 @@ def parse_attempt(
             ],
             "search_branch_revisit_inconclusive_count": events[
                 "search_branch_revisit_inconclusive"
+            ],
+            "search_branch_repeat_cutoff_count": events[
+                "search_branch_repeat_cutoff"
             ],
             "search_provisional_low_gain_count": sum(
                 item.get("provisional_low_gain") is True
