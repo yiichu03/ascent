@@ -327,6 +327,15 @@ def main() -> int:
                 "search_consumed_count": v14[
                     "search_branch_consumed_count"
                 ],
+                "search_revisit_available_count": v14[
+                    "search_branch_revisit_available_count"
+                ],
+                "search_revisit_productive_count": v14[
+                    "search_branch_revisit_productive_count"
+                ],
+                "search_revisit_inconclusive_count": v14[
+                    "search_branch_revisit_inconclusive_count"
+                ],
                 "search_finished_consumed_count": v14[
                     "search_status_counts"
                 ].get("consumed", 0),
@@ -525,6 +534,18 @@ def main() -> int:
             ),
             "search_consumed_count": sum(
                 row["search_consumed_count"] for row in episode_rows
+            ),
+            "search_revisit_available_count": sum(
+                row["search_revisit_available_count"]
+                for row in episode_rows
+            ),
+            "search_revisit_productive_count": sum(
+                row["search_revisit_productive_count"]
+                for row in episode_rows
+            ),
+            "search_revisit_inconclusive_count": sum(
+                row["search_revisit_inconclusive_count"]
+                for row in episode_rows
             ),
             "search_finished_consumed_count": sum(
                 row["search_finished_consumed_count"]

@@ -202,6 +202,8 @@ done
   echo place_persistent_frontier_observations=2
   echo place_minimum_arrival_observations=2
   echo place_minimum_excursion_start_distance_m=1.4
+  echo same_place_identity_grants_consumption=0
+  echo place_consumption_authority=matched_repeat_low_gain_excursion
   echo no_metric_driven_retry=1
   echo technical_retry_policy=one_fixed_retry_per_failed_unit
   echo method_version=submap_v1.4_oracle_task_memory
