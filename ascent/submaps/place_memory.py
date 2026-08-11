@@ -88,6 +88,7 @@ class SearchAttempt:
     start_frontiers: np.ndarray
     start_robot_distance_m: float
     min_robot_distance_m: float
+    historical_branch_ids: Tuple[str, ...] = ()
     reached: bool = False
     arrival_observations: int = 0
     first_arrival_step: Optional[int] = None
@@ -143,6 +144,8 @@ class RerankDecision:
     base_status: Optional[str]
     alternative_status: Optional[str]
     intervention: Optional[str]
+    base_branch_ids: Tuple[str, ...] = ()
+    final_branch_ids: Tuple[str, ...] = ()
 
 
 def _frontier_array(frontiers: Sequence[Sequence[float]]) -> np.ndarray:
@@ -296,6 +299,10 @@ class PlaceConditionedResidualMemory:
                 "member_count": len(self._place_members[env][place_id]),
             }
         )
+        # Identity association makes historical outcomes queryable; it is not
+        # itself evidence that any historical search branch is exhausted.
+        # A provisional low-gain branch must be selected and independently
+        # tested again from the aliased submap before it can become CONSUMED.
         for record in self._branches[env]:
             if (
                 record.source_submap_id
@@ -305,18 +312,15 @@ class PlaceConditionedResidualMemory:
                 or not record.provisional_low_gain
             ):
                 continue
-            record.status = SearchBranchStatus.CONSUMED
-            record.provisional_low_gain = False
-            record.independent_revisit_confirmations += 1
             self._events[env].append(
                 {
-                    "event": "search_branch_consumed",
+                    "event": "search_branch_revisit_available",
                     "step": int(step),
                     "oracle_event_sequence": int(event.event_sequence),
                     "place_id": place_id,
                     "branch_id": record.branch_id,
                     "source_submap_id": record.source_submap_id,
-                    "reason": "oracle_confirmed_independent_place_revisit",
+                    "reason": "same_place_identity_only",
                     "qualified_excursions": int(
                         record.qualified_excursions
                     ),
@@ -380,6 +384,27 @@ class PlaceConditionedResidualMemory:
         )
         return float(delta / (attempt.pixels_per_meter**2))
 
+    def _repeat_trial_branch_ids(
+        self,
+        *,
+        env: int,
+        source_submap_id: str,
+        branch_ids: Sequence[str],
+    ) -> Tuple[str, ...]:
+        requested = {str(branch_id) for branch_id in branch_ids}
+        if not requested:
+            return ()
+        return tuple(
+            sorted(
+                record.branch_id
+                for record in self._branches[env]
+                if record.branch_id in requested
+                and record.source_submap_id != str(source_submap_id)
+                and record.status is SearchBranchStatus.UNRESOLVED
+                and record.provisional_low_gain
+            )
+        )
+
     def start_attempt(
         self,
         *,
@@ -395,6 +420,7 @@ class PlaceConditionedResidualMemory:
         up_stair_present: bool,
         down_stair_present: bool,
         frontiers: Sequence[Sequence[float]],
+        historical_branch_ids: Sequence[str] = (),
     ) -> None:
         self._attempt_sequence[env] += 1
         selected = _xy(frontier)
@@ -414,6 +440,11 @@ class PlaceConditionedResidualMemory:
             start_frontiers=_frontier_array(frontiers),
             start_robot_distance_m=start_robot_distance_m,
             min_robot_distance_m=start_robot_distance_m,
+            historical_branch_ids=self._repeat_trial_branch_ids(
+                env=env,
+                source_submap_id=source_submap_id,
+                branch_ids=historical_branch_ids,
+            ),
         )
         self._active[env] = attempt
         self._events[env].append(
@@ -431,6 +462,10 @@ class PlaceConditionedResidualMemory:
                 "minimum_excursion_start_distance_m": (
                     self.config.minimum_excursion_start_distance_m
                 ),
+                "historical_branch_ids": list(
+                    attempt.historical_branch_ids
+                ),
+                "repeat_trial": bool(attempt.historical_branch_ids),
             }
         )
 
@@ -449,8 +484,14 @@ class PlaceConditionedResidualMemory:
         up_stair_present: bool,
         down_stair_present: bool,
         frontiers: Sequence[Sequence[float]],
+        historical_branch_ids: Sequence[str] = (),
     ) -> None:
         selected = _xy(selected_frontier)
+        repeat_branch_ids = self._repeat_trial_branch_ids(
+            env=env,
+            source_submap_id=source_submap_id,
+            branch_ids=historical_branch_ids,
+        )
         active = self._active[env]
         if active is not None:
             same_context = bool(
@@ -464,6 +505,14 @@ class PlaceConditionedResidualMemory:
                 <= self.config.branch_association_radius_m
             )
             if same_branch:
+                if repeat_branch_ids:
+                    active.historical_branch_ids = tuple(
+                        sorted(
+                            set(active.historical_branch_ids).union(
+                                repeat_branch_ids
+                            )
+                        )
+                    )
                 return
             qualified, _ = self._excursion_qualification(active)
             if same_context and self._selected_frontier_is_novel(
@@ -498,6 +547,7 @@ class PlaceConditionedResidualMemory:
             up_stair_present=up_stair_present,
             down_stair_present=down_stair_present,
             frontiers=frontiers,
+            historical_branch_ids=repeat_branch_ids,
         )
 
     def _novel_frontiers(
@@ -652,10 +702,9 @@ class PlaceConditionedResidualMemory:
         ):
             status = SearchBranchStatus.PRODUCTIVE
         elif excursion_qualified:
-            # A completed low-gain excursion is deliberately provisional.  It
-            # gains suppression authority only after a later opaque oracle
-            # identity event confirms that the agent left and returned to the
-            # same place.
+            # A completed low-gain excursion is deliberately provisional.
+            # Same-place identity only makes it queryable.  Suppression
+            # authority requires another matched, independent low-gain trial.
             status = SearchBranchStatus.UNRESOLVED
             provisional_low_gain = True
         else:
@@ -716,8 +765,121 @@ class PlaceConditionedResidualMemory:
                 "action_cost": int(step) - attempt.start_step,
             }
         )
+        self._settle_repeat_trial(
+            env=env,
+            attempt=attempt,
+            record=record,
+            status=status,
+            outcome=str(outcome),
+            step=int(step),
+            provisional_low_gain=provisional_low_gain,
+            excursion_qualified=excursion_qualified,
+        )
         self._active[env] = None
         return status
+
+    def _settle_repeat_trial(
+        self,
+        *,
+        env: int,
+        attempt: SearchAttempt,
+        record: SearchBranchRecord,
+        status: SearchBranchStatus,
+        outcome: str,
+        step: int,
+        provisional_low_gain: bool,
+        excursion_qualified: bool,
+    ) -> None:
+        if not attempt.historical_branch_ids:
+            return
+        requested = set(attempt.historical_branch_ids)
+        historical = [
+            item
+            for item in self._branches[env]
+            if item.branch_id in requested
+            and item.source_submap_id != attempt.source_submap_id
+        ]
+        if not historical:
+            return
+
+        if (
+            status is SearchBranchStatus.PRODUCTIVE
+            or record.status is SearchBranchStatus.PRODUCTIVE
+        ):
+            record.status = SearchBranchStatus.PRODUCTIVE
+            record.provisional_low_gain = False
+            for item in historical:
+                item.status = SearchBranchStatus.PRODUCTIVE
+                item.provisional_low_gain = False
+            self._events[env].append(
+                {
+                    "event": "search_branch_revisit_productive",
+                    "step": int(step),
+                    "attempt_id": attempt.attempt_id,
+                    "source_submap_id": attempt.source_submap_id,
+                    "historical_branch_ids": sorted(requested),
+                    "reason": "repeat_trial_found_new_information",
+                    "coverage_delta_m2": float(record.coverage_delta_m2),
+                    "target_gain": bool(attempt.target_gain),
+                    "exit_gain": bool(attempt.exit_gain),
+                }
+            )
+            return
+
+        if not (
+            outcome == "completed"
+            and excursion_qualified
+            and provisional_low_gain
+        ):
+            self._events[env].append(
+                {
+                    "event": "search_branch_revisit_inconclusive",
+                    "step": int(step),
+                    "attempt_id": attempt.attempt_id,
+                    "source_submap_id": attempt.source_submap_id,
+                    "historical_branch_ids": sorted(requested),
+                    "reason": "repeat_trial_not_qualified_low_gain",
+                    "outcome": str(outcome),
+                    "excursion_qualified": bool(excursion_qualified),
+                }
+            )
+            return
+
+        # The same branch has now produced two independent, qualified low-gain
+        # excursions in aliased submaps.  Only this second task-value
+        # observation—not the identity association—grants suppression authority.
+        lineage = {item.branch_id: item for item in historical}
+        lineage[record.branch_id] = record
+        for item in lineage.values():
+            item.status = SearchBranchStatus.CONSUMED
+            item.provisional_low_gain = False
+            item.independent_revisit_confirmations += 1
+            self._events[env].append(
+                {
+                    "event": "search_branch_consumed",
+                    "step": int(step),
+                    "attempt_id": attempt.attempt_id,
+                    "place_id": self.place_for_submap(
+                        env, attempt.source_submap_id
+                    ),
+                    "branch_id": item.branch_id,
+                    "source_submap_id": item.source_submap_id,
+                    "confirmation_source_submap_id": (
+                        attempt.source_submap_id
+                    ),
+                    "historical_branch_ids": sorted(requested),
+                    "reason": "matched_repeat_low_gain_excursion",
+                    "qualified_excursions": int(item.qualified_excursions),
+                    "action_cost": int(item.action_cost),
+                    "coverage_delta_m2": float(item.coverage_delta_m2),
+                    "last_arrival_observations": int(
+                        attempt.arrival_observations
+                    ),
+                    "last_start_robot_distance_m": float(
+                        attempt.start_robot_distance_m
+                    ),
+                }
+            )
 
     def _upsert_branch(
         self,
@@ -1010,6 +1172,12 @@ class PlaceConditionedResidualMemory:
                 None if base_match is None else base_match.status.value,
                 None,
                 None,
+                base_branch_ids=(
+                    () if base_match is None else base_match.branch_ids
+                ),
+                final_branch_ids=(
+                    () if base_match is None else base_match.branch_ids
+                ),
             )
             self._events[env].append(
                 {
@@ -1020,13 +1188,16 @@ class PlaceConditionedResidualMemory:
                     "reason": decision.reason,
                     "base_frontier": base.tolist(),
                     "base_status": decision.base_status,
+                    "base_branch_ids": list(decision.base_branch_ids),
                 }
             )
             return decision
 
         points = _frontier_array(sorted_frontiers)
         values = [float(value) for value in sorted_values]
-        candidates: List[Tuple[np.ndarray, float, str]] = []
+        candidates: List[
+            Tuple[np.ndarray, float, str, Tuple[str, ...]]
+        ] = []
         limit = min(len(points), max(2, int(topk)))
         for point, value in zip(points[:limit], values[:limit]):
             if _distance(point, base) <= 1e-6:
@@ -1039,12 +1210,14 @@ class PlaceConditionedResidualMemory:
                 frontier=point,
             )
             if match is None and match_reason == "untried":
-                candidates.append((point.copy(), value, "untried"))
+                candidates.append((point.copy(), value, "untried", ()))
             elif (
                 match is not None
                 and match.status is SearchBranchStatus.UNRESOLVED
             ):
-                candidates.append((point.copy(), value, "unresolved"))
+                candidates.append(
+                    (point.copy(), value, "unresolved", match.branch_ids)
+                )
         if not candidates:
             decision = RerankDecision(
                 base,
@@ -1057,6 +1230,8 @@ class PlaceConditionedResidualMemory:
                 base_match.status.value,
                 None,
                 None,
+                base_branch_ids=base_match.branch_ids,
+                final_branch_ids=base_match.branch_ids,
             )
             self._events[env].append(
                 {
@@ -1075,7 +1250,7 @@ class PlaceConditionedResidualMemory:
         # eligibility; it never installs a second ranker or a sticky route.
         selected = candidates[0]
         active_attempt = self._active[env]
-        final, final_value, alternative_status = selected
+        final, final_value, alternative_status, final_branch_ids = selected
         intervention = (
             "continued"
             if active_attempt is not None
@@ -1095,6 +1270,8 @@ class PlaceConditionedResidualMemory:
             base_match.status.value,
             alternative_status,
             intervention,
+            base_branch_ids=base_match.branch_ids,
+            final_branch_ids=final_branch_ids,
         )
         self._events[env].append(
             {
@@ -1112,6 +1289,7 @@ class PlaceConditionedResidualMemory:
                 "final_frontier": final.tolist(),
                 "final_value": float(final_value),
                 "alternative_status": alternative_status,
+                "final_branch_ids": list(final_branch_ids),
             }
         )
         return decision

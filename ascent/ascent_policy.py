@@ -2340,6 +2340,11 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     up_stair_present=up_present,
                     down_stair_present=down_present,
                     frontiers=frontiers,
+                    historical_branch_ids=(
+                        ()
+                        if place_rerank_decision is None
+                        else place_rerank_decision.final_branch_ids
+                    ),
                 )
                 if tuple(best_frontier) in self._map_controller._obstacle_map[
                     env

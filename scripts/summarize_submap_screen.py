@@ -593,7 +593,15 @@ def parse_attempt(
                     elif item.get("event") == "search_branch_consumed":
                         if (
                             item.get("reason")
-                            != "oracle_confirmed_independent_place_revisit"
+                            != "matched_repeat_low_gain_excursion"
+                            or not isinstance(
+                                item.get("historical_branch_ids"), list
+                            )
+                            or not item.get("historical_branch_ids")
+                            or not str(
+                                item.get("confirmation_source_submap_id")
+                                or ""
+                            )
                             or int(item.get("last_arrival_observations", 0)) < 2
                             or float(
                                 item.get("last_start_robot_distance_m", 0.0)
@@ -789,6 +797,15 @@ def parse_attempt(
             ],
             "search_status_counts": dict(search_statuses),
             "search_branch_consumed_count": len(consumed_branch_events),
+            "search_branch_revisit_available_count": events[
+                "search_branch_revisit_available"
+            ],
+            "search_branch_revisit_productive_count": events[
+                "search_branch_revisit_productive"
+            ],
+            "search_branch_revisit_inconclusive_count": events[
+                "search_branch_revisit_inconclusive"
+            ],
             "search_provisional_low_gain_count": sum(
                 item.get("provisional_low_gain") is True
                 for item in finished_search_events

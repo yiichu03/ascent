@@ -169,6 +169,8 @@ print(json.dumps({
     "oracle_identity_only": True,
     "gt_policy_output_fields": ["event_sequence", "reference_submap_id"],
     "oracle_scope": "vo_consistent_graph_nondirect_fragmentation_only",
+    "same_place_identity_grants_consumption": False,
+    "place_consumption_authority": "matched_repeat_low_gain_excursion",
     "method_version": "submap_v1.4_oracle_task_memory",
     "handoff_enabled": True,
     "exhaustion_recovery_enabled": True,
