@@ -325,8 +325,20 @@ def main() -> int:
                     "search_attempt_finished_count"
                 ],
                 "search_consumed_count": v14[
+                    "search_branch_consumed_count"
+                ],
+                "search_finished_consumed_count": v14[
                     "search_status_counts"
                 ].get("consumed", 0),
+                "search_provisional_low_gain_count": v14[
+                    "search_provisional_low_gain_count"
+                ],
+                "search_excursion_qualified_count": v14[
+                    "search_excursion_qualified_count"
+                ],
+                "search_rejected_short_arrival_count": v14[
+                    "search_rejected_short_arrival_count"
+                ],
                 "search_productive_count": v14[
                     "search_status_counts"
                 ].get("productive", 0),
@@ -352,6 +364,12 @@ def main() -> int:
                 "association_to_productive_action_cost": v14[
                     "association_to_productive_action_cost"
                 ],
+                "place_intervention_started_count": v14[
+                    "place_intervention_types"
+                ].get("started", 0),
+                "place_intervention_continued_count": v14[
+                    "place_intervention_types"
+                ].get("continued", 0),
                 "selected_attempt_priority": v14["priority"],
                 "evidence_vo_diagnostics": v14[
                     "evidence_vo_diagnostics"
@@ -435,7 +453,7 @@ def main() -> int:
 
     selected_episodes = list(selected.values())
     summary = {
-        "schema": "ascent_vo_submap_v1_4_oracle_task_memory_screen_v1",
+        "schema": "ascent_vo_submap_v1_4_oracle_task_memory_screen_v2",
         "dataset": args.expected_dataset,
         "mode": args.mode,
         "technical_status": technical_status,
@@ -507,6 +525,30 @@ def main() -> int:
             ),
             "search_consumed_count": sum(
                 row["search_consumed_count"] for row in episode_rows
+            ),
+            "search_finished_consumed_count": sum(
+                row["search_finished_consumed_count"]
+                for row in episode_rows
+            ),
+            "search_provisional_low_gain_count": sum(
+                row["search_provisional_low_gain_count"]
+                for row in episode_rows
+            ),
+            "search_excursion_qualified_count": sum(
+                row["search_excursion_qualified_count"]
+                for row in episode_rows
+            ),
+            "search_rejected_short_arrival_count": sum(
+                row["search_rejected_short_arrival_count"]
+                for row in episode_rows
+            ),
+            "decision_started_count": sum(
+                row["place_intervention_started_count"]
+                for row in episode_rows
+            ),
+            "decision_continued_count": sum(
+                row["place_intervention_continued_count"]
+                for row in episode_rows
             ),
             "search_productive_count": sum(
                 row["search_productive_count"] for row in episode_rows

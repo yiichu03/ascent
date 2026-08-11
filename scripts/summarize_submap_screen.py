@@ -242,7 +242,7 @@ def validate_submap_metadata(
             if metadata.get("place_memory_enabled") is not True:
                 errors.append("submap_metadata:place_memory_enabled")
             if metadata.get("place_memory_contract") != (
-                "opaque_same_place_identity_then_vo_branch_query"
+                "opaque_same_place_identity_then_independent_excursion_query"
             ):
                 errors.append("submap_metadata:place_memory_contract")
             place_config = metadata.get("place_memory_config")
@@ -254,6 +254,8 @@ def validate_submap_metadata(
                 "branch_match_radius_m": 1.0,
                 "branch_match_margin_m": 0.25,
                 "persistent_frontier_observations": 2,
+                "minimum_arrival_observations": 2,
+                "minimum_excursion_start_distance_m": 1.4,
             }
             if not isinstance(place_config, Mapping):
                 errors.append("submap_metadata:place_memory_config")
@@ -573,6 +575,35 @@ def parse_attempt(
                     ):
                         local_errors.append("handoff_creation_schema")
                         break
+                for item in episode_submap_events:
+                    if item.get("event") == "search_attempt_finished":
+                        if item.get("status") == "consumed":
+                            local_errors.append(
+                                "place_memory_direct_consumed_without_revisit"
+                            )
+                            break
+                        if item.get("provisional_low_gain") is True and (
+                            item.get("status") != "unresolved"
+                            or item.get("excursion_qualified") is not True
+                        ):
+                            local_errors.append(
+                                "place_memory_provisional_excursion_contract"
+                            )
+                            break
+                    elif item.get("event") == "search_branch_consumed":
+                        if (
+                            item.get("reason")
+                            != "oracle_confirmed_independent_place_revisit"
+                            or int(item.get("last_arrival_observations", 0)) < 2
+                            or float(
+                                item.get("last_start_robot_distance_m", 0.0)
+                            )
+                            < 1.4
+                        ):
+                            local_errors.append(
+                                "place_memory_consumed_promotion_contract"
+                            )
+                            break
         else:
             events = Counter()
         if local_errors:
@@ -590,6 +621,11 @@ def parse_attempt(
             item
             for item in episode_submap_events
             if item.get("event") == "search_attempt_finished"
+        ]
+        consumed_branch_events = [
+            item
+            for item in episode_submap_events
+            if item.get("event") == "search_branch_consumed"
         ]
         association_to_productive_costs = []
         first_association_by_place: Dict[str, int] = {}
@@ -752,6 +788,21 @@ def parse_attempt(
                 "search_attempt_finished"
             ],
             "search_status_counts": dict(search_statuses),
+            "search_branch_consumed_count": len(consumed_branch_events),
+            "search_provisional_low_gain_count": sum(
+                item.get("provisional_low_gain") is True
+                for item in finished_search_events
+            ),
+            "search_excursion_qualified_count": sum(
+                item.get("excursion_qualified") is True
+                for item in finished_search_events
+            ),
+            "search_rejected_short_arrival_count": sum(
+                item.get("reached") is True
+                and item.get("excursion_qualified") is not True
+                and item.get("status") == "unresolved"
+                for item in finished_search_events
+            ),
             "search_coverage_delta_m2": sum(
                 float(item.get("coverage_delta_m2", 0.0))
                 for item in finished_search_events
