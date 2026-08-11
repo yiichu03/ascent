@@ -48,6 +48,8 @@ class PlaceMemoryConfig:
     branch_match_radius_m: float = 1.0
     branch_match_margin_m: float = 0.25
     persistent_frontier_observations: int = 2
+    minimum_arrival_observations: int = 2
+    minimum_excursion_start_distance_m: float = 1.4
 
     def __post_init__(self) -> None:
         if self.low_gain_area_m2 <= 0.0:
@@ -64,6 +66,10 @@ class PlaceMemoryConfig:
             raise ValueError("branch_match_margin_m must be inside match radius")
         if self.persistent_frontier_observations < 2:
             raise ValueError("persistent frontier evidence needs at least two views")
+        if self.minimum_arrival_observations < 2:
+            raise ValueError("a settled excursion needs at least two arrival views")
+        if self.minimum_excursion_start_distance_m <= 0.0:
+            raise ValueError("minimum excursion distance must be positive")
 
 
 @dataclass
@@ -80,8 +86,11 @@ class SearchAttempt:
     start_up_stair_present: bool
     start_down_stair_present: bool
     start_frontiers: np.ndarray
+    start_robot_distance_m: float
     min_robot_distance_m: float
     reached: bool = False
+    arrival_observations: int = 0
+    first_arrival_step: Optional[int] = None
     target_gain: bool = False
     exit_gain: bool = False
     previous_novel_frontiers: np.ndarray = field(
@@ -108,6 +117,11 @@ class SearchBranchRecord:
     target_gain: bool
     exit_gain: bool
     reason: str
+    provisional_low_gain: bool
+    qualified_excursions: int
+    independent_revisit_confirmations: int
+    last_arrival_observations: int
+    last_start_robot_distance_m: float
 
 
 @dataclass(frozen=True)
@@ -282,7 +296,77 @@ class PlaceConditionedResidualMemory:
                 "member_count": len(self._place_members[env][place_id]),
             }
         )
+        for record in self._branches[env]:
+            if (
+                record.source_submap_id
+                not in self._place_members[env][place_id]
+                or record.source_submap_id == current_id
+                or record.status is not SearchBranchStatus.UNRESOLVED
+                or not record.provisional_low_gain
+            ):
+                continue
+            record.status = SearchBranchStatus.CONSUMED
+            record.provisional_low_gain = False
+            record.independent_revisit_confirmations += 1
+            self._events[env].append(
+                {
+                    "event": "search_branch_consumed",
+                    "step": int(step),
+                    "oracle_event_sequence": int(event.event_sequence),
+                    "place_id": place_id,
+                    "branch_id": record.branch_id,
+                    "source_submap_id": record.source_submap_id,
+                    "reason": "oracle_confirmed_independent_place_revisit",
+                    "qualified_excursions": int(
+                        record.qualified_excursions
+                    ),
+                    "action_cost": int(record.action_cost),
+                    "coverage_delta_m2": float(
+                        record.coverage_delta_m2
+                    ),
+                    "last_arrival_observations": int(
+                        record.last_arrival_observations
+                    ),
+                    "last_start_robot_distance_m": float(
+                        record.last_start_robot_distance_m
+                    ),
+                }
+            )
         return True
+
+    def _excursion_qualification(
+        self, attempt: SearchAttempt
+    ) -> Tuple[bool, str]:
+        if not attempt.reached:
+            return False, "frontier_not_reached"
+        if (
+            attempt.start_robot_distance_m
+            < self.config.minimum_excursion_start_distance_m
+        ):
+            return False, "start_inside_excursion_distance"
+        if (
+            attempt.arrival_observations
+            < self.config.minimum_arrival_observations
+        ):
+            return False, "insufficient_arrival_observations"
+        return True, "qualified"
+
+    def _selected_frontier_is_novel(
+        self, attempt: SearchAttempt, selected: np.ndarray
+    ) -> bool:
+        if len(attempt.start_frontiers) == 0:
+            return False
+        return bool(
+            float(
+                np.min(
+                    np.linalg.norm(
+                        attempt.start_frontiers - selected,
+                        axis=1,
+                    )
+                )
+            )
+            > self.config.branch_association_radius_m
+        )
 
     @staticmethod
     def _coverage_pixels(obstacle_map: Any) -> int:
@@ -314,6 +398,7 @@ class PlaceConditionedResidualMemory:
     ) -> None:
         self._attempt_sequence[env] += 1
         selected = _xy(frontier)
+        start_robot_distance_m = _distance(robot_xy, selected)
         attempt = SearchAttempt(
             attempt_id=self._attempt_sequence[env],
             target=str(target),
@@ -327,7 +412,8 @@ class PlaceConditionedResidualMemory:
             start_up_stair_present=bool(up_stair_present),
             start_down_stair_present=bool(down_stair_present),
             start_frontiers=_frontier_array(frontiers),
-            min_robot_distance_m=_distance(robot_xy, selected),
+            start_robot_distance_m=start_robot_distance_m,
+            min_robot_distance_m=start_robot_distance_m,
         )
         self._active[env] = attempt
         self._events[env].append(
@@ -341,6 +427,10 @@ class PlaceConditionedResidualMemory:
                 "source_submap_id": attempt.source_submap_id,
                 "target": attempt.target,
                 "frontier_local": selected.tolist(),
+                "start_robot_distance_m": start_robot_distance_m,
+                "minimum_excursion_start_distance_m": (
+                    self.config.minimum_excursion_start_distance_m
+                ),
             }
         )
 
@@ -363,19 +453,35 @@ class PlaceConditionedResidualMemory:
         selected = _xy(selected_frontier)
         active = self._active[env]
         if active is not None:
-            same_attempt = bool(
+            same_context = bool(
                 active.target == str(target)
                 and active.source_submap_id == str(source_submap_id)
                 and active.floor_id == int(floor_id)
+            )
+            same_branch = bool(
+                same_context
                 and _distance(active.frontier_local, selected)
                 <= self.config.branch_association_radius_m
             )
-            if same_attempt:
+            if same_branch:
                 return
+            qualified, _ = self._excursion_qualification(active)
+            if same_context and self._selected_frontier_is_novel(
+                active, selected
+            ):
+                active.exit_gain = True
+                outcome = "completed"
+                reason = "selected_new_frontier"
+            elif same_context and qualified:
+                outcome = "completed"
+                reason = "independent_branch_departure"
+            else:
+                outcome = "interrupted"
+                reason = "replanning_switch"
             self.finish_attempt(
                 env=env,
-                outcome="interrupted",
-                reason="replanning_switch",
+                outcome=outcome,
+                reason=reason,
                 step=step,
                 obstacle_map=obstacle_map,
             )
@@ -459,7 +565,10 @@ class PlaceConditionedResidualMemory:
             attempt.min_robot_distance_m, robot_distance
         )
         if robot_distance <= float(arrival_radius_m):
+            if not attempt.reached:
+                attempt.first_arrival_step = int(step)
             attempt.reached = True
+            attempt.arrival_observations += 1
         if not attempt.start_target_present and bool(target_present):
             attempt.target_gain = True
         if (
@@ -515,14 +624,6 @@ class PlaceConditionedResidualMemory:
                 step=step,
                 obstacle_map=obstacle_map,
             )
-        if attempt.reached:
-            return self.finish_attempt(
-                env=env,
-                outcome="completed",
-                reason="frontier_arrived",
-                step=step,
-                obstacle_map=obstacle_map,
-            )
         return None
 
     def finish_attempt(
@@ -538,6 +639,10 @@ class PlaceConditionedResidualMemory:
         if attempt is None:
             return None
         coverage = self._coverage_delta_m2(attempt, obstacle_map)
+        excursion_qualified, qualification_reason = (
+            self._excursion_qualification(attempt)
+        )
+        provisional_low_gain = False
         if outcome == "execution_failure":
             status = SearchBranchStatus.TEMP_BLOCKED
         elif outcome != "completed":
@@ -546,8 +651,13 @@ class PlaceConditionedResidualMemory:
             coverage >= self.config.low_gain_area_m2
         ):
             status = SearchBranchStatus.PRODUCTIVE
-        elif attempt.reached:
-            status = SearchBranchStatus.CONSUMED
+        elif excursion_qualified:
+            # A completed low-gain excursion is deliberately provisional.  It
+            # gains suppression authority only after a later opaque oracle
+            # identity event confirms that the agent left and returned to the
+            # same place.
+            status = SearchBranchStatus.UNRESOLVED
+            provisional_low_gain = True
         else:
             status = SearchBranchStatus.UNRESOLVED
         shadow_low_gain = bool(
@@ -564,6 +674,8 @@ class PlaceConditionedResidualMemory:
             coverage_delta_m2=coverage,
             shadow_low_gain=shadow_low_gain,
             reason=str(reason),
+            provisional_low_gain=provisional_low_gain,
+            excursion_qualified=excursion_qualified,
         )
         self._events[env].append(
             {
@@ -579,6 +691,20 @@ class PlaceConditionedResidualMemory:
                 "outcome": str(outcome),
                 "reason": str(reason),
                 "reached": bool(attempt.reached),
+                "first_arrival_step": attempt.first_arrival_step,
+                "arrival_observations": int(attempt.arrival_observations),
+                "minimum_arrival_observations": (
+                    self.config.minimum_arrival_observations
+                ),
+                "start_robot_distance_m": float(
+                    attempt.start_robot_distance_m
+                ),
+                "minimum_excursion_start_distance_m": (
+                    self.config.minimum_excursion_start_distance_m
+                ),
+                "excursion_qualified": excursion_qualified,
+                "excursion_qualification_reason": qualification_reason,
+                "provisional_low_gain": provisional_low_gain,
                 "coverage_delta_m2": float(coverage),
                 "low_gain_threshold_m2": self.config.low_gain_area_m2,
                 "shadow_low_gain_threshold_m2": (
@@ -603,6 +729,8 @@ class PlaceConditionedResidualMemory:
         coverage_delta_m2: float,
         shadow_low_gain: bool,
         reason: str,
+        provisional_low_gain: bool,
+        excursion_qualified: bool,
     ) -> SearchBranchRecord:
         matches = [
             record
@@ -628,16 +756,36 @@ class PlaceConditionedResidualMemory:
                 SearchBranchStatus.TEMP_BLOCKED,
             }:
                 record.status = status
+            if status is SearchBranchStatus.PRODUCTIVE:
+                record.provisional_low_gain = False
+            elif (
+                provisional_low_gain
+                and record.status is not SearchBranchStatus.PRODUCTIVE
+            ):
+                record.provisional_low_gain = True
+            if excursion_qualified:
+                record.qualified_excursions += 1
             record.attempts += 1
             record.last_start_step = attempt.start_step
             record.last_end_step = int(end_step)
             record.action_cost += int(end_step) - attempt.start_step
-            record.coverage_delta_m2 = float(coverage_delta_m2)
+            record.coverage_delta_m2 = max(
+                record.coverage_delta_m2, float(coverage_delta_m2)
+            )
             record.shadow_low_gain = bool(shadow_low_gain)
-            record.reached = bool(attempt.reached)
-            record.target_gain = bool(attempt.target_gain)
-            record.exit_gain = bool(attempt.exit_gain)
+            record.reached = bool(record.reached or attempt.reached)
+            record.target_gain = bool(
+                record.target_gain or attempt.target_gain
+            )
+            record.exit_gain = bool(record.exit_gain or attempt.exit_gain)
             record.reason = str(reason)
+            if provisional_low_gain or not record.provisional_low_gain:
+                record.last_arrival_observations = int(
+                    attempt.arrival_observations
+                )
+                record.last_start_robot_distance_m = float(
+                    attempt.start_robot_distance_m
+                )
             return record
         self._branch_sequence[env] += 1
         record = SearchBranchRecord(
@@ -657,6 +805,13 @@ class PlaceConditionedResidualMemory:
             target_gain=bool(attempt.target_gain),
             exit_gain=bool(attempt.exit_gain),
             reason=str(reason),
+            provisional_low_gain=bool(provisional_low_gain),
+            qualified_excursions=(1 if excursion_qualified else 0),
+            independent_revisit_confirmations=0,
+            last_arrival_observations=int(attempt.arrival_observations),
+            last_start_robot_distance_m=float(
+                attempt.start_robot_distance_m
+            ),
         )
         self._branches[env].append(record)
         return record
@@ -669,10 +824,16 @@ class PlaceConditionedResidualMemory:
         step: int,
         obstacle_map: Any,
     ) -> Optional[SearchBranchStatus]:
+        attempt = self._active[env]
+        if attempt is None:
+            return None
+        qualified, _ = self._excursion_qualification(attempt)
         return self.finish_attempt(
             env=env,
-            outcome="interrupted",
-            reason=reason,
+            outcome="completed" if qualified else "interrupted",
+            reason=(
+                f"qualified_boundary:{reason}" if qualified else reason
+            ),
             step=step,
             obstacle_map=obstacle_map,
         )
@@ -972,4 +1133,12 @@ class PlaceConditionedResidualMemory:
                 )
                 for status in SearchBranchStatus
             },
+            "provisional_low_gain_count": sum(
+                record.provisional_low_gain
+                for record in self._branches[env]
+            ),
+            "independent_revisit_confirmation_count": sum(
+                record.independent_revisit_confirmations
+                for record in self._branches[env]
+            ),
         }

@@ -87,7 +87,7 @@ def _finish_branch(
     coverage_pixels: int = 0,
     target_gain: bool = False,
 ) -> SearchBranchStatus:
-    frontiers = np.asarray([[1.0, 0.0], [3.0, 0.0]])
+    frontiers = np.asarray([[2.0, 0.0], [4.0, 0.0]])
     memory.register_selection(
         env=0,
         target="chair",
@@ -109,7 +109,7 @@ def _finish_branch(
         source_submap_id="submap-a",
         floor_id=0,
         step=15,
-        robot_xy=np.asarray([1.0, 0.0]),
+        robot_xy=np.asarray([2.0, 0.0]),
         obstacle_map=obstacle,
         target_present=target_gain,
         up_stair_present=False,
@@ -117,8 +117,42 @@ def _finish_branch(
         frontiers=frontiers,
         arrival_radius_m=0.5,
     )
-    assert status is not None
-    return status
+    if target_gain:
+        assert status is SearchBranchStatus.PRODUCTIVE
+        return status
+    assert status is None
+    assert (
+        memory.observe(
+            env=0,
+            target="chair",
+            source_submap_id="submap-a",
+            floor_id=0,
+            step=16,
+            robot_xy=np.asarray([2.0, 0.0]),
+            obstacle_map=obstacle,
+            target_present=False,
+            up_stair_present=False,
+            down_stair_present=False,
+            frontiers=frontiers,
+            arrival_radius_m=0.5,
+        )
+        is None
+    )
+    memory.register_selection(
+        env=0,
+        target="chair",
+        source_submap_id="submap-a",
+        floor_id=0,
+        selected_frontier=frontiers[1],
+        step=17,
+        obstacle_map=obstacle,
+        robot_xy=np.asarray([2.0, 0.0]),
+        target_present=False,
+        up_stair_present=False,
+        down_stair_present=False,
+        frontiers=frontiers,
+    )
+    return memory.branches(0)[0].status
 
 
 def test_oracle_policy_event_is_a_sealed_identity_only_message() -> None:
@@ -236,12 +270,14 @@ def test_graph_direct_association_is_rejected_but_nondirect_is_accepted() -> Non
     )
 
 
-def test_completed_low_gain_is_consumed_but_real_information_is_productive() -> None:
+def test_low_gain_excursion_is_provisional_but_real_information_is_productive() -> None:
     memory = _enabled_memory()
-    assert _finish_branch(memory, FakeObstacleMap()) is SearchBranchStatus.CONSUMED
+    assert _finish_branch(memory, FakeObstacleMap()) is SearchBranchStatus.UNRESOLVED
     record = memory.branches(0)[0]
     assert record.reached
     assert record.coverage_delta_m2 == 0.0
+    assert record.provisional_low_gain
+    assert record.qualified_excursions == 1
 
     coverage_memory = _enabled_memory()
     assert (
@@ -260,10 +296,59 @@ def test_completed_low_gain_is_consumed_but_real_information_is_productive() -> 
     )
 
 
-def test_consumed_top1_reranks_to_highest_live_residual_alternative() -> None:
-    graph, current = _three_node_graph()
+def test_adjacent_one_frame_arrival_never_gains_suppression_authority() -> None:
+    graph, _ = _three_node_graph()
     memory = _enabled_memory()
-    assert _finish_branch(memory, FakeObstacleMap()) is SearchBranchStatus.CONSUMED
+    obstacle = FakeObstacleMap()
+    frontiers = np.asarray([[2.0, 0.0], [4.0, 0.0]])
+    memory.register_selection(
+        env=0,
+        target="chair",
+        source_submap_id="submap-a",
+        floor_id=0,
+        selected_frontier=frontiers[0],
+        step=1,
+        obstacle_map=obstacle,
+        robot_xy=np.zeros(2),
+        target_present=False,
+        up_stair_present=False,
+        down_stair_present=False,
+        frontiers=frontiers,
+    )
+    assert (
+        memory.observe(
+            env=0,
+            target="chair",
+            source_submap_id="submap-a",
+            floor_id=0,
+            step=8,
+            robot_xy=frontiers[0],
+            obstacle_map=obstacle,
+            target_present=False,
+            up_stair_present=False,
+            down_stair_present=False,
+            frontiers=frontiers,
+            arrival_radius_m=0.5,
+        )
+        is None
+    )
+    memory.register_selection(
+        env=0,
+        target="chair",
+        source_submap_id="submap-a",
+        floor_id=0,
+        selected_frontier=frontiers[1],
+        step=9,
+        obstacle_map=obstacle,
+        robot_xy=frontiers[0],
+        target_present=False,
+        up_stair_present=False,
+        down_stair_present=False,
+        frontiers=frontiers,
+    )
+    record = memory.branches(0)[0]
+    assert record.status is SearchBranchStatus.UNRESOLVED
+    assert not record.provisional_low_gain
     assert memory.accept_oracle_event(
         env=0,
         event=OracleSamePlaceEvent(1, "submap-a"),
@@ -271,30 +356,162 @@ def test_consumed_top1_reranks_to_highest_live_residual_alternative() -> None:
         graph=graph,
         step=40,
     )
+    assert record.status is SearchBranchStatus.UNRESOLVED
+    assert not any(
+        item["event"] == "search_branch_consumed"
+        for item in memory.drain_events(0)
+    )
+
+
+def test_nearby_start_is_refresh_not_independent_excursion() -> None:
+    memory = _enabled_memory()
+    obstacle = FakeObstacleMap()
+    frontiers = np.asarray([[0.2, 0.0], [2.0, 0.0]])
+    memory.register_selection(
+        env=0,
+        target="chair",
+        source_submap_id="submap-a",
+        floor_id=0,
+        selected_frontier=frontiers[0],
+        step=1,
+        obstacle_map=obstacle,
+        robot_xy=np.zeros(2),
+        target_present=False,
+        up_stair_present=False,
+        down_stair_present=False,
+        frontiers=frontiers,
+    )
+    for step in (2, 3):
+        memory.observe(
+            env=0,
+            target="chair",
+            source_submap_id="submap-a",
+            floor_id=0,
+            step=step,
+            robot_xy=frontiers[0],
+            obstacle_map=obstacle,
+            target_present=False,
+            up_stair_present=False,
+            down_stair_present=False,
+            frontiers=frontiers,
+            arrival_radius_m=0.5,
+        )
+    memory.register_selection(
+        env=0,
+        target="chair",
+        source_submap_id="submap-a",
+        floor_id=0,
+        selected_frontier=frontiers[1],
+        step=4,
+        obstacle_map=obstacle,
+        robot_xy=frontiers[0],
+        target_present=False,
+        up_stair_present=False,
+        down_stair_present=False,
+        frontiers=frontiers,
+    )
+    assert not memory.branches(0)[0].provisional_low_gain
+
+
+def test_selected_new_frontier_preserves_productive_search() -> None:
+    memory = _enabled_memory()
+    obstacle = FakeObstacleMap()
+    initial = np.asarray([[2.0, 0.0]])
+    memory.register_selection(
+        env=0,
+        target="chair",
+        source_submap_id="submap-a",
+        floor_id=0,
+        selected_frontier=initial[0],
+        step=1,
+        obstacle_map=obstacle,
+        robot_xy=np.zeros(2),
+        target_present=False,
+        up_stair_present=False,
+        down_stair_present=False,
+        frontiers=initial,
+    )
+    for step in (8, 9):
+        memory.observe(
+            env=0,
+            target="chair",
+            source_submap_id="submap-a",
+            floor_id=0,
+            step=step,
+            robot_xy=initial[0],
+            obstacle_map=obstacle,
+            target_present=False,
+            up_stair_present=False,
+            down_stair_present=False,
+            frontiers=initial,
+            arrival_radius_m=0.5,
+        )
+    memory.register_selection(
+        env=0,
+        target="chair",
+        source_submap_id="submap-a",
+        floor_id=0,
+        selected_frontier=[4.0, 0.0],
+        step=10,
+        obstacle_map=obstacle,
+        robot_xy=initial[0],
+        target_present=False,
+        up_stair_present=False,
+        down_stair_present=False,
+        frontiers=[[2.0, 0.0], [4.0, 0.0]],
+    )
+    record = memory.branches(0)[0]
+    assert record.status is SearchBranchStatus.PRODUCTIVE
+    assert record.exit_gain
+    assert not record.provisional_low_gain
+
+
+def test_consumed_top1_reranks_to_highest_live_residual_alternative() -> None:
+    graph, current = _three_node_graph()
+    memory = _enabled_memory()
+    assert _finish_branch(memory, FakeObstacleMap()) is SearchBranchStatus.UNRESOLVED
+    assert memory.accept_oracle_event(
+        env=0,
+        event=OracleSamePlaceEvent(1, "submap-a"),
+        current_submap_id="submap-c",
+        graph=graph,
+        step=40,
+    )
+    assert memory.branches(0)[0].status is SearchBranchStatus.CONSUMED
+    consumed_event = next(
+        item
+        for item in memory.drain_events(0)
+        if item["event"] == "search_branch_consumed"
+    )
+    assert consumed_event["last_arrival_observations"] >= 2
+    assert consumed_event["last_start_robot_distance_m"] >= 1.4
+    assert consumed_event["reason"] == (
+        "oracle_confirmed_independent_place_revisit"
+    )
     decision = memory.arbitrate(
         env=0,
         target="chair",
         active=current,
         graph=graph,
-        base_frontier=[1.0, 0.0],
+        base_frontier=[2.0, 0.0],
         base_value=0.9,
-        sorted_frontiers=[[1.0, 0.0], [3.0, 0.0], [4.0, 0.0]],
+        sorted_frontiers=[[2.0, 0.0], [4.0, 0.0], [5.0, 0.0]],
         sorted_values=[0.9, 0.8, 0.7],
         topk=3,
         step=45,
     )
     assert decision.changed
     assert decision.reason == "consumed_to_residual"
-    np.testing.assert_allclose(decision.final_frontier, [3.0, 0.0])
+    np.testing.assert_allclose(decision.final_frontier, [4.0, 0.0])
 
     no_alternative = memory.arbitrate(
         env=0,
         target="chair",
         active=current,
         graph=graph,
-        base_frontier=[1.0, 0.0],
+        base_frontier=[2.0, 0.0],
         base_value=0.9,
-        sorted_frontiers=[[1.0, 0.0]],
+        sorted_frontiers=[[2.0, 0.0]],
         sorted_values=[0.9],
         topk=3,
         step=46,

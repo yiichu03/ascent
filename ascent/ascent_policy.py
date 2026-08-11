@@ -354,6 +354,16 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     config, "persistent_frontier_observations", 2
                 )
             ),
+            minimum_arrival_observations=int(
+                _place_memory_config_value(
+                    config, "minimum_arrival_observations", 2
+                )
+            ),
+            minimum_excursion_start_distance_m=float(
+                _place_memory_config_value(
+                    config, "minimum_excursion_start_distance_m", 1.4
+                )
+            ),
         )
         if self._place_memory_config.enabled and not self._submap_enabled:
             raise RuntimeError(
@@ -479,7 +489,7 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     ),
                     "place_memory_enabled": self._place_memory is not None,
                     "place_memory_contract": (
-                        "opaque_same_place_identity_then_vo_branch_query"
+                        "opaque_same_place_identity_then_independent_excursion_query"
                         if self._place_memory is not None
                         else None
                     ),

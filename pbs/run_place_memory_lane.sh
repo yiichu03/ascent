@@ -200,6 +200,8 @@ done
   echo place_branch_match_radius_m=1.0
   echo place_branch_match_margin_m=0.25
   echo place_persistent_frontier_observations=2
+  echo place_minimum_arrival_observations=2
+  echo place_minimum_excursion_start_distance_m=1.4
   echo no_metric_driven_retry=1
   echo technical_retry_policy=one_fixed_retry_per_failed_unit
   echo method_version=submap_v1.4_oracle_task_memory
@@ -355,6 +357,8 @@ run_unit() {
     "ascent_place_memory.branch_match_radius_m=1.0"
     "ascent_place_memory.branch_match_margin_m=0.25"
     "ascent_place_memory.persistent_frontier_observations=2"
+    "ascent_place_memory.minimum_arrival_observations=2"
+    "ascent_place_memory.minimum_excursion_start_distance_m=1.4"
     "ascent_place_memory.oracle_physical_planar_radius_m=0.75"
     "ascent_place_memory.oracle_physical_height_radius_m=0.75"
     "ascent_place_memory.oracle_min_step_separation=30"
@@ -389,6 +393,8 @@ run_unit() {
     echo place_branch_match_radius_m=1.0
     echo place_branch_match_margin_m=0.25
     echo place_persistent_frontier_observations=2
+    echo place_minimum_arrival_observations=2
+    echo place_minimum_excursion_start_distance_m=1.4
     echo oracle_physical_planar_radius_m=0.75
     echo oracle_physical_height_radius_m=0.75
     echo oracle_min_step_separation=30
