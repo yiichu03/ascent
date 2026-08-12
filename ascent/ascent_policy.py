@@ -324,6 +324,10 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 _place_memory_config_value(config, "enabled", False),
                 "enabled",
             ),
+            shadow_only=_as_place_config_bool(
+                _place_memory_config_value(config, "shadow_only", False),
+                "shadow_only",
+            ),
             low_gain_area_m2=float(
                 _place_memory_config_value(
                     config, "low_gain_area_m2", 0.5
@@ -474,7 +478,12 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     "pose_source": "zhao_rgbd_2021",
                     "policy_gt_isolation": True,
                     "method_version": (
-                        "submap_v1.4_oracle_task_memory"
+                        "submap_v1.4_case_audit_shadow"
+                        if (
+                            self._place_memory is not None
+                            and self._place_memory_config.shadow_only
+                        )
+                        else "submap_v1.4_oracle_task_memory"
                         if self._place_memory is not None
                         else "submap_v1.2"
                         if (
@@ -494,7 +503,12 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     ),
                     "place_memory_enabled": self._place_memory is not None,
                     "place_memory_contract": (
-                        "opaque_same_place_identity_then_independent_excursion_query"
+                        "opaque_same_place_identity_shadow_query_no_action_change"
+                        if (
+                            self._place_memory is not None
+                            and self._place_memory_config.shadow_only
+                        )
+                        else "opaque_same_place_identity_then_independent_excursion_query"
                         if self._place_memory is not None
                         else None
                     ),
@@ -2270,6 +2284,7 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 base_value: float,
                 sorted_frontiers: np.ndarray,
                 sorted_values: List[float],
+                planner_context: Dict[str, Any],
             ) -> Tuple[np.ndarray, float]:
                 nonlocal place_rerank_decision
                 if (
@@ -2290,8 +2305,11 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     topk=self.topk,
                     step=self._num_steps[env],
                     obstacle_map=self._map_controller._obstacle_map[env],
+                    planner_context=planner_context,
                 )
                 self._flush_place_memory_events(env)
+                if self._place_memory_config.shadow_only:
+                    return base_frontier, base_value
                 return (
                     place_rerank_decision.final_frontier,
                     place_rerank_decision.final_value,
@@ -2349,7 +2367,11 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                     historical_branch_ids=(
                         ()
                         if place_rerank_decision is None
-                        else place_rerank_decision.final_branch_ids
+                        else (
+                            place_rerank_decision.base_branch_ids
+                            if self._place_memory_config.shadow_only
+                            else place_rerank_decision.final_branch_ids
+                        )
                     ),
                 )
                 if tuple(best_frontier) in self._map_controller._obstacle_map[
@@ -2364,7 +2386,14 @@ class Ascent_Policy(HabitatMixin, ITMPolicyV2):
                 self._flush_place_memory_events(env)
                 if place_rerank_decision is not None:
                     self._observations_cache[env]["place_rerank"] = {
-                        "changed": place_rerank_decision.changed,
+                        "changed": (
+                            place_rerank_decision.changed
+                            and not self._place_memory_config.shadow_only
+                        ),
+                        "counterfactual_changed": (
+                            place_rerank_decision.changed
+                        ),
+                        "shadow_only": self._place_memory_config.shadow_only,
                         "reason": place_rerank_decision.reason,
                         "base_frontier": (
                             place_rerank_decision.base_frontier.tolist()

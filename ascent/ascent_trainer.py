@@ -273,7 +273,14 @@ class AscentTrainer(PPOTrainer):
             self._oracle_place_diagnostics = OraclePlaceDiagnosticsWriter(
                 oracle_diagnostics_path,
                 metadata={
-                    "method": "v1.4_oracle_task_memory",
+                    "method": (
+                        "v1.4_case_audit_shadow"
+                        if _config_bool(
+                            config,
+                            "ascent_place_memory.shadow_only",
+                        )
+                        else "v1.4_oracle_task_memory"
+                    ),
                     "dataset": (
                         "hm3d"
                         if "hm3d" in config.habitat.dataset.data_path

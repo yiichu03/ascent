@@ -38,6 +38,13 @@ class Ascent_LLM_Planner:
         self.multi_floor_ask_step = [0 for _ in range(self._num_envs)]
         self.floor_probabilities_df = floor_probabilities_df
         self.frontier_rgb_list = [[] for _ in range(self._num_envs)]
+        self._case_llm_trace = [{} for _ in range(self._num_envs)]
+        self._case_area_descriptions = [
+            [] for _ in range(self._num_envs)
+        ]
+        self._case_multi_floor_trace = [
+            {} for _ in range(self._num_envs)
+        ]
         ## knowledge graph
         with open('statistic_priors/knowledge_graph.json', 'r') as f:
             self.knowledge_graph = nx.node_link_graph(json.load(f))
@@ -52,6 +59,9 @@ class Ascent_LLM_Planner:
         self._target_object[env] = ""
         self.multi_floor_ask_step[env] = 0
         self.frontier_rgb_list[env] = []
+        self._case_llm_trace[env] = {}
+        self._case_area_descriptions[env] = []
+        self._case_multi_floor_trace[env] = {}
         self.floor_num[env] = 1
 
     def reset_submap_local_state(self, env: int) -> None:
@@ -63,6 +73,9 @@ class Ascent_LLM_Planner:
         self._last_value[env] = float("-inf")
         self._last_frontier[env] = np.zeros(2)
         self.frontier_rgb_list[env] = []
+        self._case_llm_trace[env] = {}
+        self._case_area_descriptions[env] = []
+        self._case_multi_floor_trace[env] = {}
 
     def _get_best_frontier_with_llm(
             self,
@@ -84,7 +97,13 @@ class Ascent_LLM_Planner:
             frontier_stick_step: List[int] = [1],
             candidate_arbitrator: Optional[
                 Callable[
-                    [np.ndarray, float, np.ndarray, List[float]],
+                    [
+                        np.ndarray,
+                        float,
+                        np.ndarray,
+                        List[float],
+                        Dict[str, Any],
+                    ],
                     Tuple[np.ndarray, float],
                 ]
             ] = None,
@@ -94,19 +113,62 @@ class Ascent_LLM_Planner:
             Returns:
                 Tuple[np.ndarray, float]: The best frontier and its value.
             """
-            # 🆕 0. 如果只有一个前沿点，直接导航到该点
+            self._case_llm_trace[env] = {}
+            self._case_area_descriptions[env] = []
+            self._case_multi_floor_trace[env] = {}
+
+            # 🆕 0. 如果只有一个前沿点，直接导航到该点。Shadow
+            # instrumentation may observe this decision, but must return the
+            # same already-live candidate.
             if len(frontiers) == 1:
-                return frontiers[0], 1.0
+                best_frontier = np.asarray(
+                    frontiers[0], dtype=np.float64
+                ).copy()
+                best_value = 1.0
+                if candidate_arbitrator is not None:
+                    best_frontier, best_value = candidate_arbitrator(
+                        best_frontier.copy(),
+                        best_value,
+                        np.asarray([best_frontier], dtype=np.float64),
+                        [best_value],
+                        self._case_audit_context(
+                            env=env,
+                            selection_source="single_frontier",
+                            robot_xy=observations_cache[env]["robot_xy"],
+                            base_frontier=best_frontier,
+                            base_value=best_value,
+                            sorted_pts=np.asarray(
+                                [best_frontier], dtype=np.float64
+                            ),
+                            sorted_values=[best_value],
+                            topk=topk,
+                        ),
+                    )
+                    best_frontier = np.asarray(
+                        best_frontier, dtype=np.float64
+                    )
+                    if (
+                        best_frontier.shape != (2,)
+                        or not np.isfinite(best_frontier).all()
+                        or not np.array_equal(best_frontier, frontiers[0])
+                    ):
+                        raise RuntimeError(
+                            "single-candidate arbitration returned a "
+                            "non-live frontier"
+                        )
+                return np.asarray(best_frontier), float(best_value)
             
             # 1. 初始化
             sorted_pts, sorted_values = self._sort_frontiers_by_value(obstacle_map, value_map, frontiers, env)
             robot_xy = observations_cache[env]["robot_xy"]
             
             best_frontier, best_value = None, None
+            selection_source = "unknown"
 
             # 2. 处理强制前沿
             best_frontier, best_value = self._try_force_frontier(sorted_pts, sorted_values, env)
             if best_frontier is not None:
+                selection_source = "force_frontier"
                 print(f"Force Move.")
 
             # 3. 处理近邻前沿 (如果未选中强制前沿且满足条件)
@@ -117,6 +179,7 @@ class Ascent_LLM_Planner:
                 if activated_neighbor_search:
                     obstacle_map[env]._neighbor_search = True
                     best_frontier, best_value = best_frontier_nearby, best_value_nearby
+                    selection_source = "nearby_frontier"
                     print(f"Frontier {best_frontier} is very close (distance: {np.linalg.norm(best_frontier - robot_xy):.2f}m), selecting it.")
                 else:
                     # 如果尝试近邻搜索但没有找到合适的近邻前沿，则将 _finish_first_explore 设为 False
@@ -128,6 +191,12 @@ class Ascent_LLM_Planner:
             if best_frontier is None:
                 best_frontier, best_value = self._decide_frontier_with_llm(obstacle_map, object_map, sorted_pts, sorted_values, env, topk, use_multi_floor, 
                                                                            floor_num, cur_floor_index, num_steps,obstacle_map_list,object_map_list)
+                if best_value == -100:
+                    selection_source = "llm_floor_up"
+                elif best_value == -200:
+                    selection_source = "llm_floor_down"
+                else:
+                    selection_source = "llm_frontier"
 
             # A task-memory caller may arbitrate only after the unchanged
             # ASCENT decision exists, but before sticky/disable state is
@@ -142,6 +211,16 @@ class Ascent_LLM_Planner:
                     float(best_value),
                     np.asarray(sorted_pts, dtype=np.float64).copy(),
                     list(map(float, sorted_values)),
+                    self._case_audit_context(
+                        env=env,
+                        selection_source=selection_source,
+                        robot_xy=robot_xy,
+                        base_frontier=best_frontier,
+                        base_value=best_value,
+                        sorted_pts=sorted_pts,
+                        sorted_values=sorted_values,
+                        topk=topk,
+                    ),
                 )
                 arbitrated_frontier = np.asarray(
                     arbitrated_frontier, dtype=np.float64
@@ -174,6 +253,38 @@ class Ascent_LLM_Planner:
                 
             print(f"Now the best_frontier is {best_frontier}")
             return best_frontier, best_value
+
+    def _case_audit_context(
+        self,
+        *,
+        env: int,
+        selection_source: str,
+        robot_xy: np.ndarray,
+        base_frontier: np.ndarray,
+        base_value: float,
+        sorted_pts: np.ndarray,
+        sorted_values: List[float],
+        topk: int,
+    ) -> Dict[str, Any]:
+        """Return policy-visible decision evidence with no GT fields."""
+
+        return {
+            "schema": "v1_4_case_audit_planner_context_v1",
+            "selection_source": str(selection_source),
+            "target_category": self._target_object[env].split("|")[0],
+            "robot_xy": np.asarray(robot_xy, dtype=np.float64).tolist(),
+            "base_frontier": np.asarray(
+                base_frontier, dtype=np.float64
+            ).tolist(),
+            "base_value": float(base_value),
+            "live_candidate_count": int(len(sorted_pts)),
+            "topk": int(topk),
+            "frontier_steps": [
+                int(value) for value in self.frontier_step_list[env]
+            ],
+            "llm": dict(self._case_llm_trace[env]),
+            "multi_floor": dict(self._case_multi_floor_trace[env]),
+        }
     
     def _sort_frontiers_by_value(
         self, obstacle_map, value_map, frontiers: np.ndarray, env: int = 0,
@@ -266,6 +377,12 @@ class Ascent_LLM_Planner:
             multi_floor_prompt = self._prepare_multiple_floor_prompt(target_object_category, env, cur_floor_index, obstacle_map_list, object_map_list)
             print(f"## Multi-floor Prompt: {multi_floor_prompt}")
             multi_floor_response = self._llm.chat(multi_floor_prompt)
+            self._case_multi_floor_trace[env] = {
+                "prompt": multi_floor_prompt,
+                "raw_response": multi_floor_response,
+                "current_floor": int(cur_floor_index[env] + 1),
+                "known_floor_count": int(floor_num[env]),
+            }
 
             if multi_floor_response == "-1": # LLM调用失败或返回-1
                 best_frontier_idx = self.llm_analyze_single_floor(env, target_object_category, frontier_index_list, obstacle_map, object_map)
@@ -381,7 +498,20 @@ class Ascent_LLM_Planner:
                             logging.warning(f"Index ({index_int}) is out of valid range: 1 to {len(frontier_index_list)}")
                             temp_frontier_index = 0
         
-        return frontier_index_list[temp_frontier_index]
+        selected_rank = frontier_index_list[temp_frontier_index]
+        self._case_llm_trace[env] = {
+            "prompt": prompt,
+            "raw_response": response,
+            "frontier_index_list": [
+                int(value) for value in frontier_index_list
+            ],
+            "selected_prompt_position": int(temp_frontier_index),
+            "selected_frontier_rank": int(selected_rank),
+            "area_descriptions": list(
+                self._case_area_descriptions[env]
+            ),
+        }
+        return selected_rank
 
     def get_room_probabilities(self, target_object_category: str):
         """
@@ -476,6 +606,9 @@ class Ascent_LLM_Planner:
             except (IndexError, KeyError) as e:
                 logging.warning(f"Error accessing room or objects for step {step}: {e}")
                 continue
+        self._case_area_descriptions[env] = [
+            dict(value) for value in area_descriptions
+        ]
         # 获取房间-对象关联概率
         room_probabilities = self.get_room_probabilities(target_object_category)
         sorted_rooms = sorted(

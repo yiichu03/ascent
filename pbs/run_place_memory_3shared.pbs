@@ -3,21 +3,21 @@
 #PBS -P CFP04-SF-109
 #PBS -q auto
 #PBS -l select=1:ncpus=24:ngpus=1:mem=384gb
-#PBS -l walltime=96:00:00
+#PBS -l walltime=24:00:00
 #PBS -j oe
 
 set -euo pipefail
 
 PROJECT=/scratch/e1538633/liuyi/drift-aware-submap-exploration
-SOURCE_ROOT=$PROJECT/external/ascent_vo_submap_v1_4_oracle_task_memory
+SOURCE_ROOT=$PROJECT/external/ascent_vo_submap_v1_4_case_audit
 RESOURCE_ROOT=$PROJECT/external/ascent
 POINTNAV_VO_ROOT=$PROJECT/external/PointNav-VO
-ARTIFACT_ROOT=${ASCENT_PLACE_MEMORY_V14_ARTIFACT_ROOT:-$PROJECT/artifacts/objectnav/submap_v1_4_oracle_task_memory}
+ARTIFACT_ROOT=${ASCENT_PLACE_MEMORY_V14_ARTIFACT_ROOT:-$PROJECT/artifacts/objectnav/submap_v1_4_case_audit}
 WORKER=$SOURCE_ROOT/pbs/run_place_memory_lane.sh
 PREFLIGHT=$SOURCE_ROOT/scripts/preflight_submap_screen.py
 LOADING_CHECK=$SOURCE_ROOT/scripts/check_submap_habitat_loading.py
 TASK_RESET_CHECK=$SOURCE_ROOT/scripts/check_submap_task_reset.py
-SUMMARIZER=$SOURCE_ROOT/scripts/summarize_place_memory_screen.py
+SUMMARIZER=$SOURCE_ROOT/scripts/summarize_case_audit.py
 PORT_SELECTOR=$SOURCE_ROOT/scripts/select_submap_port_block.py
 
 DATASET=${ASCENT_PLACE_MEMORY_V14_DATASET:?required}
@@ -35,7 +35,8 @@ POINTNAV_VO_COMMIT=${ASCENT_PLACE_MEMORY_V14_POINTNAV_VO_COMMIT:?required}
 CONTROLLER_SHA256=${ASCENT_PLACE_MEMORY_V14_CONTROLLER_SHA256:?required}
 WORKER_SHA256=${ASCENT_PLACE_MEMORY_V14_WORKER_SHA256:?required}
 STAMP=${ASCENT_PLACE_MEMORY_V14_STAMP:?required}
-BASELINE_CSVS=${ASCENT_PLACE_MEMORY_V14_BASELINE_CSVS:-}
+ORIGINAL_BASELINE_CSV=${ASCENT_PLACE_MEMORY_V14_ORIGINAL_BASELINE_CSV:-}
+ORIGINAL_BASELINE_SHA256=${ASCENT_PLACE_MEMORY_V14_ORIGINAL_BASELINE_SHA256:-}
 
 case "$DATASET" in
   hm3d)
@@ -47,10 +48,7 @@ case "$DATASET" in
   *) echo "invalid_dataset=$DATASET"; exit 20 ;;
 esac
 case "$EXPERIMENT" in
-  train150) ;;
-  mechanism_subset)
-    SCENES_ROOT=$RESOURCE_ROOT/data/scene_datasets
-    ;;
+  case_shard) ;;
   *) echo "invalid_experiment=$EXPERIMENT"; exit 20 ;;
 esac
 case "$MODE" in
@@ -63,19 +61,13 @@ case "$MODE" in
     TASK_RESET_TIMEOUT_SECONDS=1800
     ;;
   full)
-    case "$EXPERIMENT" in
-      train150)
-        [ "$EXPECTED_CHUNKS" = 5 ] && [ "$EXPECTED_EPISODES" = 150 ] || {
-          echo train150_contract; exit 20;
-        }
-        ;;
-      mechanism_subset)
-        [ "$EXPECTED_CHUNKS" = 6 ] && [ "$EXPECTED_EPISODES" = 60 ] || {
-          echo mechanism_subset_contract; exit 20;
-        }
-        ;;
-    esac
-    [ -n "$BASELINE_CSVS" ] || { echo missing_baseline_csvs; exit 20; }
+    [ "$EXPECTED_CHUNKS" = 6 ] && [ "$EXPECTED_EPISODES" = 60 ] || {
+      echo case_shard_contract; exit 20;
+    }
+    [ -n "$ORIGINAL_BASELINE_CSV" ] || { echo missing_original_baseline; exit 20; }
+    [ -n "$ORIGINAL_BASELINE_SHA256" ] || {
+      echo missing_original_baseline_sha256; exit 20;
+    }
     LANE_COUNT=3
     DEADLINE_OFFSET=$((22 * 3600))
     TASK_RESET_TIMEOUT_SECONDS=3600
@@ -108,6 +100,15 @@ done
 [ "$(sha256sum "$GATE_MANIFEST" | awk '{print $1}')" = "$GATE_MANIFEST_SHA256" ] || {
   echo gate_manifest_hash_mismatch; exit 22;
 }
+if [ "$MODE" = full ]; then
+  [ -f "$ORIGINAL_BASELINE_CSV" ] || {
+    echo "missing_original_baseline=$ORIGINAL_BASELINE_CSV"; exit 21;
+  }
+  [ "$(sha256sum "$ORIGINAL_BASELINE_CSV" | awk '{print $1}')" = \
+    "$ORIGINAL_BASELINE_SHA256" ] || {
+    echo original_baseline_hash_mismatch; exit 22;
+  }
+fi
 [ "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" = "$SOURCE_COMMIT" ] || {
   echo source_commit_mismatch; exit 22;
 }
@@ -167,8 +168,8 @@ BASE_PORT_ROOT=$(
     --seed "${PBS_JOBID:-manual}:$STAMP" --lanes 3
 )
 {
-  echo schema=ascent_vo_submap_v1_4_oracle_task_memory_three_shared_controller_v1
-  echo scientific_role=oracle_identity_only_task_memory_screen
+  echo schema=ascent_vo_submap_v1_4_case_audit_three_shared_controller_v1
+  echo scientific_role=paired_case_mining_shadow_only
   echo pbs_jobid=${PBS_JOBID:-manual}
   echo host=$(hostname)
   echo start_time=$(date -Is)
@@ -191,10 +192,12 @@ BASE_PORT_ROOT=$(
   echo pose_source=zhao_rgbd_2021
   echo policy_gt_isolation=1
   echo evaluation_gt_only=1
-  echo historical_v1_2_read_only=1
+  echo frozen_v1_2_parent=f238fc5
   echo no_metric_driven_retry=1
   echo placement_gate_technical_retry=one_fixed_per_failed_unit
-  echo method_version=submap_v1.4_oracle_task_memory
+  echo method_version=submap_v1.4_case_audit_shadow
+  echo paired_conditions=B1_ascent_vo,B2_v1_2_oracle_shadow
+  echo actual_task_memory_action_changes=0
   echo gt_policy_output_fields=event_sequence,reference_submap_id
   echo oracle_scope=vo_consistent_graph_nondirect_fragmentation_only
   echo same_place_identity_grants_consumption=0
@@ -202,7 +205,8 @@ BASE_PORT_ROOT=$(
   echo place_repeat_settlement=online_when_evidence_complete_and_residual_live
   echo handoff_enabled=1
   echo exhaustion_recovery_enabled=1
-  echo baseline_csvs=$BASELINE_CSVS
+  echo original_baseline_csv=$ORIGINAL_BASELINE_CSV
+  echo original_baseline_sha256=$ORIGINAL_BASELINE_SHA256
   echo base_port_root=$BASE_PORT_ROOT
   echo deadline_epoch=$DEADLINE_EPOCH
   qstat -f "${PBS_JOBID:-}" 2>/dev/null || true
@@ -311,11 +315,10 @@ done
 
 SUMMARY_ARGS=()
 if [ "$MODE" = full ]; then
-  IFS=: read -r -a BASELINE_PATHS <<< "$BASELINE_CSVS"
-  for baseline_path in "${BASELINE_PATHS[@]}"; do
-    [ -f "$baseline_path" ] || { echo "missing_baseline=$baseline_path"; exit 21; }
-    SUMMARY_ARGS+=(--baseline-episodes-csv "$baseline_path")
-  done
+  [ -f "$ORIGINAL_BASELINE_CSV" ] || {
+    echo "missing_original_baseline=$ORIGINAL_BASELINE_CSV"; exit 21;
+  }
+  SUMMARY_ARGS+=(--original-baseline-csv "$ORIGINAL_BASELINE_CSV")
 fi
 SUMMARY_DIR=$RUN_ROOT/final_gate
 set +e
@@ -336,20 +339,22 @@ set -e
 
 if [ "$WORKER_STATUS" -ne 0 ]; then echo "worker_failure=$WORKER_STATUS"; exit "$WORKER_STATUS"; fi
 if [ "$SUMMARY_STATUS" -ne 0 ]; then echo "summary_gate_failure=$SUMMARY_STATUS"; exit 46; fi
-read -r TECHNICAL_STATUS VALID MECHANISM PERFORMANCE < <(
+read -r TECHNICAL_STATUS VALID ASSOCIATIONS ACTUAL_CHANGES < <(
   "$ASCENT_PYTHON" - "$SUMMARY_DIR/summary.json" <<'PY'
 import json, sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))
-print(value["technical_status"], value["v14_valid_episodes"],
-      value["mechanism_exposure"], value["performance_verdict"])
+print(value["technical_status"], value["paired_valid_episodes"],
+      value["mechanism"]["association_accepted_count"],
+      value["mechanism"]["actual_change_count"])
 PY
 )
 [ "$TECHNICAL_STATUS" = PASS ] || exit 46
 [ "$VALID" = "$EXPECTED_EPISODES" ] || exit 46
+[ "$ACTUAL_CHANGES" = 0 ] || exit 46
 [ -z "$(git -C "$SOURCE_ROOT" status --porcelain --untracked-files=all)" ] || {
   echo source_changed_during_run; exit 47;
 }
-printf 'controller_exit_status=0 stage=complete dataset=%s experiment=%s mode=%s v14_valid=%s technical_status=%s mechanism_exposure=%s performance_verdict=%s time=%s\n' \
-  "$DATASET" "$EXPERIMENT" "$MODE" "$VALID" "$TECHNICAL_STATUS" "$MECHANISM" \
-  "$PERFORMANCE" "$(date -Is)" > "$RUN_ROOT/terminal_status.txt"
+printf 'controller_exit_status=0 stage=complete dataset=%s experiment=%s mode=%s paired_valid=%s technical_status=%s associations=%s actual_task_memory_action_changes=%s time=%s\n' \
+  "$DATASET" "$EXPERIMENT" "$MODE" "$VALID" "$TECHNICAL_STATUS" \
+  "$ASSOCIATIONS" "$ACTUAL_CHANGES" "$(date -Is)" > "$RUN_ROOT/terminal_status.txt"
 exit 0

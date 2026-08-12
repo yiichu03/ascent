@@ -45,6 +45,7 @@ ascent_submaps:
 ascent_place_memory:
   enabled: ${oc.env:ASCENT_PLACE_MEMORY_ENABLED,false}
   oracle_enabled: ${oc.env:ASCENT_PLACE_ORACLE_ENABLED,false}
+  shadow_only: ${oc.env:ASCENT_PLACE_MEMORY_SHADOW_ONLY,false}
   low_gain_area_m2: 0.5
   shadow_low_gain_area_m2: 1.0
   branch_association_radius_m: 0.5

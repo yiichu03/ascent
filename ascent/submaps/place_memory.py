@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -42,6 +42,7 @@ class OracleSamePlaceEvent:
 @dataclass(frozen=True)
 class PlaceMemoryConfig:
     enabled: bool = False
+    shadow_only: bool = False
     low_gain_area_m2: float = 0.5
     shadow_low_gain_area_m2: float = 1.0
     branch_association_radius_m: float = 0.5
@@ -1270,6 +1271,7 @@ class PlaceConditionedResidualMemory:
         topk: int,
         step: int,
         obstacle_map: Any,
+        planner_context: Optional[Mapping[str, Any]] = None,
     ) -> RerankDecision:
         base = _xy(base_frontier)
         place_id = self.place_for_submap(env, active.submap_id)
@@ -1285,6 +1287,36 @@ class PlaceConditionedResidualMemory:
             graph=graph,
             frontier=base,
         )
+        candidate_audit = []
+        points = _frontier_array(sorted_frontiers)
+        values = [float(value) for value in sorted_values]
+        for rank, (point, value) in enumerate(zip(points, values)):
+            match, match_reason = self.match_historical_branch(
+                env=env,
+                target=target,
+                active=active,
+                graph=graph,
+                frontier=point,
+            )
+            candidate_audit.append(
+                {
+                    "rank": int(rank),
+                    "frontier": point.tolist(),
+                    "value": value,
+                    "is_base": bool(_distance(point, base) <= 1e-9),
+                    "match_reason": match_reason,
+                    "historical_status": (
+                        None if match is None else match.status.value
+                    ),
+                    "match_distance_m": (
+                        None if match is None else match.distance_m
+                    ),
+                    "branch_ids": (
+                        [] if match is None else list(match.branch_ids)
+                    ),
+                }
+            )
+        audit_context = dict(planner_context or {})
         candidates: Optional[
             List[Tuple[np.ndarray, float, str, Tuple[str, ...]]]
         ] = None
@@ -1397,10 +1429,15 @@ class PlaceConditionedResidualMemory:
                     "step": int(step),
                     "place_id": place_id,
                     "decision_changed": False,
+                    "counterfactual_changed": False,
+                    "shadow_only": self.config.shadow_only,
                     "reason": decision.reason,
                     "base_frontier": base.tolist(),
                     "base_status": decision.base_status,
                     "base_branch_ids": list(decision.base_branch_ids),
+                    "live_candidate_count": len(candidate_audit),
+                    "candidate_audit": candidate_audit,
+                    "planner_context": audit_context,
                 }
             )
             return decision
@@ -1438,9 +1475,14 @@ class PlaceConditionedResidualMemory:
                     "step": int(step),
                     "place_id": place_id,
                     "decision_changed": False,
+                    "counterfactual_changed": False,
+                    "shadow_only": self.config.shadow_only,
                     "reason": decision.reason,
                     "base_frontier": base.tolist(),
                     "base_status": base_match.status.value,
+                    "live_candidate_count": len(candidate_audit),
+                    "candidate_audit": candidate_audit,
+                    "planner_context": audit_context,
                 }
             )
             return decision
@@ -1477,7 +1519,9 @@ class PlaceConditionedResidualMemory:
                 "event": "place_rerank_evaluated",
                 "step": int(step),
                 "place_id": place_id,
-                "decision_changed": True,
+                "decision_changed": not self.config.shadow_only,
+                "counterfactual_changed": True,
+                "shadow_only": self.config.shadow_only,
                 "reason": decision.reason,
                 "intervention": intervention,
                 "base_frontier": base.tolist(),
@@ -1489,6 +1533,9 @@ class PlaceConditionedResidualMemory:
                 "final_value": float(final_value),
                 "alternative_status": alternative_status,
                 "final_branch_ids": list(final_branch_ids),
+                "live_candidate_count": len(candidate_audit),
+                "candidate_audit": candidate_audit,
+                "planner_context": audit_context,
             }
         )
         return decision

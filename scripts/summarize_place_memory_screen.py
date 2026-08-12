@@ -63,7 +63,8 @@ def load_baseline(
 
 
 def validate_oracle_diagnostics(
-    row: Dict[str, str], *, expected_episodes: int, dataset: str
+    row: Dict[str, str], *, expected_episodes: int, dataset: str,
+    expected_method: str = "v1.4_oracle_task_memory",
 ) -> tuple[str, list[str]]:
     path_text = row.get("oracle_diagnostics", "")
     path = Path(path_text).resolve()
@@ -89,7 +90,6 @@ def validate_oracle_diagnostics(
     else:
         value = metadata[0]
         expected = {
-            "method": "v1.4_oracle_task_memory",
             "dataset": dataset,
             "gt_policy_isolation": True,
             "policy_event_fields": [
@@ -100,6 +100,11 @@ def validate_oracle_diagnostics(
         for key, expected_value in expected.items():
             if value.get(key) != expected_value:
                 errors.append(f"{prefix}:metadata:{key}:{value.get(key)!r}")
+        if value.get("method") != expected_method:
+            errors.append(
+                f"{prefix}:metadata:method:{value.get('method')!r}:"
+                f"{expected_method!r}"
+            )
         oracle_config = value.get("oracle_config", {})
         exact_config = {
             "enabled": True,

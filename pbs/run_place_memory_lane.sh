@@ -1,10 +1,10 @@
 #!/bin/bash
-# One B2-only ASCENT-VO place-memory-v1.4 lane with independent services.
+# One paired ASCENT+VO / v1.2-shadow case-audit lane with independent services.
 
 set -euo pipefail
 
 PROJECT=/scratch/e1538633/liuyi/drift-aware-submap-exploration
-SOURCE_ROOT=$PROJECT/external/ascent_vo_submap_v1_4_oracle_task_memory
+SOURCE_ROOT=$PROJECT/external/ascent_vo_submap_v1_4_case_audit
 RESOURCE_ROOT=$PROJECT/external/ascent
 POINTNAV_VO_ROOT=$PROJECT/external/PointNav-VO
 CHECKPOINT_DIR=$POINTNAV_VO_ROOT/pretrained_ckpts/vo
@@ -37,7 +37,7 @@ MAX_CONSECUTIVE_PROCESS_FAILURES=3
 
 case "$MODE" in smoke|full) ;; *) echo "invalid_mode=$MODE"; exit 20 ;; esac
 case "$DATASET" in hm3d|mp3d) ;; *) echo "invalid_dataset=$DATASET"; exit 20 ;; esac
-case "$EXPERIMENT" in train150|mechanism_subset) ;; *) echo "invalid_experiment=$EXPERIMENT"; exit 20 ;; esac
+case "$EXPERIMENT" in case_shard|placement_gate) ;; *) echo "invalid_experiment=$EXPERIMENT"; exit 20 ;; esac
 for value in "$LANE_ID" "$LANE_COUNT" "$EXPECTED_CHUNKS" \
   "$EXPECTED_EPISODES" "$BASE_PORT" "$DEADLINE_EPOCH"; do
   [[ "$value" =~ ^[0-9]+$ ]] || { echo "invalid_integer=$value"; exit 20; }
@@ -139,6 +139,7 @@ export PYTHONPATH="$SOURCE_ROOT:$SOURCE_ROOT/third_party/vlfm:$SOURCE_ROOT/third
 unset ASCENT_OCSM_ENABLED ASCENT_STAIR_DISTANCE_ORDER_FIX
 unset ASCENT_POSE_SCHEDULE_PATH ASCENT_POSE_ARM
 unset ASCENT_PLACE_MEMORY_ENABLED ASCENT_PLACE_ORACLE_ENABLED
+unset ASCENT_PLACE_MEMORY_SHADOW_ONLY
 unset ASCENT_PLACE_ORACLE_DIAGNOSTICS_PATH
 
 mapfile -t CHUNK_ROWS < <(
@@ -167,8 +168,8 @@ done
 }
 
 {
-  echo schema=ascent_vo_submap_v1_4_oracle_task_memory_lane_v2
-  echo scientific_role=oracle_identity_only_task_memory_screen
+  echo schema=ascent_vo_submap_v1_4_case_audit_lane_v1
+  echo scientific_role=paired_case_mining_shadow_only
   echo pbs_jobid=${PBS_JOBID:-manual}
   echo host=$(hostname)
   echo mode=$MODE
@@ -208,9 +209,9 @@ done
   echo place_repeat_settlement=online_when_evidence_complete_and_residual_live
   echo no_metric_driven_retry=1
   echo technical_retry_policy=one_fixed_retry_per_failed_unit
-  echo method_version=submap_v1.4_oracle_task_memory
-  echo handoff_enabled=1
-  echo exhaustion_recovery_enabled=1
+  echo method_version=submap_v1.4_case_audit_shadow
+  echo paired_conditions=B1_ascent_vo,B2_v1_2_oracle_shadow
+  echo actual_task_memory_action_changes=0
   echo start_time=$(date -Is)
 } > "$RUN_ROOT/environment_preflight.txt"
 
@@ -305,7 +306,7 @@ FAILED_UNITS=()
 CONSECUTIVE_PROCESS_FAILURES=0
 ATTEMPT_SEQUENCE=0
 run_unit() {
-  local priority=$1 encoded=$2
+  local priority=$1 condition=$2 encoded=$3
   local chunk_index chunk_id data_path identity_path expected
   IFS=$'\t' read -r chunk_index chunk_id data_path identity_path expected <<< "$encoded"
   local now remaining timeout_seconds
@@ -315,7 +316,7 @@ run_unit() {
   timeout_seconds=$SUBRUN_TIMEOUT_SECONDS
   [ "$timeout_seconds" -le "$remaining" ] || timeout_seconds=$remaining
   ATTEMPT_SEQUENCE=$((ATTEMPT_SEQUENCE + 1))
-  local attempt_name=p${priority}_${ATTEMPT_SEQUENCE}_B2
+  local attempt_name=p${priority}_${ATTEMPT_SEQUENCE}_${condition}
   local unit_dir=$RUN_ROOT/attempts/$attempt_name/$chunk_id
   [ ! -e "$unit_dir" ] || { echo "unit_exists=$unit_dir"; return 24; }
   mkdir -p "$unit_dir"/{video,tb,mpl_config,xdg_cache}
@@ -325,7 +326,54 @@ run_unit() {
   local vo_diagnostics=$unit_dir/vo_diagnostics.jsonl
   local submap_diagnostics=$unit_dir/submap_diagnostics.jsonl
   local oracle_diagnostics=$unit_dir/oracle_place_diagnostics.jsonl
-  local run_id=${MODE}__screen__B2__${attempt_name}__${chunk_id}
+  local run_id=${MODE}__screen__${condition}__${attempt_name}__${chunk_id}
+  local submap_enabled=false
+  local place_memory_enabled=false
+  local oracle_enabled=false
+  local shadow_only=false
+  local overrides=()
+  case "$condition" in
+    B1)
+      ;;
+    B2)
+      submap_enabled=true
+      place_memory_enabled=true
+      oracle_enabled=true
+      shadow_only=true
+      overrides+=(
+        "ascent_submaps.provisional_thresholds=false"
+        "ascent_submaps.handoff_enabled=true"
+        "ascent_submaps.exhaustion_recovery_enabled=true"
+        "ascent_submaps.min_action_endpoints=20"
+        "ascent_submaps.min_anchor_displacement_m=1.5"
+        "ascent_submaps.overlap_threshold=0.35"
+        "ascent_submaps.low_overlap_consecutive=3"
+        "ascent_submaps.gateway_frontier_resolution_radius_m=1.0"
+        "ascent_submaps.gateway_reached_radius_m=0.9"
+        "ascent_submaps.route_min_progress_m=0.30"
+        "ascent_submaps.route_max_stagnation_actions=30"
+        "ascent_submaps.route_max_waypoint_actions=60"
+        "ascent_place_memory.enabled=true"
+        "ascent_place_memory.oracle_enabled=true"
+        "ascent_place_memory.shadow_only=true"
+        "ascent_place_memory.low_gain_area_m2=0.5"
+        "ascent_place_memory.shadow_low_gain_area_m2=1.0"
+        "ascent_place_memory.branch_association_radius_m=0.5"
+        "ascent_place_memory.branch_match_radius_m=1.0"
+        "ascent_place_memory.branch_match_margin_m=0.25"
+        "ascent_place_memory.persistent_frontier_observations=2"
+        "ascent_place_memory.minimum_arrival_observations=2"
+        "ascent_place_memory.minimum_repeat_arrival_observations=3"
+        "ascent_place_memory.minimum_excursion_start_distance_m=1.4"
+        "ascent_place_memory.oracle_physical_planar_radius_m=0.75"
+        "ascent_place_memory.oracle_physical_height_radius_m=0.75"
+        "ascent_place_memory.oracle_min_step_separation=30"
+        "ascent_place_memory.oracle_min_excursion_m=2.0"
+        "ascent_place_memory.oracle_vo_consistent_radius_m=1.5"
+      )
+      ;;
+    *) echo "invalid_condition=$condition"; return 20 ;;
+  esac
   local cmd=(
     "$ASCENT_PYTHON" -u -m ascent.run
     "--config-name=eval_ascent_${DATASET}.yaml"
@@ -341,44 +389,22 @@ run_unit() {
     "habitat_baselines.video_dir=$unit_dir/video"
     "habitat_baselines.tensorboard_dir=$unit_dir/tb"
     "habitat_baselines.eval.video_option=[]"
-    "ascent_submaps.provisional_thresholds=false"
-    "ascent_submaps.handoff_enabled=true"
-    "ascent_submaps.exhaustion_recovery_enabled=true"
-    "ascent_submaps.min_action_endpoints=20"
-    "ascent_submaps.min_anchor_displacement_m=1.5"
-    "ascent_submaps.overlap_threshold=0.35"
-    "ascent_submaps.low_overlap_consecutive=3"
-    "ascent_submaps.gateway_frontier_resolution_radius_m=1.0"
-    "ascent_submaps.gateway_reached_radius_m=0.9"
-    "ascent_submaps.route_min_progress_m=0.30"
-    "ascent_submaps.route_max_stagnation_actions=30"
-    "ascent_submaps.route_max_waypoint_actions=60"
-    "ascent_place_memory.enabled=true"
-    "ascent_place_memory.oracle_enabled=true"
-    "ascent_place_memory.low_gain_area_m2=0.5"
-    "ascent_place_memory.shadow_low_gain_area_m2=1.0"
-    "ascent_place_memory.branch_association_radius_m=0.5"
-    "ascent_place_memory.branch_match_radius_m=1.0"
-    "ascent_place_memory.branch_match_margin_m=0.25"
-    "ascent_place_memory.persistent_frontier_observations=2"
-    "ascent_place_memory.minimum_arrival_observations=2"
-    "ascent_place_memory.minimum_repeat_arrival_observations=3"
-    "ascent_place_memory.minimum_excursion_start_distance_m=1.4"
-    "ascent_place_memory.oracle_physical_planar_radius_m=0.75"
-    "ascent_place_memory.oracle_physical_height_radius_m=0.75"
-    "ascent_place_memory.oracle_min_step_separation=30"
-    "ascent_place_memory.oracle_min_excursion_m=2.0"
-    "ascent_place_memory.oracle_vo_consistent_radius_m=1.5"
+    "${overrides[@]}"
   )
   {
     printf 'cd %q\n' "$SOURCE_ROOT"
-    printf 'ASCENT_SUBMAP_ENABLED=true ASCENT_SUBMAP_ALLOW_PROVISIONAL=false '
-    printf 'ASCENT_SUBMAP_HANDOFF_ENABLED=true '
-    printf 'ASCENT_SUBMAP_EXHAUSTION_RECOVERY_ENABLED=true '
-    printf 'ASCENT_PLACE_MEMORY_ENABLED=true ASCENT_PLACE_ORACLE_ENABLED=true '
+    printf 'ASCENT_SUBMAP_ENABLED=%q ASCENT_SUBMAP_ALLOW_PROVISIONAL=false ' \
+      "$submap_enabled"
+    printf 'ASCENT_SUBMAP_HANDOFF_ENABLED=%q ' "$submap_enabled"
+    printf 'ASCENT_SUBMAP_EXHAUSTION_RECOVERY_ENABLED=%q ' "$submap_enabled"
+    printf 'ASCENT_PLACE_MEMORY_ENABLED=%q ASCENT_PLACE_ORACLE_ENABLED=%q ' \
+      "$place_memory_enabled" "$oracle_enabled"
+    printf 'ASCENT_PLACE_MEMORY_SHADOW_ONLY=%q ' "$shadow_only"
     printf 'ASCENT_VO_DIAGNOSTICS_PATH=%q ASCENT_SUBMAP_DIAGNOSTICS_PATH=%q ' \
       "$vo_diagnostics" "$submap_diagnostics"
-    printf 'ASCENT_PLACE_ORACLE_DIAGNOSTICS_PATH=%q ' "$oracle_diagnostics"
+    if [ "$condition" = B2 ]; then
+      printf 'ASCENT_PLACE_ORACLE_DIAGNOSTICS_PATH=%q ' "$oracle_diagnostics"
+    fi
     printf 'timeout --signal=TERM --kill-after=120s %qs ' "$timeout_seconds"
     printf '%q ' "${cmd[@]}"
     printf '\n'
@@ -386,11 +412,13 @@ run_unit() {
   {
     echo source_commit=$SOURCE_COMMIT
     echo manifest_sha256=$MANIFEST_SHA256
-    echo condition=B2
-    echo method_version=submap_v1.4_oracle_task_memory
-    echo handoff_enabled=1
-    echo exhaustion_recovery_enabled=1
-    echo oracle_identity_only=1
+    echo condition=$condition
+    echo method_version=submap_v1.4_case_audit_shadow
+    echo submap_enabled=$submap_enabled
+    echo handoff_enabled=$submap_enabled
+    echo exhaustion_recovery_enabled=$submap_enabled
+    echo oracle_identity_only=$oracle_enabled
+    echo shadow_only=$shadow_only
     echo oracle_scope=vo_consistent_graph_nondirect_fragmentation_only
     echo place_low_gain_area_m2=0.5
     echo place_shadow_low_gain_area_m2=1.0
@@ -413,23 +441,29 @@ run_unit() {
     echo attempt_priority=$priority
   } > "$unit_dir/code_provenance.txt"
 
-  echo "unit_start priority=$priority condition=B2 chunk=$chunk_id time=$(date -Is)" \
+  echo "unit_start priority=$priority condition=$condition chunk=$chunk_id time=$(date -Is)" \
     | tee -a "$RUN_ROOT/driver.log"
   local status
   if (
-    export ASCENT_SUBMAP_ENABLED=true
+    export ASCENT_SUBMAP_ENABLED=$submap_enabled
     export ASCENT_SUBMAP_ALLOW_PROVISIONAL=false
-    export ASCENT_SUBMAP_HANDOFF_ENABLED=true
-    export ASCENT_SUBMAP_EXHAUSTION_RECOVERY_ENABLED=true
-    export ASCENT_PLACE_MEMORY_ENABLED=true
-    export ASCENT_PLACE_ORACLE_ENABLED=true
+    export ASCENT_SUBMAP_HANDOFF_ENABLED=$submap_enabled
+    export ASCENT_SUBMAP_EXHAUSTION_RECOVERY_ENABLED=$submap_enabled
+    export ASCENT_PLACE_MEMORY_ENABLED=$place_memory_enabled
+    export ASCENT_PLACE_ORACLE_ENABLED=$oracle_enabled
+    export ASCENT_PLACE_MEMORY_SHADOW_ONLY=$shadow_only
     export ASCENT_VO_DIAGNOSTICS_PATH=$vo_diagnostics
     export ASCENT_VO_RUN_ID=$run_id
     export ASCENT_VO_SOURCE_COMMIT=$SOURCE_COMMIT
-    export ASCENT_SUBMAP_DIAGNOSTICS_PATH=$submap_diagnostics
-    export ASCENT_SUBMAP_RUN_ID=$run_id
-    export ASCENT_SUBMAP_SOURCE_COMMIT=$SOURCE_COMMIT
-    export ASCENT_PLACE_ORACLE_DIAGNOSTICS_PATH=$oracle_diagnostics
+    if [ "$condition" = B2 ]; then
+      export ASCENT_SUBMAP_DIAGNOSTICS_PATH=$submap_diagnostics
+      export ASCENT_SUBMAP_RUN_ID=$run_id
+      export ASCENT_SUBMAP_SOURCE_COMMIT=$SOURCE_COMMIT
+      export ASCENT_PLACE_ORACLE_DIAGNOSTICS_PATH=$oracle_diagnostics
+    else
+      unset ASCENT_SUBMAP_DIAGNOSTICS_PATH ASCENT_SUBMAP_RUN_ID
+      unset ASCENT_SUBMAP_SOURCE_COMMIT ASCENT_PLACE_ORACLE_DIAGNOSTICS_PATH
+    fi
     export XDG_CACHE_HOME=$unit_dir/xdg_cache
     export MPLCONFIGDIR=$unit_dir/mpl_config
     cd "$SOURCE_ROOT"
@@ -443,8 +477,15 @@ run_unit() {
     "$unit_dir/service_health_after.log" 0 || post_health=$?
   local vm vs ve vt vp vu sm sr se sv sp su om os oe op ou
   read -r vm vs ve vt vp vu <<< "$(diagnostic_counts "$vo_diagnostics" vo)"
-  read -r sm sr se sv sp su <<< "$(diagnostic_counts "$submap_diagnostics" submap)"
-  read -r om os oe op ou <<< "$(diagnostic_counts "$oracle_diagnostics" oracle)"
+  if [ "$condition" = B2 ]; then
+    read -r sm sr se sv sp su <<< "$(diagnostic_counts "$submap_diagnostics" submap)"
+    read -r om os oe op ou <<< "$(diagnostic_counts "$oracle_diagnostics" oracle)"
+  else
+    sm=0 sr=0 se=0 sv=0 sp=0 su=0
+    om=0 os=0 oe=0 op=0 ou=0
+    submap_diagnostics=""
+    oracle_diagnostics=""
+  fi
   local terminal_class=complete
   if [ "$post_health" -ne 0 ]; then
     terminal_class=infrastructure_failure
@@ -452,22 +493,22 @@ run_unit() {
     terminal_class=process_failure
   elif [ "$vt" -ne 0 ] || [ "$vp" -ne 0 ] || [ "$vu" -ne 0 ] || [ "$vm" -ne 1 ]; then
     terminal_class=logging_failure
-  elif [ "$sm" -ne 1 ] || [ "$sp" -ne 0 ] || [ "$su" -ne 0 ]; then
+  elif [ "$condition" = B2 ] && { [ "$sm" -ne 1 ] || [ "$sp" -ne 0 ] || [ "$su" -ne 0 ]; }; then
     terminal_class=logging_failure
-  elif [ "$om" -ne 1 ] || [ "$op" -ne 0 ] || [ "$ou" -ne 0 ]; then
+  elif [ "$condition" = B2 ] && { [ "$om" -ne 1 ] || [ "$op" -ne 0 ] || [ "$ou" -ne 0 ]; }; then
     terminal_class=logging_failure
   elif [ "$ve" -ne "$expected" ]; then
     terminal_class=incomplete_diagnostics
-  elif [ "$oe" -ne "$expected" ]; then
+  elif [ "$condition" = B2 ] && [ "$oe" -ne "$expected" ]; then
     terminal_class=incomplete_diagnostics
   fi
-  printf '%s,screen,B2,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-    "$priority" "$chunk_id" "$expected" "$status" "$post_health" \
+  printf '%s,screen,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    "$priority" "$condition" "$chunk_id" "$expected" "$status" "$post_health" \
     "$terminal_class" "$vm" "$vs" "$ve" "$vt" "$vp" "$vu" \
     "$sm" "$sr" "$se" "$sv" "$sp" "$su" "$om" "$os" "$oe" "$op" "$ou" \
     "$vo_diagnostics" "$submap_diagnostics" "$oracle_diagnostics" \
     "$identity_path" "$unit_dir/run.log" >> "$INVENTORY"
-  echo "unit_end priority=$priority condition=B2 chunk=$chunk_id status=$status class=$terminal_class vo_ends=$ve oracle_ends=$oe time=$(date -Is)" \
+  echo "unit_end priority=$priority condition=$condition chunk=$chunk_id status=$status class=$terminal_class vo_ends=$ve oracle_ends=$oe time=$(date -Is)" \
     | tee -a "$RUN_ROOT/driver.log"
   case "$terminal_class" in
     complete) return 0 ;;
@@ -480,33 +521,44 @@ run_unit() {
 }
 
 for encoded in "${CHUNK_ROWS[@]}"; do
-  set +e
-  run_unit 0 "$encoded"
-  result=$?
-  set -e
-  case "$result" in
-    0) CONSECUTIVE_PROCESS_FAILURES=0 ;;
-    42|44)
-      FAILED_UNITS+=("$encoded")
-      if [ "$MODE" = full ]; then
-        CONSECUTIVE_PROCESS_FAILURES=$((CONSECUTIVE_PROCESS_FAILURES + 1))
-        [ "$CONSECUTIVE_PROCESS_FAILURES" -lt "$MAX_CONSECUTIVE_PROCESS_FAILURES" ] || exit 42
-      fi
-      ;;
-    *) exit "$result" ;;
-  esac
+  IFS=$'\t' read -r chunk_index _ <<< "$encoded"
+  if [ "$MODE" = smoke ] || [ "$((chunk_index % 2))" = 0 ]; then
+    conditions=(B2 B1)
+  else
+    conditions=(B1 B2)
+  fi
+  for condition in "${conditions[@]}"; do
+    set +e
+    run_unit 0 "$condition" "$encoded"
+    result=$?
+    set -e
+    case "$result" in
+      0) CONSECUTIVE_PROCESS_FAILURES=0 ;;
+      42|44)
+        FAILED_UNITS+=("$condition"$'\t'"$encoded")
+        if [ "$MODE" = full ]; then
+          CONSECUTIVE_PROCESS_FAILURES=$((CONSECUTIVE_PROCESS_FAILURES + 1))
+          [ "$CONSECUTIVE_PROCESS_FAILURES" -lt "$MAX_CONSECUTIVE_PROCESS_FAILURES" ] || exit 42
+        fi
+        ;;
+      *) exit "$result" ;;
+    esac
+  done
 done
 
 if [ "${#FAILED_UNITS[@]}" -gt 0 ]; then
   for failed in "${FAILED_UNITS[@]}"; do
+    IFS=$'\t' read -r condition chunk_index chunk_id data_path identity_path expected <<< "$failed"
+    encoded=$(printf '%s\t%s\t%s\t%s\t%s' \
+      "$chunk_index" "$chunk_id" "$data_path" "$identity_path" "$expected")
     set +e
-    run_unit 1 "$failed"
+    run_unit 1 "$condition" "$encoded"
     result=$?
     set -e
     case "$result" in
       0) ;;
       42|44)
-        echo "technical_retry_exhausted=B2:$failed"
+        echo "technical_retry_exhausted=$condition:$chunk_id"
         if [ "$MODE" = smoke ]; then exit "$result"; fi
         ;;
       *) exit "$result" ;;

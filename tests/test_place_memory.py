@@ -74,9 +74,11 @@ def _three_node_graph() -> tuple[SubmapGraph, SubmapBundle]:
     return graph, current
 
 
-def _enabled_memory() -> PlaceConditionedResidualMemory:
+def _enabled_memory(
+    *, shadow_only: bool = False
+) -> PlaceConditionedResidualMemory:
     return PlaceConditionedResidualMemory(
-        1, PlaceMemoryConfig(enabled=True)
+        1, PlaceMemoryConfig(enabled=True, shadow_only=shadow_only)
     )
 
 
@@ -606,6 +608,54 @@ def test_same_place_identity_requires_matched_repeat_low_gain_before_rerank() ->
     assert no_alternative.reason == "no_live_residual_alternative"
 
 
+def test_shadow_memory_logs_counterfactual_without_claiming_action_change() -> None:
+    graph, current = _three_node_graph()
+    memory = _enabled_memory(shadow_only=True)
+    assert _finish_branch(
+        memory, FakeObstacleMap()
+    ) is SearchBranchStatus.UNRESOLVED
+    historical = memory.branches(0)[0]
+    assert memory.accept_oracle_event(
+        env=0,
+        event=OracleSamePlaceEvent(1, "submap-a"),
+        current_submap_id="submap-c",
+        graph=graph,
+        step=40,
+    )
+    memory.drain_events(0)
+    historical.status = SearchBranchStatus.CONSUMED
+    context = {
+        "schema": "v1_4_case_audit_planner_context_v1",
+        "selection_source": "llm_frontier",
+    }
+    decision = memory.arbitrate(
+        env=0,
+        target="chair",
+        active=current,
+        graph=graph,
+        base_frontier=[2.0, 0.0],
+        base_value=0.9,
+        sorted_frontiers=[[2.0, 0.0], [4.0, 0.0]],
+        sorted_values=[0.9, 0.8],
+        topk=2,
+        step=60,
+        obstacle_map=FakeObstacleMap(),
+        planner_context=context,
+    )
+    assert decision.changed
+    np.testing.assert_allclose(decision.final_frontier, [4.0, 0.0])
+    event = [
+        item
+        for item in memory.drain_events(0)
+        if item["event"] == "place_rerank_evaluated"
+    ][-1]
+    assert event["decision_changed"] is False
+    assert event["counterfactual_changed"] is True
+    assert event["shadow_only"] is True
+    assert len(event["candidate_audit"]) == 2
+    assert event["planner_context"] == context
+
+
 def test_live_repeat_low_gain_is_settled_inside_the_decision_window() -> None:
     graph, current = _three_node_graph()
     memory = _enabled_memory()
@@ -898,6 +948,11 @@ def _planner() -> Ascent_LLM_Planner:
     planner._last_value = [float("-inf")]
     planner._last_frontier = [np.zeros(2)]
     planner._force_frontier = [np.zeros(2)]
+    planner._target_object = ["chair"]
+    planner.frontier_step_list = [[]]
+    planner._case_llm_trace = [{}]
+    planner._case_area_descriptions = [[]]
+    planner._case_multi_floor_trace = [{}]
     planner._sort_frontiers_by_value = lambda *args: (
         np.asarray([[1.0, 0.0], [2.0, 0.0]]),
         [0.9, 0.8],
@@ -915,6 +970,7 @@ def _planner() -> Ascent_LLM_Planner:
 def test_planner_arbitration_is_post_rank_and_rejects_nonlive_goals() -> None:
     planner = _planner()
     obstacle = SimpleNamespace(_finish_first_explore=False)
+    contexts = []
     result, value = planner._get_best_frontier_with_llm(
         [{"robot_xy": np.zeros(2)}],
         [obstacle],
@@ -924,13 +980,16 @@ def test_planner_arbitration_is_post_rank_and_rejects_nonlive_goals() -> None:
         [[]],
         [[]],
         np.asarray([[1.0, 0.0], [2.0, 0.0]]),
-        candidate_arbitrator=lambda base, base_value, points, values: (
-            points[1],
+        candidate_arbitrator=lambda base, base_value, points, values, context: (
+            contexts.append(context) or points[1],
             values[1],
         ),
     )
     np.testing.assert_allclose(result, [2.0, 0.0])
     assert value == pytest.approx(0.8)
+    assert contexts[0]["selection_source"] == "llm_frontier"
+    assert contexts[0]["live_candidate_count"] == 2
+    assert contexts[0]["target_category"] == "chair"
 
     planner = _planner()
     obstacle = SimpleNamespace(_finish_first_explore=False)
@@ -945,4 +1004,42 @@ def test_planner_arbitration_is_post_rank_and_rejects_nonlive_goals() -> None:
             [[]],
             np.asarray([[1.0, 0.0], [2.0, 0.0]]),
             candidate_arbitrator=lambda *args: (np.asarray([9.0, 9.0]), 1.0),
+        )
+
+
+def test_single_frontier_is_audited_without_allowing_new_goal() -> None:
+    planner = _planner()
+    obstacle = SimpleNamespace(_finish_first_explore=False)
+    contexts = []
+    result, value = planner._get_best_frontier_with_llm(
+        [{"robot_xy": np.zeros(2)}],
+        [obstacle],
+        [SimpleNamespace()],
+        [SimpleNamespace()],
+        [[]],
+        [[]],
+        [[]],
+        np.asarray([[1.0, 0.0]]),
+        candidate_arbitrator=lambda base, base_value, points, values, context: (
+            contexts.append(context) or base,
+            base_value,
+        ),
+    )
+    np.testing.assert_allclose(result, [1.0, 0.0])
+    assert value == pytest.approx(1.0)
+    assert contexts[0]["selection_source"] == "single_frontier"
+    with pytest.raises(RuntimeError, match="non-live"):
+        planner._get_best_frontier_with_llm(
+            [{"robot_xy": np.zeros(2)}],
+            [obstacle],
+            [SimpleNamespace()],
+            [SimpleNamespace()],
+            [[]],
+            [[]],
+            [[]],
+            np.asarray([[1.0, 0.0]]),
+            candidate_arbitrator=lambda *args: (
+                np.asarray([9.0, 9.0]),
+                1.0,
+            ),
         )

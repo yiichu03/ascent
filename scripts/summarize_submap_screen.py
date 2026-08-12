@@ -193,6 +193,7 @@ def validate_submap_metadata(
         "submap_v1.1",
         "submap_v1.2",
         "submap_v1.4_oracle_task_memory",
+        "submap_v1.4_case_audit_shadow",
     }:
         v1_1_expected = {
             "split_contract": "vo_anchor_and_rgbd_overlap_joint",
@@ -224,6 +225,7 @@ def validate_submap_metadata(
         if method_version in {
             "submap_v1.2",
             "submap_v1.4_oracle_task_memory",
+            "submap_v1.4_case_audit_shadow",
         }:
             v1_2_expected = {
                 "handoff_enabled": True,
@@ -238,16 +240,25 @@ def validate_submap_metadata(
                         f"submap_metadata:{key}:"
                         f"{metadata.get(key)!r}:{value!r}"
                     )
-        if method_version == "submap_v1.4_oracle_task_memory":
+        if method_version in {
+            "submap_v1.4_oracle_task_memory",
+            "submap_v1.4_case_audit_shadow",
+        }:
             if metadata.get("place_memory_enabled") is not True:
                 errors.append("submap_metadata:place_memory_enabled")
-            if metadata.get("place_memory_contract") != (
-                "opaque_same_place_identity_then_independent_excursion_query"
-            ):
+            expected_contract = (
+                "opaque_same_place_identity_shadow_query_no_action_change"
+                if method_version == "submap_v1.4_case_audit_shadow"
+                else "opaque_same_place_identity_then_independent_excursion_query"
+            )
+            if metadata.get("place_memory_contract") != expected_contract:
                 errors.append("submap_metadata:place_memory_contract")
             place_config = metadata.get("place_memory_config")
             expected_place_config = {
                 "enabled": True,
+                "shadow_only": (
+                    method_version == "submap_v1.4_case_audit_shadow"
+                ),
                 "low_gain_area_m2": 0.5,
                 "shadow_low_gain_area_m2": 1.0,
                 "branch_association_radius_m": 0.5,
@@ -482,6 +493,7 @@ def parse_attempt(
                 "submap_v1.1",
                 "submap_v1.2",
                 "submap_v1.4_oracle_task_memory",
+                "submap_v1.4_case_audit_shadow",
             }:
                 selected_candidates = Counter(
                     str(item.get("candidate_key"))
@@ -536,6 +548,7 @@ def parse_attempt(
             if submap_method_version in {
                 "submap_v1.2",
                 "submap_v1.4_oracle_task_memory",
+                "submap_v1.4_case_audit_shadow",
             }:
                 if events["submap_exhaustion_recovery"] > 1:
                     local_errors.append("recovery_repeated")
@@ -641,7 +654,16 @@ def parse_attempt(
                         if not any(
                             event.get("event") == "place_rerank_evaluated"
                             and event.get("step") == item.get("step")
-                            and event.get("decision_changed") is True
+                            and (
+                                event.get("decision_changed") is True
+                                or (
+                                    submap_method_version
+                                    == "submap_v1.4_case_audit_shadow"
+                                    and event.get("counterfactual_changed")
+                                    is True
+                                    and event.get("shadow_only") is True
+                                )
+                            )
                             for event in episode_submap_events
                         ):
                             local_errors.append(
@@ -878,6 +900,15 @@ def parse_attempt(
             "place_rerank_evaluated_count": len(rerank_events),
             "place_rerank_changed_count": sum(
                 item.get("decision_changed") is True
+                for item in rerank_events
+            ),
+            "place_rerank_counterfactual_changed_count": sum(
+                item.get("counterfactual_changed") is True
+                for item in rerank_events
+            ),
+            "place_rerank_candidate_snapshot_count": sum(
+                isinstance(item.get("candidate_audit"), list)
+                and isinstance(item.get("planner_context"), dict)
                 for item in rerank_events
             ),
             "place_intervention_types": dict(
